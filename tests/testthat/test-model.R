@@ -135,6 +135,40 @@ test_that("run_det_cd vaccination (alpha < 1) reduces cumulative attack rate", {
 })
 
 # ---------------------------------------------------------------------------
+# sparse vs dense equivalence
+# ---------------------------------------------------------------------------
+
+test_that("sparse run_det_cd matches dense on a binary contact matrix", {
+  skip_if_not_installed("odin2")
+  skip_if_not_installed("dust2")
+
+  # 4-node binary network: nodes 1,2 unvaccinated; 3,4 vaccinated
+  cm <- matrix(c(0,1,1,0,
+                 1,0,0,1,
+                 1,0,0,1,
+                 0,1,1,0), nrow=4, byrow=TRUE)
+  N       <- c(500, 500, 500, 500)
+  t       <- 50
+  beta_day <- rep(0.5, t)
+  I_ini   <- c(2, 0, 0, 0)
+  sus     <- c(1, 1, 0.5, 0.5)
+
+  res_dense  <- run_det_cd(cm, beta_day, N, t, I_ini,
+                           susceptibility = sus, gamma = 1/3, sparse = FALSE)
+  res_sparse <- run_det_cd(cm, beta_day, N, t, I_ini,
+                           susceptibility = sus, gamma = 1/3, sparse = TRUE)
+
+  # CRR should agree closely (ODE solvers differ, so allow small tolerance)
+  expect_equal(tail(res_sparse$main$CRR, 1),
+               tail(res_dense$main$CRR,  1),
+               tolerance = 1e-3)
+
+  # Cumulative cases should agree within 1 person
+  expect_equal(res_sparse$main$vac,   res_dense$main$vac,   tolerance = 1)
+  expect_equal(res_sparse$main$unvac, res_dense$main$unvac, tolerance = 1)
+})
+
+# ---------------------------------------------------------------------------
 # run_det_ncd
 # ---------------------------------------------------------------------------
 

@@ -5,8 +5,9 @@
 
 #odin_model <- odin.dust::odin_dust("odinmodel.R")
 
-det_model_cd <- odin::odin("det_mod_cd.R")
+det_model_cd  <- odin::odin("det_mod_cd.R")
 det_model_ncd <- odin::odin("det_mod_ncd.R")
+det_model_adj <- odin2::odin("det_mod_adj.R")
 
 #det_model_hazard <- odin::odin("det_hazard.R")
 #det_non_linear <- odin::odin("simple_non_linear.R")
@@ -311,32 +312,119 @@ get_frailty <- function(mean=0.5, sd=1, n=100){
 
 
 
+# Convert a binary contact matrix to a padded adjacency list suitable for
+# det_model_adj.  Returns a list with:
+#   neighbors  — integer matrix [max_degree x n], padded with 1
+#   degree     — integer vector [n]
+#   max_degree — scalar
+contact_matrix_to_adj <- function(contact_matrix) {
+  n <- nrow(contact_matrix)
+  adj <- lapply(1:n, function(i) which(contact_matrix[i, ] != 0))
+  degree <- lengths(adj)
+  max_degree <- max(degree, 1L)
+  neighbors <- matrix(1L,  nrow = max_degree, ncol = n)
+  mask      <- matrix(0L,  nrow = max_degree, ncol = n)
+  for (i in seq_len(n)) {
+    if (degree[i] > 0) {
+      neighbors[1:degree[i], i] <- adj[[i]]
+      mask[1:degree[i], i]      <- 1L
+    }
+  }
+  list(neighbors = neighbors, mask = mask, max_degree = max_degree)
+}
+
 run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
                       beta_norm=NULL,
                       susceptibility=NULL,
                       transmisibility=NULL, gamma=1/3,
                       waning=0,
-                      import=0){
+                      import=0,
+                      sparse=FALSE){
   if(is.null(beta_norm)) beta_norm <- N
   if(is.null(susceptibility)) susceptibility <- rep(1, dim(mixing_matrix)[1])
   if(is.null(transmisibility)) transmisibility <- rep(1, dim(mixing_matrix)[1])
   n <- dim(mixing_matrix)[1]
-  params <- list(
-    n=dim(mixing_matrix)[1],
-    S_ini=N - I_ini,
-    I_ini=I_ini,
-    mixing_matrix=mixing_matrix,
-    beta_day=beta_day,
-    beta_norm=beta_norm,
-    susceptibility=susceptibility,
-    transmisibility=transmisibility,
-    N_steps=t,
-    waning=waning,
-    interpolation_time=1:t,
-    import=import,
-    gamma=gamma
-  )
-  model <-det_model_cd$new(user=params)
+
+  if (sparse) {
+    # odin2/dust2 path — O(edges) FOI via adjacency list
+    adj <- contact_matrix_to_adj(mixing_matrix)
+    # beta_day can be a vector; odin2 model takes a scalar beta so use mean
+    beta_scalar <- mean(beta_day)
+    params <- list(
+      n=as.integer(n),
+      max_degree=as.integer(adj$max_degree),
+      beta=beta_scalar,
+      gamma=gamma,
+      waning=waning,
+      neighbors=adj$neighbors,
+      mask=adj$mask,
+      susceptibility=susceptibility,
+      transmisibility=transmisibility,
+      S_ini=N - I_ini,
+      I_ini=I_ini
+    )
+    sys <- dust2::dust_system_create(det_model_adj, params, time=0)
+    dust2::dust_system_set_state_initial(sys)
+    # state order: S[1..n], I[1..n], R[1..n], C[1..n]
+    raw <- dust2::dust_system_simulate(sys, 1:t)  # [4n, t]
+    S_mat <- raw[1:n, ]
+    C_mat <- raw[(3*n+1):(4*n), ]
+    # approximate n_SI from dC/dt (finite differences)
+    nSI_mat <- cbind(C_mat[, 1, drop=FALSE],
+                     C_mat[, 2:t] - C_mat[, 1:(t-1)])
+
+    # build full_results data frame compatible with dense path
+    full_res <- as.data.frame(t(rbind(S_mat, C_mat)))
+    colnames(full_res) <- c(paste0("S[", 1:n, "]"), paste0("C[", 1:n, "]"))
+    for (k in 1:n) full_res[[paste0("n_SI[", k, "]")]] <- nSI_mat[k, ]
+    full_res[["t"]] <- 1:t
+
+    C1   <- colSums(C_mat[1:(n/2), , drop=FALSE])
+    C2   <- colSums(C_mat[(n/2+1):n, , drop=FALSE])
+    S1   <- colSums(S_mat[1:(n/2), , drop=FALSE])
+    S2   <- colSums(S_mat[(n/2+1):n, , drop=FALSE])
+    nSI1 <- colSums(nSI_mat[1:(n/2), , drop=FALSE])
+    nSI2 <- colSums(nSI_mat[(n/2+1):n, , drop=FALSE])
+
+    main_comp <- data.frame(
+      t        = 1:t,
+      CRR      = (C2/sum(N[(n/2+1):n])) / (C1/sum(N[1:(n/2)])),
+      HR       = (nSI2/S2) / (nSI1/S1),
+      exposure = C1/sum(N[1:(n/2)]),
+      unvac    = C1,
+      vac      = C2
+    )
+    ind_comp <- list()
+    for (k in 1:(n/2)) {
+      tmp <- data.frame(
+        t        = 1:t,
+        exposure = C_mat[k, ] / N[k],
+        CRR      = (C_mat[n/2+k, ]/N[n/2+k]) / (C_mat[k, ]/N[k]),
+        HR       = (nSI_mat[n/2+k, ]/S_mat[n/2+k, ]) / (nSI_mat[k, ]/S_mat[k, ]),
+        i        = as.character(k)
+      )
+      ind_comp[[k]] <- tmp
+    }
+    return(list(main=main_comp, ind=rbindlist(ind_comp, fill=TRUE),
+                full_results=full_res))
+  } else {
+    params <- list(
+      n=n,
+      S_ini=N - I_ini,
+      I_ini=I_ini,
+      mixing_matrix=mixing_matrix,
+      beta_day=beta_day,
+      beta_norm=beta_norm,
+      susceptibility=susceptibility,
+      transmisibility=transmisibility,
+      N_steps=t,
+      waning=waning,
+      interpolation_time=1:t,
+      import=import,
+      gamma=gamma
+    )
+    model <- det_model_cd$new(user=params)
+  }
  
   res <- model$run(1:t)
 
