@@ -130,9 +130,9 @@ run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100,vac_frac=0.
   susept <- rep(1, N)
   susept[vac] <- alpha
   non_vac <- setdiff(1:N, vac)
-  res <- run_det_cd(c_ij, rep(N*beta/k_mean, t), rep(1,N), t, I_ini=c(1,1,rep(0, N-2)), gamma=gamma, beta_norm=rep(1, N), susceptibility=susept)
+  res <- run_det_cd(c_ij, rep(N*beta/k_mean, t), rep(1,N), t, I_ini=c(1,1,rep(0, N-2)), gamma=gamma, beta_norm=rep(1, N), susceptibility=susept, sparse=TRUE)
 
-  sum <- data.frame(t=res$full_results[,1], vac=rowSums(res$full_results[, paste("C[", vac, "]", sep="")]), unvac=rowSums(res$full_results[, paste("C[", non_vac, "]", sep="")]))
+  sum <- data.frame(t=res$full_results[["t"]], vac=rowSums(res$full_results[, paste("C[", vac, "]", sep="")]), unvac=rowSums(res$full_results[, paste("C[", non_vac, "]", sep="")]))
   sum$CRR <- (sum$vac/(vac_frac*N))/(sum$unvac/((1-vac_frac)*N))
 sum  
   return(list(sum=sum, full=res$full_results))
