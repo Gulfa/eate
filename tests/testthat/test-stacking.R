@@ -10,7 +10,7 @@ skip_if_not_installed("adaptivetau")
 
 if (!exists("run_stacking")) {
   # When run via test_dir(), working dir is tests/testthat; ../../ is project root
-  source("../../stacking.R")
+  source("../../stoch_model.R")
 }
 
 library(dplyr)

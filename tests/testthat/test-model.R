@@ -14,7 +14,7 @@ library(dplyr)
 # Source once per session; guard against re-sourcing
 if (!exists("det_model_cd")) {
   # When run via test_dir(), working dir is tests/testthat; ../../ is project root
-  source("../../model.R", chdir = TRUE)
+  source("../../det_model.R", chdir = TRUE)
 }
 
 # ---------------------------------------------------------------------------
