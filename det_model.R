@@ -40,18 +40,19 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
     sys <- dust2::dust_system_create(det_model_adj, params, time=0)
     dust2::dust_system_set_state_initial(sys)
     # state order: S[1..n], I[1..n], R[1..n], C[1..n]
-    raw <- dust2::dust_system_simulate(sys, 1:t)  # [4n, t]
+    raw <- dust2::dust_system_simulate(sys, 0:t)  # [4n, t]
     S_mat <- raw[1:n, ]
+    I_mat <- raw[(n+1):(2*n), ]
     C_mat <- raw[(3*n+1):(4*n), ]
     # approximate n_SI from dC/dt (finite differences)
-    nSI_mat <- cbind(C_mat[, 1, drop=FALSE],
+    nSI_mat <- cbind(matrix(0, nrow=n, ncol=1, ), C_mat[, 1, drop=FALSE],
                      C_mat[, 2:t] - C_mat[, 1:(t-1)])
 
     # build full_results data frame compatible with dense path
-    full_res <- as.data.frame(t(rbind(S_mat, C_mat)))
-    colnames(full_res) <- c(paste0("S[", 1:n, "]"), paste0("C[", 1:n, "]"))
+    full_res <- as.data.frame(t(rbind(S_mat, I_mat, C_mat)))
+    colnames(full_res) <- c(paste0("S[", 1:n, "]"), paste0("I[", 1:n, "]"), paste0("C[", 1:n, "]"))
     for (k in 1:n) full_res[[paste0("n_SI[", k, "]")]] <- nSI_mat[k, ]
-    full_res[["t"]] <- 1:t
+    full_res[["t"]] <- 0:t
 
     C1   <- colSums(C_mat[1:(n/2), , drop=FALSE])
     C2   <- colSums(C_mat[(n/2+1):n, , drop=FALSE])
@@ -61,22 +62,22 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
     nSI2 <- colSums(nSI_mat[(n/2+1):n, , drop=FALSE])
 
     main_comp <- data.frame(
-      t        = 1:t,
+      t        = 0:t,
       CRR      = (C2/sum(N[(n/2+1):n])) / (C1/sum(N[1:(n/2)])),
       HR       = (nSI2/S2) / (nSI1/S1),
       exposure = C1/sum(N[1:(n/2)]),
       unvac    = C1,
       vac      = C2
-    )
+    )[-1, ]
     ind_comp <- list()
     for (k in 1:(n/2)) {
       tmp <- data.frame(
-        t        = 1:t,
+        t        = 0:t,
         exposure = C_mat[k, ] / N[k],
         CRR      = (C_mat[n/2+k, ]/N[n/2+k]) / (C_mat[k, ]/N[k]),
         HR       = (nSI_mat[n/2+k, ]/S_mat[n/2+k, ]) / (nSI_mat[k, ]/S_mat[k, ]),
         i        = as.character(k)
-      )
+      )[-1, ]
       ind_comp[[k]] <- tmp
     }
     return(list(main=main_comp, ind=rbindlist(ind_comp, fill=TRUE),
@@ -290,33 +291,76 @@ get_eate_frailty <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_
 }
 
 
-get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10){
+get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, frozen_field=FALSE, k_mean=6, slowdown=1, mc.cores=10){
   if(is.null(c_ij)){
     c_ij <- get_conact_matrix_pl(N, pl_alpha)
   }
 
   run_vac <- function(){
     vac <- sample(1:N, f*N)
-    full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac)
+    full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean)
     denom <- rep(0, t)
     num   <- rep(0, t)
-    for(k in 1:N){
-      if(k %in% vac){
-        num <- num + full_res$full[, paste("C[", k, "]", sep="")]
-        vac_to_run <- vac[vac!=k]
-        res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
-        denom <- denom + res_mk$full[, paste("C[", k, "]", sep="")]
-      }else{
-        denom <- denom + full_res$full[, paste("C[", k, "]", sep="")]
-        vac_to_run <- c(vac, k)
-        res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
-        num <- num + res_k$full[, paste("C[", k, "]", sep="")]
-      }
-    }
-    return(data.frame(t=1:t, eate=num/denom, CRR=full_res$sum$CRR, sim=runif(1)))
-  }
 
-  res <- parallel::mclapply(1:n_vac, function(i) run_vac(), mc.cores=10)
+    if(frozen_field){
+      t_slow <- t * slowdown
+      full_res_slow <- run_mean_field(beta=beta/slowdown, N=N, alpha=alpha, t=t_slow,
+                                      vac_frac=f, gamma=1/slowdown, c_ij=c_ij, vac=vac, k_mean=k_mean)
+      # rows in full_res_slow$full corresponding to original time points 1:t
+      slow_rows <- seq(slowdown + 1, t_slow + 1, by = slowdown)
+
+      Is <- as.matrix(full_res_slow$full[, paste("I[", 1:N, "]", sep="")])
+      FI <- (Is %*% t(c_ij)) / k_mean   # normalize so beta/gamma = R0
+      funcs <- lapply(1:N, function(k) approxfun(0:t_slow, FI[, k], rule=2))
+
+      rhs <- function(time, y, parms) {
+        foi <- vapply(funcs, function(f) f(time), numeric(1))
+        dS <- -parms$alpha * (beta/slowdown) * foi * y
+        list(dS)
+      }
+
+      y0 <- c(0, 0, rep(1, N-2))
+      names(y0) <- paste0("S", 1:N)
+
+      out_nv <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=1))
+      out_v  <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=alpha))
+      out_nv[out_nv < 1e-10] <- 0
+      out_v[out_v   < 1e-10] <- 0
+      for(k in 1:N){
+        if(k %in% vac){
+          num   <- num   + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
+          denom <- denom + 1 - out_nv[slow_rows, k+1]
+        }else{
+          denom <- denom + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
+          num   <- num   + 1 - out_v[slow_rows, k+1]
+        }
+      }
+      return(data.frame(t=1:t, eate=num/denom,
+                        CRR=full_res_slow$sum$CRR[seq(slowdown, t_slow, by=slowdown)],
+                        sim=runif(1)))
+
+    }else{
+
+
+    for(k in 1:N){
+        if(k %in% vac){
+          num <- num + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
+          vac_to_run <- vac[vac!=k]
+          res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
+          denom <- denom + res_mk$full[2:(t+1), paste("C[", k, "]", sep="")]
+        }else{
+          denom <- denom + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
+          vac_to_run <- c(vac, k)
+          res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
+          num <- num + res_k$full[2:(t+1), paste("C[", k, "]", sep="")]
+        }
+      }
+      }
+    return(data.frame(t=1:t, eate=num/denom, CRR=full_res$sum$CRR[-1], sim=runif(1)))
+  }
+  
+
+  res <- parallel::mclapply(1:n_vac, function(i) run_vac(), mc.cores=mc.cores)
   return(rbindlist(res))
 }
 

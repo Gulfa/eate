@@ -49,7 +49,7 @@ dim(foi) <- n
 
 N_total <- sum(S) + sum(I) + sum(R)
 
-deriv(S[]) <- -S[i] * susceptibility[i] * foi[i] - R[i] * waning
+deriv(S[]) <- -S[i] * susceptibility[i] * foi[i] + R[i] * waning
 deriv(I[]) <-  S[i] * susceptibility[i] * foi[i] - I[i] * gamma
 deriv(R[]) <-  I[i] * gamma - R[i] * waning
 deriv(C[]) <-  S[i] * susceptibility[i] * foi[i]

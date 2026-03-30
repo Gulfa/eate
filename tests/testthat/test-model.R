@@ -169,6 +169,43 @@ test_that("sparse run_det_cd matches dense on a binary contact matrix", {
 })
 
 # ---------------------------------------------------------------------------
+# frozen_field approximation in get_eate_network
+# ---------------------------------------------------------------------------
+
+test_that("frozen_field EATE mean agrees with exact method (within 15%)", {
+  skip_if_not_installed("odin2")
+  skip_if_not_installed("dust2")
+  skip_if_not_installed("deSolve")
+
+  set.seed(42)
+  N <- 30
+  t <- 8
+
+  # Fixed Erdos-Renyi-like contact matrix (symmetric, no self-loops)
+  set.seed(42)
+  c_ij <- matrix(0, N, N)
+  for (i in 1:(N-1)) for (j in (i+1):N) {
+    c_ij[i,j] <- c_ij[j,i] <- rbinom(1, 1, 6/N)
+  }
+  # Ensure no isolated nodes
+  for (i in 1:N) if (sum(c_ij[i,]) == 0) { j <- sample(setdiff(1:N, i), 1); c_ij[i,j] <- c_ij[j,i] <- 1 }
+  k_mean <- mean(rowSums(c_ij))
+
+  set.seed(1)
+  res_exact  <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N, t=t,
+                                  c_ij=c_ij, n_vac=30, frozen_field=FALSE, k_mean=k_mean, mc.cores=1)
+  set.seed(1)
+  res_frozen <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N, t=t,
+                                  c_ij=c_ij, n_vac=30, frozen_field=TRUE, slowdown=5, k_mean=k_mean, mc.cores=1)
+
+  mean_exact  <- mean(res_exact$eate[res_exact$t   == t])
+  mean_frozen <- mean(res_frozen$eate[res_frozen$t == t])
+
+  tol <- abs(mean_exact) * 0.15
+  expect_equal(mean_frozen, mean_exact, tolerance = tol)
+})
+
+# ---------------------------------------------------------------------------
 # run_det_ncd
 # ---------------------------------------------------------------------------
 
