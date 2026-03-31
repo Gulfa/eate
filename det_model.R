@@ -14,7 +14,8 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
                        transmisibility=NULL, gamma=1/3,
                        waning=0,
                        import=0,
-                       sparse=FALSE){
+                       sparse=FALSE, 
+                       delta_t=1){
   if(is.null(beta_norm)) beta_norm <- N
   if(is.null(susceptibility)) susceptibility <- rep(1, dim(mixing_matrix)[1])
   if(is.null(transmisibility)) transmisibility <- rep(1, dim(mixing_matrix)[1])
@@ -100,8 +101,8 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
     )
     model <- det_model_cd$new(user=params)
   }
-
-  res <- model$run(1:t)
+  ts <- seq(1, t, by=delta_t)
+  res <- model$run(ts)
   res <- as.data.frame(res)
   setDT(res)
   C1 <- rowSums(res[,paste("C[", 1:(n/2), "]", sep=""), with=FALSE])
@@ -109,7 +110,7 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
   hazard1 <- rowSums(res[,paste("n_SI[", 1:(n/2), "]", sep=""), with=FALSE]) / rowSums(res[,paste("S[", 1:(n/2), "]", sep=""), with=FALSE])
   hazard2 <- rowSums(res[,paste("n_SI[", (n/2+1):(n), "]", sep=""), with=FALSE]) / rowSums(res[,paste("S[", (n/2+1):(n), "]", sep=""), with=FALSE])
 
-  main_comp <- data.frame(t=1:t,
+  main_comp <- data.frame(t=ts,
     CRR= (C2/sum(N[(n/2+1):n]))/(C1/sum(N[1:(n/2)])),
     HR=hazard2/hazard1,
     exposure=(C1/sum(N[1:(n/2)])),
@@ -118,7 +119,7 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
 
   ind_comp <- list()
   for(i in 1:(n/2)){
-    tmp <- data.frame(t=1:t,
+    tmp <- data.frame(t=ts,
       exposure=res[, paste("C[", i, "]", sep=""), with=FALSE]/N[i],
       CRR=(res[, paste("C[", (n/2+i), "]", sep=""), with=FALSE]/N[(n/2+i)])/(res[, paste("C[", i, "]", sep=""), with=FALSE]/N[i]),
       HR=(res[, paste("n_SI[", (n/2+i), "]", sep=""), with=FALSE]/res[, paste("S[", (n/2+i), "]", sep=""), with=FALSE])/(res[, paste("n_SI[", i, "]", sep=""), with=FALSE]/res[, paste("S[", i, "]", sep=""), with=FALSE]),
@@ -257,9 +258,11 @@ run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0
   if(is.null(vac)){
     vac <- sample(1:N, vac_frac*N)
   }
+  
   susept <- rep(1, N)
   susept[vac] <- alpha
   non_vac <- setdiff(1:N, vac)
+  
   res <- run_det_cd(c_ij, rep(N*beta/k_mean, t), rep(1,N), t, I_ini=c(1,1,rep(0, N-2)), gamma=gamma, beta_norm=rep(1, N), susceptibility=susept, sparse=TRUE)
 
   sum <- data.frame(t=res$full_results[["t"]], vac=rowSums(res$full_results[, paste("C[", vac, "]", sep="")]), unvac=rowSums(res$full_results[, paste("C[", non_vac, "]", sep="")]))
@@ -291,74 +294,97 @@ get_eate_frailty <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_
 }
 
 
-get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, frozen_field=FALSE, k_mean=6, slowdown=1, mc.cores=10){
+get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, method="exact", k_mean=6, slowdown=1, mc.cores=10){
+  method <- match.arg(method, c("exact", "frozen", "both"))
   if(is.null(c_ij)){
     c_ij <- get_conact_matrix_pl(N, pl_alpha)
   }
 
-  run_vac <- function(){
-    vac <- sample(1:N, f*N)
-    full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean)
+  run_frozen <- function(vac, full_res_slow){
     denom <- rep(0, t)
     num   <- rep(0, t)
+    t_slow    <- t * slowdown
+    slow_rows <- seq(slowdown + 1, t_slow + 1, by = slowdown)
 
-    if(frozen_field){
+    Is <- as.matrix(full_res_slow$full[, paste("I[", 1:N, "]", sep="")])
+    FI <- (Is %*% t(c_ij)) / k_mean
+    funcs <- lapply(1:N, function(k) approxfun(0:t_slow, FI[, k], rule=2))
+
+    rhs <- function(time, y, parms) {
+      foi <- vapply(funcs, function(f) f(time), numeric(1))
+      list(-parms$alpha * (beta/slowdown) * foi * y)
+    }
+
+    y0 <- c(0, 0, rep(1, N-2))
+    names(y0) <- paste0("S", 1:N)
+
+    out_nv <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=1))
+    out_v  <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=alpha))
+    out_nv[out_nv < 1e-10] <- 0
+    out_v[out_v   < 1e-10] <- 0
+
+    for(k in 1:N){
+      if(k %in% vac){
+        num   <- num   + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
+        denom <- denom + 1 - out_nv[slow_rows, k+1]
+      }else{
+        denom <- denom + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
+        num   <- num   + 1 - out_v[slow_rows, k+1]
+      }
+    }
+    list(
+      eate = data.frame(t=1:t, eate=num/denom, method="frozen"),
+      crr  = full_res_slow$sum$CRR[slow_rows]
+    )
+  }
+
+  run_exact <- function(vac, full_res){
+    denom <- rep(0, t)
+    num   <- rep(0, t)
+    for(k in 1:N){
+      if(k %in% vac){
+        num   <- num   + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
+        res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac[vac!=k], k_mean=k_mean)
+        denom <- denom + res_mk$full[2:(t+1), paste("C[", k, "]", sep="")]
+      }else{
+        denom <- denom + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
+        res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=c(vac, k), k_mean=k_mean)
+        num   <- num   + res_k$full[2:(t+1), paste("C[", k, "]", sep="")]
+      }
+    }
+    list(
+      eate = data.frame(t=1:t, eate=num/denom, method="exact"),
+      crr  = full_res$sum$CRR[-1]
+    )
+  }
+
+  run_vac <- function(){
+    vac      <- sample(1:N, f*N)
+    sim_id   <- runif(1)
+    results  <- list()
+    crr      <- NULL
+
+    if(method %in% c("exact", "both")){
+      full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean)
+      r <- run_exact(vac, full_res)
+      r$eate$sim <- sim_id
+      results[["exact"]] <- r$eate
+      crr <- r$crr
+    }
+
+    if(method %in% c("frozen", "both")){
       t_slow <- t * slowdown
       full_res_slow <- run_mean_field(beta=beta/slowdown, N=N, alpha=alpha, t=t_slow,
                                       vac_frac=f, gamma=1/slowdown, c_ij=c_ij, vac=vac, k_mean=k_mean)
-      # rows in full_res_slow$full corresponding to original time points 1:t
-      slow_rows <- seq(slowdown + 1, t_slow + 1, by = slowdown)
+      r <- run_frozen(vac, full_res_slow)
+      r$eate$sim <- sim_id
+      results[["frozen"]] <- r$eate
+      if(is.null(crr)) crr <- r$crr
+    }
 
-      Is <- as.matrix(full_res_slow$full[, paste("I[", 1:N, "]", sep="")])
-      FI <- (Is %*% t(c_ij)) / k_mean   # normalize so beta/gamma = R0
-      funcs <- lapply(1:N, function(k) approxfun(0:t_slow, FI[, k], rule=2))
-
-      rhs <- function(time, y, parms) {
-        foi <- vapply(funcs, function(f) f(time), numeric(1))
-        dS <- -parms$alpha * (beta/slowdown) * foi * y
-        list(dS)
-      }
-
-      y0 <- c(0, 0, rep(1, N-2))
-      names(y0) <- paste0("S", 1:N)
-
-      out_nv <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=1))
-      out_v  <- deSolve::ode(y=y0, times=0:t_slow, func=rhs, parms=list(alpha=alpha))
-      out_nv[out_nv < 1e-10] <- 0
-      out_v[out_v   < 1e-10] <- 0
-      for(k in 1:N){
-        if(k %in% vac){
-          num   <- num   + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
-          denom <- denom + 1 - out_nv[slow_rows, k+1]
-        }else{
-          denom <- denom + full_res_slow$full[slow_rows, paste("C[", k, "]", sep="")]
-          num   <- num   + 1 - out_v[slow_rows, k+1]
-        }
-      }
-      return(data.frame(t=1:t, eate=num/denom,
-                        CRR=full_res_slow$sum$CRR[seq(slowdown, t_slow, by=slowdown)],
-                        sim=runif(1)))
-
-    }else{
-
-
-    for(k in 1:N){
-        if(k %in% vac){
-          num <- num + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
-          vac_to_run <- vac[vac!=k]
-          res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
-          denom <- denom + res_mk$full[2:(t+1), paste("C[", k, "]", sep="")]
-        }else{
-          denom <- denom + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
-          vac_to_run <- c(vac, k)
-          res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac_to_run)
-          num <- num + res_k$full[2:(t+1), paste("C[", k, "]", sep="")]
-        }
-      }
-      }
-    return(data.frame(t=1:t, eate=num/denom, CRR=full_res$sum$CRR[-1], sim=runif(1)))
+    results[["CRR"]] <- data.frame(t=1:t, eate=crr, method="CRR", sim=sim_id)
+    rbindlist(results)
   }
-  
 
   res <- parallel::mclapply(1:n_vac, function(i) run_vac(), mc.cores=mc.cores)
   return(rbindlist(res))
@@ -447,18 +473,44 @@ get_individual_effect <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibil
 }
 
 
+
+
 get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1), t=500){
-  full_1  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)-1, N*vac_frac+1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma)
-  full_0  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac),   N*vac_frac),   t, c(0.1,0), susceptibility=susceptibility, gamma=gamma)
-  full_m1 <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)+1, N*vac_frac-1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma)
+  full_1  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)-1, N*vac_frac+1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
+  full_0  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac),   N*vac_frac),   t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
+  full_m1 <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)+1, N*vac_frac-1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
 
-  num   <- (1-vac_frac)*full_1$full_results[, "C[2]"] + vac_frac*full_0$full_results[, "C[2]"]
-  denom <- (1-vac_frac)*full_0$full_results[, "C[1]"] + vac_frac*full_m1$full_results[, "C[1]"]
+  num   <- (N*(1-vac_frac))/(N*vac_frac+1)*full_1$full_results[, "C[2]"] + full_0$full_results[, "C[2]"]
+  denom <- full_0$full_results[, "C[1]"] + (N*vac_frac)/(N*(1-vac_frac)+1)*full_m1$full_results[, "C[1]"]
 
+
+  # frozen fields
+
+  foi <- beta * (full_0$full_results[, "I[1]"] + full_0$full_results[, "I[2]"])/N
+  ts <- full_0$full_results[, "t"]
+  foi <- approxfun(ts, foi, rule=2)
+    rhs <- function(time, y, parms) {
+      
+      dS <- -parms$alpha  * foi(time) * y
+      list(dS)
+    }
+  
+    out_nv <- deSolve::ode(y=1, times=ts, func=rhs, parms=list(alpha=1, beta=beta), method="ode45")
+    out_v  <- deSolve::ode(y=1, times=ts, func=rhs, parms=list(alpha=susceptibility[2], beta=beta), method="ode45")
+  
+  num_frozen <- (1-vac_frac)*(1- out_v[, 2])*N + full_0$full_results[, "C[2]"]
+  denom_frozen <- full_0$full_results[, "C[1]"] + vac_frac*(1 - out_nv[, 2])*N
+  
+  
+
+  num_all_frozen   <- (1-vac_frac)*N*(1-out_v[,2]) + vac_frac*N*(1-out_v[,2])  # = N*(1-out_v[,2])
+  denom_all_frozen <- (1-vac_frac)*N*(1-out_nv[,2]) + vac_frac*N*(1-out_nv[,2])  # = N*(1-out_nv[,2])
+  num_all_frozen/denom_all_frozen
   return(data.frame(t=full_1$main[, "t"],
                     attack_rate=full_0$main$unvac/(N*(1-vac_frac)),
                     eate=num/denom,
-                    CRR=full_0$full_results[, "C[2]"]/(N*vac_frac) / (full_0$full_results[, "C[1]"]/(N*(1-vac_frac)))))
+                    CRR=full_0$full_results[, "C[2]"]/(N*vac_frac) / (full_0$full_results[, "C[1]"]/(N*(1-vac_frac))),
+                    eate_frozen=num_frozen/denom_frozen))
 }
 
 

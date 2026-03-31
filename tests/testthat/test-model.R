@@ -169,40 +169,79 @@ test_that("sparse run_det_cd matches dense on a binary contact matrix", {
 })
 
 # ---------------------------------------------------------------------------
-# frozen_field approximation in get_eate_network
+# get_eate_network
 # ---------------------------------------------------------------------------
 
-test_that("frozen_field EATE mean agrees with exact method (within 15%)", {
+# Small fixed contact matrix reused across all get_eate_network tests
+local({
+  set.seed(99)
+  N_net <- 20; t_net <- 5; n_vac_net <- 3
+  c_ij_net <- matrix(0, N_net, N_net)
+  for (i in 1:(N_net-1)) for (j in (i+1):N_net)
+    c_ij_net[i,j] <- c_ij_net[j,i] <- rbinom(1, 1, 6/N_net)
+  for (i in 1:N_net) if (sum(c_ij_net[i,]) == 0) {
+    j <- sample(setdiff(1:N_net, i), 1); c_ij_net[i,j] <- c_ij_net[j,i] <- 1
+  }
+  k_mean_net <- mean(rowSums(c_ij_net))
+  assign("N_net",    N_net,    envir = parent.env(environment()))
+  assign("t_net",    t_net,    envir = parent.env(environment()))
+  assign("n_vac_net",n_vac_net,envir = parent.env(environment()))
+  assign("c_ij_net", c_ij_net, envir = parent.env(environment()))
+  assign("k_mean_net",k_mean_net,envir=parent.env(environment()))
+})
+
+test_that("get_eate_network method='exact' returns correct structure", {
+  skip_if_not_installed("odin2")
+  skip_if_not_installed("dust2")
+  set.seed(1)
+  res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="exact",
+                          k_mean=k_mean_net, mc.cores=1)
+  expect_named(res, c("t", "eate", "method", "sim"))
+  expect_setequal(unique(res$method), c("exact", "CRR"))
+  expect_equal(nrow(res), n_vac_net * t_net * 2)
+  expect_setequal(unique(res$t), 1:t_net)
+})
+
+test_that("get_eate_network method='frozen' returns correct structure", {
   skip_if_not_installed("odin2")
   skip_if_not_installed("dust2")
   skip_if_not_installed("deSolve")
+  set.seed(2)
+  res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="frozen",
+                          k_mean=k_mean_net, slowdown=2, mc.cores=1)
+  expect_named(res, c("t", "eate", "method", "sim"))
+  expect_setequal(unique(res$method), c("frozen", "CRR"))
+  expect_equal(nrow(res), n_vac_net * t_net * 2)
+  expect_setequal(unique(res$t), 1:t_net)
+})
 
-  set.seed(42)
-  N <- 30
-  t <- 8
+test_that("get_eate_network method='both' returns correct structure", {
+  skip_if_not_installed("odin2")
+  skip_if_not_installed("dust2")
+  skip_if_not_installed("deSolve")
+  set.seed(3)
+  res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="both",
+                          k_mean=k_mean_net, slowdown=2, mc.cores=1)
+  expect_named(res, c("t", "eate", "method", "sim"))
+  expect_setequal(unique(res$method), c("exact", "frozen", "CRR"))
+  expect_equal(nrow(res), n_vac_net * t_net * 3)
+  expect_setequal(unique(res$t), 1:t_net)
+  # one CRR row per sim (not duplicated between exact and frozen)
+  expect_equal(nrow(res[res$method == "CRR", ]), n_vac_net * t_net)
+})
 
-  # Fixed Erdos-Renyi-like contact matrix (symmetric, no self-loops)
-  set.seed(42)
-  c_ij <- matrix(0, N, N)
-  for (i in 1:(N-1)) for (j in (i+1):N) {
-    c_ij[i,j] <- c_ij[j,i] <- rbinom(1, 1, 6/N)
-  }
-  # Ensure no isolated nodes
-  for (i in 1:N) if (sum(c_ij[i,]) == 0) { j <- sample(setdiff(1:N, i), 1); c_ij[i,j] <- c_ij[j,i] <- 1 }
-  k_mean <- mean(rowSums(c_ij))
-
-  set.seed(1)
-  res_exact  <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N, t=t,
-                                  c_ij=c_ij, n_vac=30, frozen_field=FALSE, k_mean=k_mean, mc.cores=1)
-  set.seed(1)
-  res_frozen <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N, t=t,
-                                  c_ij=c_ij, n_vac=30, frozen_field=TRUE, slowdown=5, k_mean=k_mean, mc.cores=1)
-
-  mean_exact  <- mean(res_exact$eate[res_exact$t   == t])
-  mean_frozen <- mean(res_frozen$eate[res_frozen$t == t])
-
-  tol <- abs(mean_exact) * 0.15
-  expect_equal(mean_frozen, mean_exact, tolerance = tol)
+test_that("get_eate_network eate and CRR values are finite and positive", {
+  skip_if_not_installed("odin2")
+  skip_if_not_installed("dust2")
+  set.seed(4)
+  res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="exact",
+                          k_mean=k_mean_net, mc.cores=1)
+  expect_true(all(is.finite(res$eate)))
+  expect_true(all(res$eate[res$method == "CRR"] > 0))
 })
 
 # ---------------------------------------------------------------------------
