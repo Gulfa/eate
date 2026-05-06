@@ -190,15 +190,15 @@ local({
   assign("k_mean_net",k_mean_net,envir=parent.env(environment()))
 })
 
-test_that("get_eate_network method='exact' returns correct structure", {
+test_that("get_eate_network method='full' returns correct structure", {
   skip_if_not_installed("odin2")
   skip_if_not_installed("dust2")
   set.seed(1)
   res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
-                          c_ij=c_ij_net, n_vac=n_vac_net, method="exact",
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="full",
                           k_mean=k_mean_net, mc.cores=1)
-  expect_named(res, c("t", "eate", "method", "sim"))
-  expect_setequal(unique(res$method), c("exact", "CRR"))
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
+  expect_setequal(unique(res$method), c("full", "CRR"))
   expect_equal(nrow(res), n_vac_net * t_net * 2)
   expect_setequal(unique(res$t), 1:t_net)
 })
@@ -211,7 +211,7 @@ test_that("get_eate_network method='frozen' returns correct structure", {
   res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
                           c_ij=c_ij_net, n_vac=n_vac_net, method="frozen",
                           k_mean=k_mean_net, slowdown=2, mc.cores=1)
-  expect_named(res, c("t", "eate", "method", "sim"))
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
   expect_setequal(unique(res$method), c("frozen", "CRR"))
   expect_equal(nrow(res), n_vac_net * t_net * 2)
   expect_setequal(unique(res$t), 1:t_net)
@@ -225,11 +225,11 @@ test_that("get_eate_network method='both' returns correct structure", {
   res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
                           c_ij=c_ij_net, n_vac=n_vac_net, method="both",
                           k_mean=k_mean_net, slowdown=2, mc.cores=1)
-  expect_named(res, c("t", "eate", "method", "sim"))
-  expect_setequal(unique(res$method), c("exact", "frozen", "CRR"))
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
+  expect_setequal(unique(res$method), c("full", "frozen", "CRR"))
   expect_equal(nrow(res), n_vac_net * t_net * 3)
   expect_setequal(unique(res$t), 1:t_net)
-  # one CRR row per sim (not duplicated between exact and frozen)
+  # one CRR row per sim (not duplicated between full and frozen)
   expect_equal(nrow(res[res$method == "CRR", ]), n_vac_net * t_net)
 })
 
@@ -238,10 +238,56 @@ test_that("get_eate_network eate and CRR values are finite and positive", {
   skip_if_not_installed("dust2")
   set.seed(4)
   res <- get_eate_network(alpha=0.5, beta=1, f=0.5, N=N_net, t=t_net,
-                          c_ij=c_ij_net, n_vac=n_vac_net, method="exact",
+                          c_ij=c_ij_net, n_vac=n_vac_net, method="full",
                           k_mean=k_mean_net, mc.cores=1)
   expect_true(all(is.finite(res$eate)))
   expect_true(all(res$eate[res$method == "CRR"] > 0))
+})
+
+# ---------------------------------------------------------------------------
+# get_frailty_eate
+# ---------------------------------------------------------------------------
+
+test_that("get_frailty_eate method='full' returns correct structure", {
+  set.seed(10)
+  res <- get_frailty_eate(alpha=0.5, sd=0.2, beta=1, f=0.5, N=100, t=5,
+                          n_frailty=5, method="full", n_vac=3, mc.cores=1)
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
+  expect_setequal(unique(res$method), c("full", "CRR"))
+  expect_equal(nrow(res), 3 * 5 * 2)
+  expect_setequal(unique(res$t), 1:5)
+})
+
+test_that("get_frailty_eate method='frozen' returns correct structure", {
+  set.seed(11)
+  res <- get_frailty_eate(alpha=0.5, sd=0.2, beta=1, f=0.5, N=100, t=5,
+                          n_frailty=5, method="frozen", slowdown=2, n_vac=3, mc.cores=1)
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
+  expect_setequal(unique(res$method), c("frozen", "CRR"))
+  expect_equal(nrow(res), 3 * 5 * 2)
+  expect_setequal(unique(res$t), 1:5)
+})
+
+test_that("get_frailty_eate method='both' returns correct structure", {
+  set.seed(12)
+  res <- get_frailty_eate(alpha=0.5, sd=0.2, beta=1, f=0.5, N=100, t=5,
+                          n_frailty=5, method="both", slowdown=2, n_vac=3, mc.cores=1)
+  expect_named(res, c("t", "eate", "num", "denom", "method", "sim"))
+  expect_setequal(unique(res$method), c("full", "frozen", "CRR"))
+  expect_equal(nrow(res), 3 * 5 * 3)
+  expect_setequal(unique(res$t), 1:5)
+  # one CRR set per replication (not duplicated)
+  expect_equal(nrow(res[res$method == "CRR", ]), 3 * 5)
+})
+
+test_that("get_frailty_eate eate and CRR values are finite and positive at late times", {
+  set.seed(13)
+  res <- get_frailty_eate(alpha=0.5, sd=0.2, beta=1, f=0.5, N=500, t=20,
+                          n_frailty=10, method="full", n_vac=3, mc.cores=1)
+  # once the epidemic is established both EATE and CRR should be finite and positive
+  late <- res[res$t >= 10, ]
+  expect_true(all(is.finite(late$eate)))
+  expect_true(all(late$eate[late$method == "CRR"] > 0))
 })
 
 # ---------------------------------------------------------------------------

@@ -187,14 +187,21 @@ run_frailty <- function(lambda, alpha, sd, N=1000, t=5000, n_frailty=200){
 }
 
 
-run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100, k=NULL, gamma=1/2){
+run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100, k=NULL, gamma=1/2, vac_counts=NULL){
   if(sd>0){
     fr <- get_frailty(sd=sd, n=n_frailty)
     frailty <- exp(2.5*fr$x)
+    if(is.null(vac_counts)){
+      n_total  <- round(2*N*fr$p)
+      vac_counts <- round(f * n_total)
+    } else {
+      n_total <- vac_counts + (round(2*N*fr$p) - vac_counts)
+    }
     params <- list(
       n=2*n_frailty,
-      S_ini=c(2*N*(1-f)*fr$p, 2*N*f*fr$p),
+      S_ini=c(n_total - vac_counts, vac_counts),
       susceptibility=c(frailty, alpha*frailty))
+    mm <- matrix(1, nrow=params$n, ncol=params$n) / params$n
 
     if(!is.null(R)){
       beta <- get_beta(R, alpha, sd, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
@@ -237,8 +244,8 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
   }else{
     df <- data.frame(t=res$full_results[,1], vac=exp[,2], unvac=exp[, 1])
   }
-  N_vac <- 2*N*f
-  N_unvac <- 2*N*(1-f)
+  N_vac   <- sum(vac_counts)
+  N_unvac <- sum(n_total - vac_counts)
   df$inc_unvac <- c(0, df$unvac[2:nrow(df)] - df$unvac[1:(nrow(df)-1)])
   df$inc_vac   <- c(0, df$vac[2:nrow(df)] - df$vac[1:(nrow(df)-1)])
   df$HRR <- (df$inc_vac/(N_vac - df$vac))/(df$inc_unvac/(N_unvac - df$unvac))
@@ -248,7 +255,7 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
 }
 
 # ---------------------------------------------------------------------------
-# Network / mean-field wrappers
+# ork / mean-field wrappers
 # ---------------------------------------------------------------------------
 
 run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0.5, vac=NULL, gamma=1/3, c_ij=NULL, k_mean=6){
@@ -274,28 +281,111 @@ run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0
 # EATE estimation
 # ---------------------------------------------------------------------------
 
-get_eate_frailty <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100){
-  full_res <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=R, t=t, f=f, n_frailty=n_frailty)
-  full_eff <- 0
-  for(k in 1:n_frailty){
-    res_k  <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=R, t=t, f=f, n_frailty=n_frailty, k=k)
-    res_mk <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=R, t=t, f=f, n_frailty=n_frailty, k=-k)
-    N_unvac <- full_res$full[, paste("S[", k, "]", sep="")][1]
-    N_vac   <- full_res$full[, paste("S[", n_frailty + k, "]", sep="")][1]
-    if(all(res_k==0) | all(res_mk==0)){
-      next
-    }
-    eff  <- res_k / (full_res$full[ paste("C[", k, "]", sep="")]/N_unvac)
-    eff2 <- (full_res$full[ paste("C[", n_frailty + k, "]", sep="")]/N_vac)/(res_mk)
-    full_eff <- full_eff + eff*N_unvac + eff2 * N_vac
+get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_frailty=10,
+                              method="full", slowdown=1, gamma=1/2, n_vac=1, mc.cores=10){
+  method <- match.arg(method, c("full", "frozen", "both"))
+  n <- 2 * n_frailty
+
+  # Precompute beta once
+  if(!is.null(R)){
+    beta <- get_beta(R, alpha, sd, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
   }
-  full_eff <- as.numeric(unlist(full_eff / (2*N)))
-  return(full_res$sum %>% mutate(EATE=full_eff))
+
+  fr        <- get_frailty(sd=sd, n=n_frailty)
+  frailty   <- exp(2.5*fr$x)
+  n_total_k <- round(2*N*fr$p)   # total individuals per frailty group
+  sus_unvac <- frailty
+  sus_vac   <- alpha * frailty
+
+  run_full_eate <- function(full_res, vac_counts){
+    num   <- rep(0, t)
+    denom <- rep(0, t)
+    for(k in 1:n_frailty){
+      res_k  <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=k,  gamma=gamma, vac_counts=vac_counts)
+      res_mk <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=-k, gamma=gamma, vac_counts=vac_counts)
+      N_unvac <- full_res$full[, paste0("S[", k, "]")][1]
+      N_vac   <- full_res$full[, paste0("S[", n_frailty+k, "]")][1]
+      if(all(res_k==0) | all(res_mk==0)) next
+      # unvac group k: num += counterfactual vac cases; denom += factual unvac cases
+      num   <- num   + res_k  * N_unvac
+      denom <- denom + full_res$full[, paste0("C[", k, "]")]
+      # vac group k: num += factual vac cases; denom += counterfactual unvac cases
+      num   <- num   + full_res$full[, paste0("C[", n_frailty+k, "]")]
+      denom <- denom + res_mk * N_vac
+    }
+    data.frame(t=1:t, eate=as.numeric(num / denom), num=as.numeric(num), denom=as.numeric(denom), method="full")
+  }
+
+  run_frozen_eate <- function(full_res_slow){
+    t_slow    <- t * slowdown
+    slow_rows <- seq(slowdown, t_slow, by=slowdown)
+
+    I_total     <- rowSums(as.matrix(full_res_slow$full[, paste0("I[", 1:n, "]")]))
+    N_total     <- sum(n_total_k)
+    cum_foi_all <- cumsum((beta/slowdown) * I_total / (n * N_total))   # all t_slow steps
+
+    num_all   <- rep(0, t_slow)
+    denom_all <- rep(0, t_slow)
+    for(k in 1:n_frailty){
+      N_unvac <- full_res_slow$full[, paste0("S[", k, "]")][1]
+      N_vac   <- full_res_slow$full[, paste0("S[", n_frailty+k, "]")][1]
+
+      res_k  <- 1 - exp(-sus_vac[k]   * cum_foi_all)   # length t_slow
+      res_mk <- 1 - exp(-sus_unvac[k] * cum_foi_all)   # length t_slow
+
+      C_unvac <- full_res_slow$full[, paste0("C[", k, "]")]             # length t_slow
+      C_vac   <- full_res_slow$full[, paste0("C[", n_frailty+k, "]")]   # length t_slow
+
+      if(all(res_k==0) | all(res_mk==0)) next
+      num_all   <- num_all   + res_k  * N_unvac + C_vac
+      denom_all <- denom_all + C_unvac          + res_mk * N_vac
+    }
+    # subsample to original time points at the end
+    data.frame(t=1:t, eate=as.numeric(num_all[slow_rows] / denom_all[slow_rows]),
+               num=as.numeric(num_all[slow_rows]), denom=as.numeric(denom_all[slow_rows]), method="frozen")
+  }
+
+  run_one <- function(){
+    # Random vaccine allocation: exactly round(f * N_total) individuals chosen at random
+    # from the whole population (multivariate hypergeometric across frailty groups)
+    N_total    <- sum(n_total_k)
+    n_vac_total <- round(f * N_total)
+    vaccinated  <- sample(rep(1:n_frailty, n_total_k), n_vac_total)
+    vac_counts  <- tabulate(vaccinated, nbins=n_frailty)
+    sim_id  <- runif(1)
+    results <- list()
+    crr     <- NULL
+    if(method %in% c("full", "both")){
+      full_res <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f,
+                                 n_frailty=n_frailty, gamma=gamma, vac_counts=vac_counts)
+      r <- run_full_eate(full_res, vac_counts)
+      r$sim <- sim_id
+      results[["full"]] <- r
+      crr <- full_res$sum$CRR
+    }
+
+    if(method %in% c("frozen", "both")){
+      t_slow        <- t * slowdown
+      full_res_slow <- run_frailty_cd(alpha, sd, N=N, beta=beta/slowdown, R=NULL, t=t_slow,
+                                      f=f, n_frailty=n_frailty, gamma=gamma/slowdown,
+                                      vac_counts=vac_counts)
+      r <- run_frozen_eate(full_res_slow)
+      r$sim <- sim_id
+      results[["frozen"]] <- r
+      if(is.null(crr)) crr <- full_res_slow$sum$CRR[seq(slowdown, t_slow, by=slowdown)]
+    }
+
+    results[["CRR"]] <- data.frame(t=1:t, eate=crr, method="CRR", sim=sim_id)
+    rbindlist(results, fill=TRUE)
+  }
+
+  res <- parallel::mclapply(1:n_vac, function(i) run_one(), mc.cores=mc.cores)
+  rbindlist(res)
 }
 
 
-get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, method="exact", k_mean=6, slowdown=1, mc.cores=10){
-  method <- match.arg(method, c("exact", "frozen", "both"))
+get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, method="full", k_mean=6, slowdown=1, mc.cores=10){
+  method <- match.arg(method, c("full", "frozen", "both"))
   if(is.null(c_ij)){
     c_ij <- get_conact_matrix_pl(N, pl_alpha)
   }
@@ -333,12 +423,12 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
       }
     }
     list(
-      eate = data.frame(t=1:t, eate=num/denom, method="frozen"),
+      eate = data.frame(t=1:t, eate=num/denom, num=as.numeric(num), denom=as.numeric(denom), method="frozen"),
       crr  = full_res_slow$sum$CRR[slow_rows]
     )
   }
 
-  run_exact <- function(vac, full_res){
+  run_full <- function(vac, full_res){
     denom <- rep(0, t)
     num   <- rep(0, t)
     for(k in 1:N){
@@ -353,7 +443,7 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
       }
     }
     list(
-      eate = data.frame(t=1:t, eate=num/denom, method="exact"),
+      eate = data.frame(t=1:t, eate=num/denom, num=as.numeric(num), denom=as.numeric(denom), method="full"),
       crr  = full_res$sum$CRR[-1]
     )
   }
@@ -364,11 +454,11 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
     results  <- list()
     crr      <- NULL
 
-    if(method %in% c("exact", "both")){
+    if(method %in% c("full", "both")){
       full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean)
-      r <- run_exact(vac, full_res)
+      r <- run_full(vac, full_res)
       r$eate$sim <- sim_id
-      results[["exact"]] <- r$eate
+      results[["full"]] <- r$eate
       crr <- r$crr
     }
 
@@ -383,7 +473,7 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
     }
 
     results[["CRR"]] <- data.frame(t=1:t, eate=crr, method="CRR", sim=sim_id)
-    rbindlist(results)
+    rbindlist(results, fill=TRUE)
   }
 
   res <- parallel::mclapply(1:n_vac, function(i) run_vac(), mc.cores=mc.cores)
@@ -475,10 +565,10 @@ get_individual_effect <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibil
 
 
 
-get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1), t=500){
-  full_1  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)-1, N*vac_frac+1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
-  full_0  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac),   N*vac_frac),   t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
-  full_m1 <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c(N*(1-vac_frac)+1, N*vac_frac-1), t, c(0.1,0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
+get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1), t=500, init_frac=0.01){
+  full_1  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c((1+init_frac)*N*(1-vac_frac)-1, N*vac_frac+1), t, c(init_frac*N*(1-vac_frac),0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
+  full_0  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c((1+init_frac)*N*(1-vac_frac),   N*vac_frac),   t, c(init_frac*N*(1-vac_frac),0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
+  full_m1 <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c((1+ init_frac)*N*(1-vac_frac)+1, N*vac_frac-1), t, c(init_frac*N*(1-vac_frac),0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
 
   num   <- (N*(1-vac_frac))/(N*vac_frac+1)*full_1$full_results[, "C[2]"] + full_0$full_results[, "C[2]"]
   denom <- full_0$full_results[, "C[1]"] + (N*vac_frac)/(N*(1-vac_frac)+1)*full_m1$full_results[, "C[1]"]
@@ -508,13 +598,13 @@ get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1),
   num_all_frozen/denom_all_frozen
   return(data.frame(t=full_1$main[, "t"],
                     attack_rate=full_0$main$unvac/(N*(1-vac_frac)),
-                    eate=num/denom,
+                    full=num/denom,
                     CRR=full_0$full_results[, "C[2]"]/(N*vac_frac) / (full_0$full_results[, "C[1]"]/(N*(1-vac_frac))),
-                    eate_frozen=num_frozen/denom_frozen))
+                    frozen=num_frozen/denom_frozen))
 }
 
 
-get_EATE_frailty <- function()
+
 
 
 get_HH <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1)){

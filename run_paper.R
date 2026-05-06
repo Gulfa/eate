@@ -215,7 +215,7 @@ res <- rbind(
   get_average_observed(0.2, 0.6, N=10) %>% mutate(eff="Observed, coverage=20%", beta="beta=3", N=10, cov=0.2, type="Observed"),
   get_average_observed(0.5, 0.6, N=10) %>% mutate(eff="Observed, coverage=50%", beta="beta=3", N=10, cov=0.5, type="Observed"),
   get_EATE(0.2, 0.6, N=10)             %>% mutate(eff="EATE coverage=20%",       beta="beta=3", N=10, cov=0.2, type="EATE"),
-  get_EATE(0.5, 0.6, N=10)             %>% mutate(eff="EATE coverage=50%",       beta="beta=3", N=10, cov=0.5, type="EATE")
+  get_EATE(0.5, 0.6, N=10)             %>% mutate(eff="EATE coverage=50%",       beta="beta=3", N=10, cov=0.5, type="EATE"), fill=TRUE
 )
 
 res$N <- paste("N =", res$N)
