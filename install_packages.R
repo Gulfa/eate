@@ -6,19 +6,33 @@ options(repos = c(CRAN = "https://cran.rstudio.com"))
 # dust2 / odin2 need C++17 (if constexpr, std::is_invocable, structured
 # bindings). Some HPC R builds (e.g. R 4.2 foss-2022a) leave CXX17 unset
 # in Makeconf, so package compilation falls back to gnu++14 and fails.
-# Force C++17 by pointing R_MAKEVARS_USER at a temp Makevars for this run.
-# Persist by appending the same three lines to ~/.R/Makevars if desired.
+# We persist the override to ~/.R/Makevars because R_MAKEVARS_USER does
+# not always propagate to install subprocesses on HPC. The -std= flag is
+# folded into CXX17 itself so it survives even when CXX17STD is ignored.
 ensure_cxx17 <- function() {
-  mv <- tempfile("Makevars_cxx17_")
-  writeLines(c(
-    "CXX17 = g++",
+  lines <- c(
+    "CXX17 = g++ -std=gnu++17",
     "CXX17STD = -std=gnu++17",
-    "CXX17FLAGS = -O2 -fPIC -fopenmp"
-  ), mv)
-  old <- Sys.getenv("R_MAKEVARS_USER", unset = NA)
+    "CXX17FLAGS = -O2 -fPIC -fopenmp",
+    "CXX17PICFLAGS = -fPIC"
+  )
+  r_dir <- path.expand("~/.R")
+  if (!dir.exists(r_dir)) dir.create(r_dir, recursive = TRUE)
+  mv <- file.path(r_dir, "Makevars")
+  current <- if (file.exists(mv)) readLines(mv) else character()
+  to_add <- setdiff(lines, current)
+  # Drop any prior conflicting CXX17 lines so the new values win.
+  if (length(to_add) > 0) {
+    pruned <- current[!grepl("^\\s*CXX17(STD|FLAGS|PICFLAGS)?\\s*=", current)]
+    writeLines(c(pruned, lines), mv)
+    message("Updated ", mv, " with CXX17 settings")
+  } else {
+    message(mv, " already has CXX17 settings")
+  }
+  # Belt-and-suspenders: also point R_MAKEVARS_USER at the same file for
+  # subprocesses that might honour it.
   Sys.setenv(R_MAKEVARS_USER = mv)
-  message("Forcing C++17 via temp Makevars: ", mv)
-  invisible(old)
+  invisible(mv)
 }
 ensure_cxx17()
 
