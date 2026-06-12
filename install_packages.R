@@ -3,6 +3,25 @@
 
 options(repos = c(CRAN = "https://cran.rstudio.com"))
 
+# dust2 / odin2 need C++17 (if constexpr, std::is_invocable, structured
+# bindings). Some HPC R builds (e.g. R 4.2 foss-2022a) leave CXX17 unset
+# in Makeconf, so package compilation falls back to gnu++14 and fails.
+# Force C++17 by pointing R_MAKEVARS_USER at a temp Makevars for this run.
+# Persist by appending the same three lines to ~/.R/Makevars if desired.
+ensure_cxx17 <- function() {
+  mv <- tempfile("Makevars_cxx17_")
+  writeLines(c(
+    "CXX17 = g++",
+    "CXX17STD = -std=gnu++17",
+    "CXX17FLAGS = -O2 -fPIC -fopenmp"
+  ), mv)
+  old <- Sys.getenv("R_MAKEVARS_USER", unset = NA)
+  Sys.setenv(R_MAKEVARS_USER = mv)
+  message("Forcing C++17 via temp Makevars: ", mv)
+  invisible(old)
+}
+ensure_cxx17()
+
 cran_pkgs <- c(
   # data wrangling / plotting
   "dplyr", "data.table", "tidyr", "purrr", "glue", "zoo",
