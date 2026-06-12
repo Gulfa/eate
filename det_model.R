@@ -8,7 +8,7 @@ det_model_adj <- odin2::odin("det_mod_adj.R")
 # Core ODE runners
 # ---------------------------------------------------------------------------
 
-run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
+run_det_cd <- function(mixing_matrix, beta_day=1, N=100, t=10, I_ini=2,
                        beta_norm=NULL,
                        susceptibility=NULL,
                        transmisibility=NULL, gamma=1/3,
@@ -19,6 +19,7 @@ run_det_cd <- function(mixing_matrix, beta_day, N, t, I_ini,
   if(is.null(beta_norm)) beta_norm <- N
   if(is.null(susceptibility)) susceptibility <- rep(1, dim(mixing_matrix)[1])
   if(is.null(transmisibility)) transmisibility <- rep(1, dim(mixing_matrix)[1])
+  if(length(beta_day)==1) beta_day <- rep(beta_day, t)
   n <- dim(mixing_matrix)[1]
 
   if (sparse) {
@@ -258,7 +259,7 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
 # ork / mean-field wrappers
 # ---------------------------------------------------------------------------
 
-run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0.5, vac=NULL, gamma=1/3, c_ij=NULL, k_mean=6){
+run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0.5, vac=NULL, gamma=1/3, c_ij=NULL, k_mean=6, init_I=2 ){
   if(is.null(c_ij)){
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
   }
@@ -270,7 +271,7 @@ run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0
   susept[vac] <- alpha
   non_vac <- setdiff(1:N, vac)
   
-  res <- run_det_cd(c_ij, rep(N*beta/k_mean, t), rep(1,N), t, I_ini=c(1,1,rep(0, N-2)), gamma=gamma, beta_norm=rep(1, N), susceptibility=susept, sparse=TRUE)
+  res <- run_det_cd(c_ij, rep(N*beta/k_mean, t), rep(1,N), t, I_ini=c(rep(1, init_I), rep(0, N-init_I)), gamma=gamma, beta_norm=rep(1, N), susceptibility=susept, sparse=TRUE)
 
   sum <- data.frame(t=res$full_results[["t"]], vac=rowSums(res$full_results[, paste("C[", vac, "]", sep="")]), unvac=rowSums(res$full_results[, paste("C[", non_vac, "]", sep="")]))
   sum$CRR <- (sum$vac/(vac_frac*N))/(sum$unvac/((1-vac_frac)*N))
@@ -384,7 +385,8 @@ get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_f
 }
 
 
-get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, method="full", k_mean=6, slowdown=1, mc.cores=10){
+get_eate_network <- function(beta=1, R=NULL, f=0.5,susceptibility=c(1,1), N=200, t=15, pl_alpha=3, c_ij=NULL, n_vac=10, method="full", k_mean=6, slowdown=1, mc.cores=10, init_I=2){
+  alpha <- susceptibility[2] 
   method <- match.arg(method, c("full", "frozen", "both"))
   if(is.null(c_ij)){
     c_ij <- get_conact_matrix_pl(N, pl_alpha)
@@ -432,13 +434,14 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
     denom <- rep(0, t)
     num   <- rep(0, t)
     for(k in 1:N){
+      print(k)
       if(k %in% vac){
         num   <- num   + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
-        res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac[vac!=k], k_mean=k_mean)
+        res_mk <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac[vac!=k], k_mean=k_mean, init_I=init_I)
         denom <- denom + res_mk$full[2:(t+1), paste("C[", k, "]", sep="")]
       }else{
         denom <- denom + full_res$full[2:(t+1), paste("C[", k, "]", sep="")]
-        res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=c(vac, k), k_mean=k_mean)
+        res_k <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=c(vac, k), k_mean=k_mean, init_I=init_I )
         num   <- num   + res_k$full[2:(t+1), paste("C[", k, "]", sep="")]
       }
     }
@@ -455,7 +458,7 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
     crr      <- NULL
 
     if(method %in% c("full", "both")){
-      full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean)
+      full_res <- run_mean_field(beta=beta, N=N, alpha=alpha, t=t, vac_frac=f, gamma=1, c_ij=c_ij, vac=vac, k_mean=k_mean, init_I=init_I)
       r <- run_full(vac, full_res)
       r$eate$sim <- sim_id
       results[["full"]] <- r$eate
@@ -465,7 +468,7 @@ get_eate_network <- function(alpha=0.5, beta=1, R=NULL, f=0.5, N=200, t=15, pl_a
     if(method %in% c("frozen", "both")){
       t_slow <- t * slowdown
       full_res_slow <- run_mean_field(beta=beta/slowdown, N=N, alpha=alpha, t=t_slow,
-                                      vac_frac=f, gamma=1/slowdown, c_ij=c_ij, vac=vac, k_mean=k_mean)
+                                      vac_frac=f, gamma=1/slowdown, c_ij=c_ij, vac=vac, k_mean=k_mean, init_I=init_I)
       r <- run_frozen(vac, full_res_slow)
       r$eate$sim <- sim_id
       results[["frozen"]] <- r$eate
@@ -563,7 +566,15 @@ get_individual_effect <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibil
 }
 
 
+calc_ve_from_pars <- function(eate_mod, pars, n_cores){
+  res <- parallel::mclapply(1:nrow(pars), function(i) eate_mod(beta=pars[i,1], susceptibility=c(1,pars[i,2])) %>% mutate(sim=i), mc.cores=n_cores)
+  res_df <- rbindlist(res)
+  #res_df <- merge(res_df, pars, by="t")
+ # res_df <- res_df %>% group_by(t) %>% summarise(eate_full=mean(full), eate_frozen=mean(frozen), crr=mean(CRR), attack_rate=mean(attack_rate))
+  return(res_df)
 
+
+}
 
 get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1), t=500, init_frac=0.01){
   full_1  <- run_det_cd(matrix(1, nrow=2, ncol=2), rep(beta,t), c((1+init_frac)*N*(1-vac_frac)-1, N*vac_frac+1), t, c(init_frac*N*(1-vac_frac),0), susceptibility=susceptibility, gamma=gamma, delta_t=0.01)
@@ -599,11 +610,43 @@ get_EATE <- function(vac_frac, beta, gamma=0.2, N=1000, susceptibility=c(1,0.1),
   return(data.frame(t=full_1$main[, "t"],
                     attack_rate=full_0$main$unvac/(N*(1-vac_frac)),
                     full=num/denom,
+                    C2=full_0$full_results[, "C[2]"],
+                      C1=full_0$full_results[, "C[1]"],
                     CRR=full_0$full_results[, "C[2]"]/(N*vac_frac) / (full_0$full_results[, "C[1]"]/(N*(1-vac_frac))),
                     frozen=num_frozen/denom_frozen))
 }
 
 
+# Linear (exposure-only) counterpart of get_EATE. The linear model has no
+# interaction between individuals, so the three perturbation runs collapse to
+# closed-form attack rates: per-group AR = 1 - exp(-sus * beta * t).
+# Construction mirrors get_EATE (factual + one extra vac + one extra unvac),
+# with the frozen-field branch dropped. Because there is no herd effect,
+# `full` (EATE) equals `CRR` for this model — included for symmetry with the
+# cd version.
+get_EATE_linear <- function(vac_frac, beta, N=1000, susceptibility=c(1, 0.1),
+                            t=500, ts=seq(1, t, by=1)) {
+  ar_unvac <- 1 - exp(-susceptibility[1] * beta * ts)
+  ar_vac   <- 1 - exp(-susceptibility[2] * beta * ts)
+
+  N_unvac <- N * (1 - vac_frac)
+  N_vac   <- N * vac_frac
+
+  # Factual cumulative infections in each group
+  C_unvac_0 <- N_unvac * ar_unvac
+  C_vac_0   <- N_vac   * ar_vac
+  # One unvac flipped to vac (full_1) / one vac flipped to unvac (full_m1)
+  C_vac_1    <- (N_vac   + 1) * ar_vac
+  C_unvac_m1 <- (N_unvac + 1) * ar_unvac
+
+  num   <- N_unvac / (N_vac + 1) * C_vac_1 + C_vac_0
+  denom <- C_unvac_0 + N_vac / (N_unvac + 1) * C_unvac_m1
+
+  data.frame(t           = ts,
+             C1 = C_unvac_0,
+              C2 = C_vac_0,
+             full        = num / denom,
+             CRR         = (C_vac_0 / N_vac) / (C_unvac_0 / N_unvac))}
 
 
 

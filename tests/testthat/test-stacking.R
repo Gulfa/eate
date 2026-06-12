@@ -9,8 +9,9 @@ skip_if_not_installed("zoo")
 skip_if_not_installed("adaptivetau")
 
 if (!exists("run_stacking")) {
-  # When run via test_dir(), working dir is tests/testthat; ../../ is project root
-  source("../../stoch_model.R")
+  # When run via test_dir(), working dir is tests/testthat; ../../ is project root.
+  # chdir=TRUE so odin2::odin("stoch_sir.R") inside the file resolves correctly.
+  source("../../stoch_model.R", chdir=TRUE)
 }
 
 library(dplyr)
