@@ -45,8 +45,6 @@ cran_pkgs <- c(
   "mcmc", "mvtnorm", "coda",
   # parallel / system
   "RhpcBLASctl", "remotes",
-  # legacy odin (CRAN). odin2 + dust2 below via GitHub.
-  "odin",
   # tests
   "testthat"
 )
@@ -63,6 +61,7 @@ if (length(to_install) > 0) {
 # n_particles over mclapply for stochastic replication in this project.
 gh_pkgs <- list(
   dust2     = "mrc-ide/dust2",
+  odin      = "mrc-ide/odin",
   odin2     = "mrc-ide/odin2",
   odin.dust = "mrc-ide/odin.dust"
 )
