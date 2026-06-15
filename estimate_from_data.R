@@ -69,9 +69,11 @@ build_frailty_mod <- function(cfg) {
 
     # get_frailty_eate uses `alpha` and `f`; calc_ve_from_pars calls with
     # (beta, susceptibility) and esteimate_VE_from_fs adds vac_frac/t/N.
+    # Pass both sd and sd_trans so the EATE function models the same
+    # heterogeneity (sus + trans, rank-correlated) as the simulator.
     eate_func <- function(beta, susceptibility, vac_frac, t, N, ...) {
-        get_frailty_eate(alpha=susceptibility[2], sd=cfg$sd, beta=beta,
-                         f=vac_frac, N=N, t=t, n_frailty=cfg$n_frailty,
+        get_frailty_eate(alpha=susceptibility[2], sd=cfg$sd, sd_trans=cfg$sd_trans,
+                         beta=beta, f=vac_frac, N=N, t=t, n_frailty=cfg$n_frailty,
                          gamma=cfg$gamma, method=cfg$eate_method,
                          slowdown=cfg$eate_slowdown, n_vac=cfg$eate_n_vac,
                          mc.cores=cfg$cores)

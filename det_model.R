@@ -188,10 +188,26 @@ run_frailty <- function(lambda, alpha, sd, N=1000, t=5000, n_frailty=200){
 }
 
 
-run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100, k=NULL, gamma=1/2, vac_counts=NULL){
-  if(sd>0){
-    fr <- get_frailty(sd=sd, n=n_frailty)
-    frailty <- exp(2.5*fr$x)
+run_frailty_cd <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100, k=NULL, gamma=1/2, vac_counts=NULL){
+  # sd_pop picks the bin-weight distribution; with sd=0/sd_trans>0 we get
+  # bins from the trans-frailty width and set susceptibility frailty to 1.
+  sd_pop <- if (sd > 0) sd else sd_trans
+  if(sd_pop > 0){
+    fr <- get_frailty(sd=sd_pop, n=n_frailty)
+    frailty <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+    # Rank-correlated trans frailty (mirrors run_stoch_frailty_cd).
+    trans_frailty <- if (sd_trans > 0) {
+      if (sd_trans == sd_pop) {
+        exp(2.5 * fr$x)
+      } else {
+        cf_pop <- (0.25 / sd_pop^2)   - 1
+        cf_t   <- (0.25 / sd_trans^2) - 1
+        ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
+        exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
+      }
+    } else {
+      rep(1, n_frailty)
+    }
     if(is.null(vac_counts)){
       n_total  <- round(2*N*fr$p)
       vac_counts <- round(f * n_total)
@@ -201,11 +217,12 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
     params <- list(
       n=2*n_frailty,
       S_ini=c(n_total - vac_counts, vac_counts),
-      susceptibility=c(frailty, alpha*frailty))
+      susceptibility=c(frailty, alpha*frailty),
+      transmisibility=c(trans_frailty, trans_frailty))   # vaccine acts on sus only
     mm <- matrix(1, nrow=params$n, ncol=params$n) / params$n
 
     if(!is.null(R)){
-      beta <- get_beta(R, alpha, sd, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
+      beta <- get_beta(R, alpha, sd, sd_trans=sd_trans, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
     }
     if(!is.null(k)){
       if(params$S_ini[abs(k)] <=1){
@@ -222,7 +239,10 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
         return(rep(0, t))
       }
     }
-    res <- run_det_cd(mm, rep(beta,t), params$S_ini + params$S_ini/sum(params$S_ini), t, params$S_ini/sum(params$S_ini), susceptibility=params$susceptibility, gamma=gamma)
+    res <- run_det_cd(mm, rep(beta,t), params$S_ini + params$S_ini/sum(params$S_ini), t, params$S_ini/sum(params$S_ini),
+                      susceptibility=params$susceptibility,
+                      transmisibility=params$transmisibility,
+                      gamma=gamma)
 
     if(!is.null(k)){
       if(k < 0){
@@ -232,15 +252,18 @@ run_frailty_cd <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=100, n_fr
       }
     }
   }else{
+    # Homogeneous case (sd = sd_trans = 0)
     params <- list(
       n=2,
       S_ini=c(N, N),
       susceptibility=c(1, alpha))
-    res <- run_det_cd(matrix(1, nrow=2, ncol=2)/2, rep(beta,t), params$S_ini, t, rep(1, 2), susceptibility=params$susceptibility, gamma=1/7)
+    res <- run_det_cd(matrix(1, nrow=2, ncol=2)/2, rep(beta,t), params$S_ini, t, rep(1, 2), susceptibility=params$susceptibility, gamma=gamma)
+    n_total    <- c(N, N)
+    vac_counts <- N
   }
 
   exp <- res$full_results %>% as.data.frame() %>% select(starts_with("C"))
-  if(sd>0){
+  if(sd_pop > 0){
     df <- data.frame(t=res$full_results[,1], vac=rowSums(exp[, (params$n/2+1):(params$n)]), unvac=rowSums(exp[, 1:(params$n/2)]))
   }else{
     df <- data.frame(t=res$full_results[,1], vac=exp[,2], unvac=exp[, 1])
@@ -282,28 +305,46 @@ run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100, vac_frac=0
 # EATE estimation
 # ---------------------------------------------------------------------------
 
-get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_frailty=10,
+get_frailty_eate <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, t=30, n_frailty=10,
                               method="full", slowdown=1, gamma=1/2, n_vac=1, mc.cores=10){
   method <- match.arg(method, c("full", "frozen", "both"))
   n <- 2 * n_frailty
 
   # Precompute beta once
   if(!is.null(R)){
-    beta <- get_beta(R, alpha, sd, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
+    beta <- get_beta(R, alpha, sd, sd_trans=sd_trans, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
   }
 
-  fr        <- get_frailty(sd=sd, n=n_frailty)
-  frailty   <- exp(2.5*fr$x)
+  # Bin weights come from whichever sd is positive (matches run_frailty_cd
+  # and run_stoch_frailty_cd). sus and trans frailty are then taken from
+  # those bins, with rank-correlated mapping if sd != sd_trans.
+  sd_pop    <- if (sd > 0) sd else sd_trans
+  if (sd_pop <= 0) stop("get_frailty_eate requires sd > 0 or sd_trans > 0")
+  fr        <- get_frailty(sd=sd_pop, n=n_frailty)
+  frailty   <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+  trans_frailty <- if (sd_trans > 0) {
+    if (sd_trans == sd_pop) {
+      exp(2.5 * fr$x)
+    } else {
+      cf_pop <- (0.25 / sd_pop^2)   - 1
+      cf_t   <- (0.25 / sd_trans^2) - 1
+      ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
+      exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
+    }
+  } else {
+    rep(1, n_frailty)
+  }
   n_total_k <- round(2*N*fr$p)   # total individuals per frailty group
   sus_unvac <- frailty
   sus_vac   <- alpha * frailty
+  trans_all <- c(trans_frailty, trans_frailty)   # length 2*n_frailty
 
   run_full_eate <- function(full_res, vac_counts){
     num   <- rep(0, t)
     denom <- rep(0, t)
     for(k in 1:n_frailty){
-      res_k  <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=k,  gamma=gamma, vac_counts=vac_counts)
-      res_mk <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=-k, gamma=gamma, vac_counts=vac_counts)
+      res_k  <- run_frailty_cd(alpha, sd, sd_trans=sd_trans, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=k,  gamma=gamma, vac_counts=vac_counts)
+      res_mk <- run_frailty_cd(alpha, sd, sd_trans=sd_trans, N=N, beta=beta, R=NULL, t=t, f=f, n_frailty=n_frailty, k=-k, gamma=gamma, vac_counts=vac_counts)
       N_unvac <- full_res$full[, paste0("S[", k, "]")][1]
       N_vac   <- full_res$full[, paste0("S[", n_frailty+k, "]")][1]
       if(all(res_k==0) | all(res_mk==0)) next
@@ -321,9 +362,12 @@ get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_f
     t_slow    <- t * slowdown
     slow_rows <- seq(slowdown, t_slow, by=slowdown)
 
-    I_total     <- rowSums(as.matrix(full_res_slow$full[, paste0("I[", 1:n, "]")]))
+    # Weight infectious counts by transmissibility per bin (vac and unvac
+    # share the trans frailty since the vaccine acts on sus only).
+    I_mat       <- as.matrix(full_res_slow$full[, paste0("I[", 1:n, "]")])
+    I_weighted  <- as.numeric(I_mat %*% trans_all)
     N_total     <- sum(n_total_k)
-    cum_foi_all <- cumsum((beta/slowdown) * I_total / (n * N_total))   # all t_slow steps
+    cum_foi_all <- cumsum((beta/slowdown) * I_weighted / (n * N_total))
 
     num_all   <- rep(0, t_slow)
     denom_all <- rep(0, t_slow)
@@ -357,7 +401,7 @@ get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_f
     results <- list()
     crr     <- NULL
     if(method %in% c("full", "both")){
-      full_res <- run_frailty_cd(alpha, sd, N=N, beta=beta, R=NULL, t=t, f=f,
+      full_res <- run_frailty_cd(alpha, sd, sd_trans=sd_trans, N=N, beta=beta, R=NULL, t=t, f=f,
                                  n_frailty=n_frailty, gamma=gamma, vac_counts=vac_counts)
       r <- run_full_eate(full_res, vac_counts)
       r$sim <- sim_id
@@ -367,7 +411,7 @@ get_frailty_eate <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=1000, t=30, n_f
 
     if(method %in% c("frozen", "both")){
       t_slow        <- t * slowdown
-      full_res_slow <- run_frailty_cd(alpha, sd, N=N, beta=beta/slowdown, R=NULL, t=t_slow,
+      full_res_slow <- run_frailty_cd(alpha, sd, sd_trans=sd_trans, N=N, beta=beta/slowdown, R=NULL, t=t_slow,
                                       f=f, n_frailty=n_frailty, gamma=gamma/slowdown,
                                       vac_counts=vac_counts)
       r <- run_frozen_eate(full_res_slow)
