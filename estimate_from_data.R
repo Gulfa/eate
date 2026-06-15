@@ -51,29 +51,35 @@ build_network_mod <- function(cfg) {
 }
 
 build_frailty_mod <- function(cfg) {
+    # run_stoch_frailty_cd / get_frailty_eate use a "N-per-group" convention:
+    # internally they build a population of size 2*N (vac + unvac). To match
+    # the data total sum(cfg$N), we pass N = sum(cfg$N)/2.
+    N_per_group <- sum(cfg$N) / 2
+
     sd_pop  <- if (cfg$sd > 0) cfg$sd else cfg$sd_trans
     fr      <- get_frailty(sd=sd_pop, n=cfg$n_frailty)
-    n_total <- round(sum(cfg$N) * fr$p)
+    n_total <- round(2 * N_per_group * fr$p)   # same formula the simulator uses
     bin     <- rep(seq_along(n_total), n_total)
 
+    # cfg$N[2] is the number vaccinated in the data; tabulate that many
+    # bin-labels into per-bin vaccinated counts.
     set.seed(cfg$allocation_seed)
-    vacc <- tabulate(bin[sample(length(bin), cfg$N[1])], nbins=length(n_total))
+    vacc <- tabulate(bin[sample(length(bin), cfg$N[2])], nbins=length(n_total))
     set.seed(NULL)
 
     generator <- purrr::partial(run_stoch_frailty_cd,
                                 sd=cfg$sd, sd_trans=cfg$sd_trans,
-                                I_ini_total=sum(cfg$I_ini), N=sum(cfg$N),
+                                I_ini_total=sum(cfg$I_ini), N=N_per_group,
                                 t=cfg$t, dt=cfg$dt, vac_counts=vacc,
                                 n_frailty=cfg$n_frailty, timepoints=cfg$timepoints,
                                 n_sim=cfg$n_sim, cores=cfg$cores, method="dust")
 
-    # get_frailty_eate uses `alpha` and `f`; calc_ve_from_pars calls with
-    # (beta, susceptibility) and esteimate_VE_from_fs adds vac_frac/t/N.
-    # Pass both sd and sd_trans so the EATE function models the same
-    # heterogeneity (sus + trans, rank-correlated) as the simulator.
+    # esteimate_VE_from_fs binds N=N_vac+N_cont (data total) to the eate_func.
+    # The frailty EATE function uses the same 2*N convention as the simulator,
+    # so override to N/2 inside.
     eate_func <- function(beta, susceptibility, vac_frac, t, N, ...) {
         get_frailty_eate(alpha=susceptibility[2], sd=cfg$sd, sd_trans=cfg$sd_trans,
-                         beta=beta, f=vac_frac, N=N, t=t, n_frailty=cfg$n_frailty,
+                         beta=beta, f=vac_frac, N=N/2, t=t, n_frailty=cfg$n_frailty,
                          gamma=cfg$gamma, method=cfg$eate_method,
                          slowdown=cfg$eate_slowdown, n_vac=cfg$eate_n_vac,
                          mc.cores=cfg$cores)
