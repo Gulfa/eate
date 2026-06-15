@@ -55,15 +55,19 @@ configs[[length(configs)+1]] <- modifyList(base, list(
     beta_ini  = 0.05, alpha_ini = 0.5,
     n = 500, burn_in = 500, scale = c(0.02, 0.05)))
 
-# 1 sir (homogeneous mixing)
+# 1 sir (homogeneous mixing). eate_func must match the nonlinear simulator:
+# get_EATE (contact-dependent), not get_EATE_linear. gamma=1 is the project
+# convention and must be set on both the simulator and the EATE function
+# (otherwise their defaults diverge: stoch_cd_dust=1/3, get_EATE=0.2).
 configs[[length(configs)+1]] <- modifyList(base, list(
     name      = "sir",
     generator = purrr::partial(run_stoch_cd_dust,
                                matrix(rep(1, 4), nrow=2),
                                I_ini=c(10,10), N=c(N_cont, N_vac),
+                               gamma=1,
                                t=t, dt=0.01,
                                timepoints=seq(1, t, 1), n_sim=1000, cores=4),
-    eate_func = get_EATE_linear))
+    eate_func = purrr::partial(get_EATE, gamma=1)))
 
 # 10 frailty configs — vary allocation_seed only
 for (allocation_seed in 1:10) {
@@ -74,7 +78,7 @@ for (allocation_seed in 1:10) {
         sd_trans    = 0.3,
         n_frailty   = 10,
         I_ini       = c(10, 10),
-        gamma       = 1/2,
+        gamma       = 1,
         allocation_seed = allocation_seed))
 }
 
@@ -87,7 +91,10 @@ for (network_seed in 1:10) {
             pl_alpha    = 3,
             mean_k      = 6,
             I_ini       = 2,
-            gamma       = 1/3,
+            gamma       = 1,
+            # 10 outer allocation_seeds already give us 10 vac realisations
+            # per network; no need for another 10 inside get_eate_network.
+            eate_n_vac      = 1,
             network_seed    = network_seed,
             allocation_seed = allocation_seed))
     }
