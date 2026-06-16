@@ -37,7 +37,14 @@ alphas         <- c(0.1, 0.25, 0.5, 0.75, 0.9)  # vaccine susceptibility values
 eate_method    <- "both"                     # "full" | "frozen" | "both"
 eate_slowdown  <- 1
 eate_n_vac     <- 5                          # vac re-samples inside get_eate_network
-mc_cores       <- 4
+
+# Parallelism: outer = across (pl_alpha, network_seed, alpha) cells,
+# inner = across the eate_n_vac allocations inside one cell. Outer is
+# the bigger axis (length(pl_alphas) * length(network_seeds) *
+# length(alphas)) so default sends all cores there. Avoid nested forking
+# by keeping inner_cores = 1 unless cells are few.
+outer_cores    <- 4
+inner_cores    <- 1
 
 out_dir        <- "output/network_alpha_sweep"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -60,37 +67,53 @@ for (pl in pl_alphas) {
 set.seed(NULL)
 
 # ---------------------------------------------------------------------------
-# Run the sweep
+# Run the sweep — flat job list dispatched via mclapply
 # ---------------------------------------------------------------------------
 
-n_total <- length(pl_alphas) * length(network_seeds) * length(alphas)
-counter <- 0
-results <- list()
+jobs <- list()
 for (pl in pl_alphas) {
     for (s in network_seeds) {
-        c_ij <- networks[[sprintf("%s|%d", format(pl), s)]]
         for (a in alphas) {
-            counter <- counter + 1
-            message(glue("[{counter}/{n_total}] pl_alpha={pl}  network_seed={s}  alpha={a}"))
-            res <- get_eate_network(beta           = beta,
-                                    susceptibility = c(1, a),
-                                    f              = vac_frac,
-                                    N              = N,
-                                    t              = t,
-                                    c_ij           = c_ij,
-                                    n_vac          = eate_n_vac,
-                                    method         = eate_method,
-                                    k_mean         = mean_k,
-                                    slowdown       = eate_slowdown,
-                                    mc.cores       = mc_cores,
-                                    init_I         = init_I)
-            setDT(res)
-            res[, pl_alpha     := pl]
-            res[, network_seed := s]
-            res[, alpha        := a]
-            results[[length(results) + 1]] <- res
+            jobs[[length(jobs) + 1]] <- list(pl_alpha = pl, network_seed = s, alpha = a)
         }
     }
+}
+n_total <- length(jobs)
+message(glue("Dispatching {n_total} cells across outer_cores={outer_cores}, inner_cores={inner_cores}"))
+
+run_cell <- function(job) {
+    c_ij <- networks[[sprintf("%s|%d", format(job$pl_alpha), job$network_seed)]]
+    message(glue("  cell pl_alpha={job$pl_alpha} seed={job$network_seed} alpha={job$alpha}"))
+    res <- get_eate_network(beta           = beta,
+                            susceptibility = c(1, job$alpha),
+                            f              = vac_frac,
+                            N              = N,
+                            t              = t,
+                            c_ij           = c_ij,
+                            n_vac          = eate_n_vac,
+                            method         = eate_method,
+                            k_mean         = mean_k,
+                            slowdown       = eate_slowdown,
+                            mc.cores       = inner_cores,
+                            init_I         = init_I)
+    setDT(res)
+    res[, pl_alpha     := job$pl_alpha]
+    res[, network_seed := job$network_seed]
+    res[, alpha        := job$alpha]
+    res
+}
+
+results <- parallel::mclapply(jobs, run_cell,
+                              mc.cores       = outer_cores,
+                              mc.preschedule = FALSE)
+
+# Surface mclapply errors instead of letting rbindlist choke on them later.
+errs <- vapply(results, inherits, logical(1), what = "try-error")
+if (any(errs)) {
+    bad <- which(errs)
+    warning(glue("{length(bad)}/{n_total} cells failed; dropping. First error:\n",
+                 conditionMessage(attr(results[[bad[1]]], "condition"))))
+    results <- results[!errs]
 }
 
 all_res <- rbindlist(results, fill = TRUE)
