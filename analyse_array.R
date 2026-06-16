@@ -112,8 +112,11 @@ print(ess_table[, .(min_beta  = min(ess_beta),
 # Pool samples by group and summarise (median, 95% interval)
 # ---------------------------------------------------------------------------
 
-# Group label functions: "separate" gives one row per network contact matrix
-# (allocations pooled within); "combined" pools all networks into one row.
+# Group label functions:
+#   "separate"        — one row per network contact matrix (allocations pooled)
+#   "combined"        — all networks pooled into one row
+#   "per_allocation"  — one row per (network_seed, allocation_seed) for
+#                       network, one per allocation_seed for frailty
 label_separate <- function(x) {
   switch(x$model_type,
          network = sprintf("network_n%02d", x$network_seed),
@@ -126,11 +129,17 @@ label_combined <- function(x) {
          frailty = "frailty",
          legacy  = x$name)
 }
+label_per_allocation <- function(x) {
+  switch(x$model_type,
+         network = sprintf("network_n%02d_a%02d", x$network_seed, x$allocation_seed),
+         frailty = sprintf("frailty_a%02d", x$allocation_seed),
+         legacy  = x$name)
+}
 
 # Ordering for the y-axis: legacy first, then frailty, then networks
 order_key <- function(label) {
   if (label %in% c("linear", "sir"))    return(paste0("0_", label))
-  if (label == "frailty")               return("1_frailty")
+  if (grepl("^frailty", label))         return(paste0("1_", label))
   if (label == "network_all")           return("2_network_all")
   paste0("3_", label)
 }
@@ -154,10 +163,11 @@ summarise_by_group <- function(infos, group_fn, field, q = c(0.025, 0.5, 0.975))
   }))[order(sapply(group, order_key))]
 }
 
-ve_sep    <- summarise_by_group(infos, label_separate, "ve_samples")
-ve_comb   <- summarise_by_group(infos, label_combined, "ve_samples")
-alpha_sep <- summarise_by_group(infos, label_separate, "alpha_samples")
-alpha_comb<- summarise_by_group(infos, label_combined, "alpha_samples")
+ve_sep         <- summarise_by_group(infos, label_separate,       "ve_samples")
+ve_comb        <- summarise_by_group(infos, label_combined,       "ve_samples")
+alpha_sep      <- summarise_by_group(infos, label_separate,       "alpha_samples")
+alpha_comb     <- summarise_by_group(infos, label_combined,       "alpha_samples")
+alpha_per_alloc <- summarise_by_group(infos, label_per_allocation, "alpha_samples")
 
 # ---------------------------------------------------------------------------
 # Forest plots
@@ -195,6 +205,17 @@ ggsave(file.path(out_dir, "forest_alpha_combined.png"),
        forest_plot(alpha_comb, "alpha (susceptibility[2]) — networks pooled",
                    "alpha"),
        width = 8, height = 3.5, dpi = 130)
+
+# Per-allocation alpha: one row per MCMC run. Tall plot; scale height
+# with row count so labels stay readable.
+n_rows <- nrow(alpha_per_alloc)
+p_alpha_alloc <- forest_plot(alpha_per_alloc,
+                             "alpha (susceptibility[2]) — per allocation",
+                             "alpha") +
+  theme(axis.text.y = element_text(size = 7))
+ggsave(file.path(out_dir, "forest_alpha_per_allocation.png"),
+       p_alpha_alloc,
+       width = 8, height = max(4, 0.15 * n_rows), dpi = 130, limitsize = FALSE)
 
 message(glue("Wrote forest plots to {out_dir}/"))
 message("Done.")

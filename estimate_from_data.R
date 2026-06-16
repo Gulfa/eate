@@ -70,6 +70,7 @@ build_frailty_mod <- function(cfg) {
     generator <- purrr::partial(run_stoch_frailty_cd,
                                 sd=cfg$sd, sd_trans=cfg$sd_trans,
                                 I_ini_total=sum(cfg$I_ini), N=N_per_group,
+                                gamma=cfg$gamma,
                                 t=cfg$t, dt=cfg$dt, vac_counts=vacc,
                                 n_frailty=cfg$n_frailty, timepoints=cfg$timepoints,
                                 n_sim=cfg$n_sim, cores=cfg$cores, method="dust")
