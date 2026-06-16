@@ -32,7 +32,7 @@ init_I         <- 2                          # seed infections per run
 vac_frac       <- 0.5                        # coverage
 
 network_seeds  <- 1:10                       # contact-matrix realisations per pl_alpha
-alphas         <- c(0.1, 0.25, 0.5, 0.75, 0.9)  # vaccine susceptibility values
+alphas         <- c(0.5)                     # vaccine susceptibility values
 
 eate_method    <- "both"                     # "full" | "frozen" | "both"
 eate_slowdown  <- 1
@@ -124,53 +124,57 @@ message(glue("Wrote {out_dir}/raw.csv ({nrow(all_res)} rows)"))
 # Summarise + plot
 # ---------------------------------------------------------------------------
 
-# VE = 1 - eate at the final time, averaged over the eate_n_vac
-# re-samples (`sim` is the inner vac-iteration id from get_eate_network).
-ve <- all_res[t == max(t),
-              .(VE      = mean(1 - eate, na.rm = TRUE),
-                VE_q025 = quantile(1 - eate, 0.025, na.rm = TRUE),
-                VE_q975 = quantile(1 - eate, 0.975, na.rm = TRUE),
-                n       = .N),
-              by = .(pl_alpha, network_seed, alpha, method)]
-fwrite(ve, file.path(out_dir, "summary.csv"))
+# VE(t) trajectory for the full method only, one row per
+# (t, pl_alpha, network_seed, alpha) averaged over the eate_n_vac
+# inner vac re-samples.
+ve_t <- all_res[method == "full",
+                .(VE      = mean(1 - eate, na.rm = TRUE),
+                  VE_q025 = quantile(1 - eate, 0.025, na.rm = TRUE),
+                  VE_q975 = quantile(1 - eate, 0.975, na.rm = TRUE),
+                  n       = .N),
+                by = .(t, pl_alpha, network_seed, alpha)]
+fwrite(ve_t, file.path(out_dir, "summary.csv"))
 
-# Lines: VE vs alpha, one line per network realisation, rows = pl_alpha,
-# columns = method.
-p_lines <- ggplot(ve, aes(x = alpha, y = VE,
-                          group = factor(network_seed),
-                          colour = factor(network_seed))) +
-    geom_line(alpha = 0.7) +
-    geom_point() +
-    facet_grid(pl_alpha ~ method, labeller = label_both) +
+alpha_lab <- paste(unique(ve_t$alpha), collapse = ", ")
+
+# Trajectories: VE(t), one line per network realisation, rows = pl_alpha.
+# If multiple alphas are used the lines for different alphas get mixed
+# in each panel — fine for the single-alpha case the user is starting
+# from; otherwise add `+ facet_grid(pl_alpha ~ alpha, ...)`.
+p_lines <- ggplot(ve_t, aes(x = t, y = VE,
+                            group = factor(network_seed),
+                            colour = factor(network_seed))) +
+    geom_line(alpha = 0.8) +
+    geom_point(size = 1.5, alpha = 0.6) +
+    facet_wrap(~ pl_alpha, labeller = label_both, nrow = 1) +
     scale_colour_viridis_d(name = "network_seed") +
     theme_minimal(base_size = 13) +
-    labs(x = "alpha (vaccine susceptibility)",
-         y = "VE = 1 - EATE",
-         title = glue("Network VE sweep — mean_k={mean_k}, N={N}, beta={beta}"))
-ggsave(file.path(out_dir, "ve_by_alpha_lines.png"), p_lines,
-       width = 10, height = 3 * length(pl_alphas), dpi = 130)
+    labs(x = "t",
+         y = "VE = 1 - EATE (full)",
+         title = glue("VE(t) per network — mean_k={mean_k}, N={N}, beta={beta}, alpha={alpha_lab}"))
+ggsave(file.path(out_dir, "ve_trajectory.png"), p_lines,
+       width = 4 * length(pl_alphas), height = 4, dpi = 130)
 
-# Band: median + min/max across networks at each (pl_alpha, alpha).
-band <- ve[, .(VE_median = median(VE),
-               VE_min    = min(VE),
-               VE_max    = max(VE)),
-           by = .(pl_alpha, alpha, method)]
-p_band <- ggplot(band, aes(x = alpha, y = VE_median,
+# Band: median + min/max across networks at each (t, pl_alpha).
+band <- ve_t[, .(VE_median = median(VE),
+                 VE_min    = min(VE),
+                 VE_max    = max(VE)),
+             by = .(t, pl_alpha, alpha)]
+p_band <- ggplot(band, aes(x = t, y = VE_median,
                            group = factor(pl_alpha),
                            colour = factor(pl_alpha),
                            fill = factor(pl_alpha))) +
     geom_ribbon(aes(ymin = VE_min, ymax = VE_max), alpha = 0.2, colour = NA) +
     geom_line(size = 1) +
     geom_point(size = 2) +
-    facet_wrap(~ method) +
     scale_colour_viridis_d(name = "pl_alpha") +
     scale_fill_viridis_d(name = "pl_alpha") +
     theme_minimal(base_size = 13) +
-    labs(x = "alpha",
-         y = "VE",
-         title = glue("Median VE across {length(network_seeds)} network realisations per pl_alpha (band = min/max)"))
+    labs(x = "t",
+         y = "VE (full)",
+         title = glue("Median VE(t) across {length(network_seeds)} network realisations per pl_alpha (band = min/max)"))
 ggsave(file.path(out_dir, "ve_band.png"), p_band,
-       width = 10, height = 5, dpi = 130)
+       width = 9, height = 5, dpi = 130)
 
 message(glue("Wrote plots to {out_dir}/"))
 message("Done.")
