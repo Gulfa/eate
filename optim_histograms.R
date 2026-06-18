@@ -33,7 +33,7 @@ data_C1   <- 50        # target mean unvac cases at t*
 data_C2   <- 25        # target mean vac cases at t*
 t_star    <- 8
 
-n_sim_opt   <- 200     # stochastic replicates per loss evaluation
+n_sim_opt   <- 500     # stochastic replicates per loss evaluation
 n_sim_final <- 1000    # stochastic replicates for the histogram run
 
 gamma     <- 1         # project convention
@@ -53,10 +53,16 @@ mean_k       <- 6
 network_seed <- 1
 alloc_seed   <- 1
 
-# Optimiser starting point and iterations
-beta_ini    <- 1.0
-alpha_ini   <- 0.5
-optim_maxit <- 80
+# Optimiser: coarse log-grid to pick a per-model starting point (the
+# natural beta scale differs across linear / SIR / network even after
+# the SIR-equivalent rescaling in run_network), then Nelder-Mead refine
+# on log-parameters.
+log_beta_lo  <- log(0.01)
+log_beta_hi  <- log(5)
+log_alpha_lo <- log(0.01)
+log_alpha_hi <- log(2)
+grid_n       <- 6
+optim_maxit  <- 250
 
 out_dir <- "output/optim_histograms"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -133,7 +139,12 @@ run_sir_trans_frailty <- function(beta, alpha, n_sim) {
 }
 
 run_network <- function(beta, alpha, n_sim) {
-  out <- run_stoch_network(beta = beta, N = N_total,
+  # run_stoch_network internally multiplies its `beta` by N/k_mean before
+  # passing to dust. Rescale so the optimiser sees `beta` in SIR-equivalent
+  # units (≈ R0 in the mass-action limit), comparable to the other
+  # wrappers. With this transform `dust_beta = beta / k_mean`, which is
+  # the per-contact rate in the standard network-SIR formulation.
+  out <- run_stoch_network(beta = beta / N_total, N = N_total,
                            susceptibility = c(1, alpha),
                            t = t_star, c_ij = c_ij_fixed, vac = vac_fixed,
                            k_mean = mean_k, gamma = gamma,
@@ -166,17 +177,34 @@ make_loss <- function(model_fn) {
   }
 }
 
+grid_search_start <- function(loss_fn) {
+  best <- list(loss = Inf, log_par = c(0, 0))
+  for (lb in seq(log_beta_lo, log_beta_hi, length.out = grid_n)) {
+    for (la in seq(log_alpha_lo, log_alpha_hi, length.out = grid_n)) {
+      l <- loss_fn(c(lb, la))
+      if (is.finite(l) && l < best$loss) best <- list(loss = l, log_par = c(lb, la))
+    }
+  }
+  best
+}
+
 opt_results <- list()
 for (mname in names(models)) {
-  message(glue("Optimising {mname}..."))
-  loss <- make_loss(models[[mname]])
-  o <- optim(par = log(c(beta_ini, alpha_ini)), fn = loss,
+  message(glue("Grid-searching start for {mname}..."))
+  loss  <- make_loss(models[[mname]])
+  start <- grid_search_start(loss)
+  start_pars <- exp(start$log_par)
+  message(glue("  grid: beta = {round(start_pars[1], 4)}  alpha = {round(start_pars[2], 4)}  ",
+               "loss = {round(start$loss, 2)}"))
+
+  message(glue("Refining {mname}..."))
+  o <- optim(par = start$log_par, fn = loss,
              method = "Nelder-Mead",
-             control = list(maxit = optim_maxit, reltol = 1e-3))
+             control = list(maxit = optim_maxit, reltol = 1e-4))
   pars <- exp(o$par)
   opt_results[[mname]] <- list(beta = pars[1], alpha = pars[2],
                                loss = o$value, convergence = o$convergence)
-  message(glue("  beta = {round(pars[1], 4)}  alpha = {round(pars[2], 4)}  ",
+  message(glue("  refined: beta = {round(pars[1], 4)}  alpha = {round(pars[2], 4)}  ",
                "loss = {round(o$value, 3)}  conv = {o$convergence}"))
 }
 
