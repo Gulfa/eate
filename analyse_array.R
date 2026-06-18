@@ -38,7 +38,7 @@ message(glue("{length(ok)}/{length(flat)} configs returned a result"))
 # Per-config extraction: VE samples at final time, alpha posterior, ESS
 # ---------------------------------------------------------------------------
 
-extract <- function(r, method_pref = "full") {
+extract <- function(r, method_pref = "full_stoch") {
   cfg  <- r$config
   pars <- r$result$params
   ve   <- r$result$VE

@@ -36,7 +36,10 @@ base <- list(
     timepoints = seq(1, t, 1),
     n_sim    = 1000,
     cores    = 4,                                    # dust threads per call
-    eate_method = "full", eate_slowdown = 1, eate_n_vac = 10,
+    # Stochastic frozen-field EATE: eate_n_vac is the number of outer
+    # vac re-allocations per call, eate_n_rep is the number of dust
+    # replicates per allocation.
+    eate_n_vac = 10, eate_n_rep = 20,
     N_vac    = N_vac, X_vac = X_vac, N_cont = N_cont, X_cont = X_cont,
     n_cores  = 4,                                    # calc_ve_from_pars mclapply
     beta_ini = 1.5, alpha_ini = 0.5,
@@ -93,7 +96,7 @@ for (network_seed in 1:10) {
             I_ini       = 2,
             gamma       = 1,
             # 10 outer allocation_seeds already give us 10 vac realisations
-            # per network; no need for another 10 inside get_eate_network.
+            # per network; no need for more inside get_stoch_eate_network.
             eate_n_vac      = 1,
             network_seed    = network_seed,
             allocation_seed = allocation_seed))

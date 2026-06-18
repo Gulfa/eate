@@ -37,15 +37,17 @@ build_network_mod <- function(cfg) {
                                 method="dust", timepoints=cfg$timepoints,
                                 n_sim=cfg$n_sim, cores=cfg$cores)
 
-    # get_eate_network uses `f` instead of `vac_frac`; adapt the call so the
-    # outer purrr::partial in esteimate_VE_from_fs (which binds vac_frac/t/N)
-    # still works.
+    # get_stoch_eate_network uses `f` instead of `vac_frac`; adapt the call
+    # so the outer purrr::partial in esteimate_VE_from_fs (which binds
+    # vac_frac/t/N) still works. n_rep stochastic replicates per allocation
+    # replace the N+1 deterministic perturbation runs.
     eate_func <- function(beta, susceptibility, vac_frac, t, N, ...) {
-        get_eate_network(beta=beta, susceptibility=susceptibility,
-                         f=vac_frac, t=t, N=N, c_ij=c_ij,
-                         k_mean=cfg$mean_k, init_I=cfg$I_ini,
-                         method=cfg$eate_method, slowdown=cfg$eate_slowdown,
-                         n_vac=cfg$eate_n_vac, mc.cores=cfg$cores)
+        get_stoch_eate_network(beta=beta, susceptibility=susceptibility,
+                               f=vac_frac, t=t, N=N, c_ij=c_ij,
+                               k_mean=cfg$mean_k, init_I=cfg$I_ini,
+                               gamma=cfg$gamma,
+                               n_vac=cfg$eate_n_vac, n_rep=cfg$eate_n_rep,
+                               mc.cores=cfg$cores)
     }
     list(generator=generator, eate_func=eate_func)
 }
@@ -77,13 +79,18 @@ build_frailty_mod <- function(cfg) {
 
     # esteimate_VE_from_fs binds N=N_vac+N_cont (data total) to the eate_func.
     # The frailty EATE function uses the same 2*N convention as the simulator,
-    # so override to N/2 inside.
+    # so override to N/2 inside. n_rep stochastic replicates replace the
+    # deterministic frozen-field integration; I_ini_total is shared with the
+    # generator so initial-seed dynamics match.
     eate_func <- function(beta, susceptibility, vac_frac, t, N, ...) {
-        get_frailty_eate(alpha=susceptibility[2], sd=cfg$sd, sd_trans=cfg$sd_trans,
-                         beta=beta, f=vac_frac, N=N/2, t=t, n_frailty=cfg$n_frailty,
-                         gamma=cfg$gamma, method=cfg$eate_method,
-                         slowdown=cfg$eate_slowdown, n_vac=cfg$eate_n_vac,
-                         mc.cores=cfg$cores)
+        get_stoch_eate_frailty(alpha=susceptibility[2],
+                               sd=cfg$sd, sd_trans=cfg$sd_trans,
+                               beta=beta, f=vac_frac, N=N/2, t=t,
+                               n_frailty=cfg$n_frailty,
+                               gamma=cfg$gamma,
+                               I_ini_total=sum(cfg$I_ini),
+                               n_vac=cfg$eate_n_vac, n_rep=cfg$eate_n_rep,
+                               mc.cores=cfg$cores)
     }
     list(generator=generator, eate_func=eate_func)
 }

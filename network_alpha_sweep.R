@@ -1,10 +1,12 @@
-# Deterministic VE sweep over (pl_alpha, network_seed, alpha). For each
+# Stochastic VE sweep over (pl_alpha, network_seed, alpha). For each
 # pl_alpha (Pareto exponent of the contact distribution) we materialise
 # `network_seeds` independent contact graphs, and for every alpha
 # (vaccine-susceptibility) value compute EATE / VE through
-# get_eate_network directly (no MCMC fitting). Useful for seeing how VE
-# changes across degree heterogeneity, network realisations, and
-# vaccine effectiveness.
+# get_stoch_eate_network: n_rep stochastic factual replicates per
+# allocation plus the per-individual frozen-field counterfactual derived
+# from the extracted FOI trajectories. No MCMC fitting. Useful for
+# seeing how VE changes across degree heterogeneity, network
+# realisations, and vaccine effectiveness.
 #
 # Usage:
 #   Rscript network_alpha_sweep.R
@@ -34,9 +36,8 @@ vac_frac       <- 0.5                        # coverage
 network_seeds  <- 1:10                       # contact-matrix realisations per pl_alpha
 alphas         <- c(0.5)                     # vaccine susceptibility values
 
-eate_method    <- "both"                     # "full" | "frozen" | "both"
-eate_slowdown  <- 1
-eate_n_vac     <- 5                          # vac re-samples inside get_eate_network
+eate_n_vac     <- 5                          # vac re-samples inside get_stoch_eate_network
+eate_n_rep     <- 1000                       # stochastic factual reps per allocation
 
 # Parallelism: outer = across (pl_alpha, network_seed, alpha) cells,
 # inner = across the eate_n_vac allocations inside one cell. Outer is
@@ -84,18 +85,18 @@ message(glue("Dispatching {n_total} cells across outer_cores={outer_cores}, inne
 run_cell <- function(job) {
     c_ij <- networks[[sprintf("%s|%d", format(job$pl_alpha), job$network_seed)]]
     message(glue("  cell pl_alpha={job$pl_alpha} seed={job$network_seed} alpha={job$alpha}"))
-    res <- get_eate_network(beta           = beta,
-                            susceptibility = c(1, job$alpha),
-                            f              = vac_frac,
-                            N              = N,
-                            t              = t,
-                            c_ij           = c_ij,
-                            n_vac          = eate_n_vac,
-                            method         = eate_method,
-                            k_mean         = mean_k,
-                            slowdown       = eate_slowdown,
-                            mc.cores       = inner_cores,
-                            init_I         = init_I)
+    res <- get_stoch_eate_network(beta           = beta,
+                                  susceptibility = c(1, job$alpha),
+                                  f              = vac_frac,
+                                  N              = N,
+                                  t              = t,
+                                  c_ij           = c_ij,
+                                  n_vac          = eate_n_vac,
+                                  n_rep          = eate_n_rep,
+                                  k_mean         = mean_k,
+                                  gamma          = gamma,
+                                  mc.cores       = inner_cores,
+                                  init_I         = init_I)
     setDT(res)
     res[, pl_alpha     := job$pl_alpha]
     res[, network_seed := job$network_seed]
@@ -124,10 +125,10 @@ message(glue("Wrote {out_dir}/raw.csv ({nrow(all_res)} rows)"))
 # Summarise + plot
 # ---------------------------------------------------------------------------
 
-# VE(t) trajectory for the full method only, one row per
+# VE(t) trajectory for the stochastic full method only, one row per
 # (t, pl_alpha, network_seed, alpha) averaged over the eate_n_vac
 # inner vac re-samples.
-ve_t <- all_res[method == "full",
+ve_t <- all_res[method == "full_stoch",
                 .(VE      = mean(1 - eate, na.rm = TRUE),
                   VE_q025 = quantile(1 - eate, 0.025, na.rm = TRUE),
                   VE_q975 = quantile(1 - eate, 0.975, na.rm = TRUE),
