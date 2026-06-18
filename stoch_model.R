@@ -927,5 +927,339 @@ fit_mod_norm <- function(mod, X_cont=NULL, X_vac=NULL, beta_ini=1, alpha_ini=0.5
    print(coda::effectiveSize(res$batch))
 
   return(res$batch)
-  
+
+}
+
+
+# ---------------------------------------------------------------------------
+# Stochastic EATE via frozen-field counterfactual (network)
+# ---------------------------------------------------------------------------
+#
+# Replaces the N+1 deterministic perturbation runs of get_eate_network
+# with a stochastic factual averaged over n_rep replicates plus a
+# per-individual frozen-field counterfactual. Each EATE expectation
+# still uses 2N inputs but only N of them come from new "simulations":
+# the N counterfactual expectations (the ones that flip a unit's vac
+# status) are derived analytically from extracted force-of-infection
+# trajectories.
+#
+#   For each replicate r and each individual i accumulate the FOI they
+#   would have experienced assuming they stayed susceptible:
+#       cumFOI_i^(r)(t) = integral_0^t  beta/k_mean * sum_{j in N(i)} I_j^(r)(s) ds
+#   Then under counterfactual susceptibility sus_v,
+#       P_i^v(t) = 1 - mean_r exp( - sus_v * cumFOI_i^(r)(t) )
+#   with sus_v = 1 ("unvac counterfactual") or alpha ("vac counterfactual",
+#   matching the codebase convention that susceptibility[2] = alpha).
+#
+#   Like the deterministic frozen-field EATE, individuals whose factual
+#   vac status matches the counterfactual contribute their *factual*
+#   case probability (averaged over reps), and the flipped side uses the
+#   frozen counterfactual:
+#       num   = sum_{i in vac}     P_i^factual  +  sum_{i not in vac} P_i^vac
+#       denom = sum_{i not in vac} P_i^factual  +  sum_{i in vac}     P_i^unvac
+#       EATE  = num / denom
+#   CRR(t) is taken from the factual cumulative cases per group.
+#
+# Outer parallelism: parallel::mclapply across n_vac allocations
+# (mc.cores). Inner parallelism: dust2 threads inside one replicate
+# batch (inner_cores). Defaults send all cores to the outer loop.
+
+# Helper: reshape one column of a (time outer, sim inner) data.table
+# into an [n_t, n_rep] matrix. Mirrors the dust2 output layout used by
+# run_stoch_adj / run_stoch_cd_dust.
+.dt_col_to_t_rep_matrix <- function(v, n_t, n_rep) {
+  matrix(v, nrow = n_t, ncol = n_rep, byrow = TRUE)
+}
+
+# Trapezoidal cumulative integral along the first axis of a [n_t, n_x]
+# matrix `FI` against time grid `timepoints`. Returns [n_t, n_x] with
+# row 1 = 0.
+.cum_trapz <- function(FI, timepoints) {
+  n_t <- nrow(FI)
+  out <- matrix(0, nrow = n_t, ncol = ncol(FI))
+  if (n_t < 2L) return(out)
+  dt_vec <- diff(timepoints)
+  for (it in seq.int(2L, n_t)) {
+    out[it, ] <- out[it - 1L, ] + (FI[it, ] + FI[it - 1L, ]) / 2 * dt_vec[it - 1L]
+  }
+  out
+}
+
+get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
+                                   N = 200, t = 15, pl_alpha = 3, c_ij = NULL,
+                                   n_vac = 10, n_rep = 20,
+                                   k_mean = 6, gamma = 1 / 3, dt = 0.1,
+                                   timepoints = NULL, init_I = 2,
+                                   mc.cores = 10, inner_cores = 1) {
+  alpha <- susceptibility[2]
+  if (is.null(c_ij))       c_ij       <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t <- length(timepoints)
+
+  run_one_allocation <- function() {
+    vac      <- sample(seq_len(N), round(f * N))
+    non_vac  <- setdiff(seq_len(N), vac)
+    sim_id   <- runif(1)
+
+    susept       <- rep(1, N)
+    susept[vac]  <- alpha
+    I_ini_vec    <- c(rep(1L, init_I), rep(0L, N - init_I))
+
+    raw <- run_stoch_adj(c_ij,
+                         beta           = N * beta / k_mean,
+                         t              = t,
+                         I_ini          = I_ini_vec,
+                         susceptibility = susept,
+                         gamma          = gamma,
+                         dt             = dt,
+                         timepoints     = timepoints,
+                         n_sim          = n_rep,
+                         cores          = inner_cores)
+    setDT(raw)
+
+    # Factual cumulative cases per (timepoint, individual), averaged over
+    # replicates. C_k is 0/1 per replicate; rowMeans gives P_factual_i.
+    P_factual <- matrix(0, nrow = n_t, ncol = N)
+    I_mat     <- array(0, dim = c(n_t, n_rep, N))
+    for (k in seq_len(N)) {
+      Ck <- .dt_col_to_t_rep_matrix(raw[[paste0("C", k)]], n_t, n_rep)
+      P_factual[, k] <- rowMeans(Ck)
+      I_mat[,, k]    <- .dt_col_to_t_rep_matrix(raw[[paste0("I", k)]], n_t, n_rep)
+    }
+
+    # Per-replicate cumulative FOI per individual:
+    #   FOI_i^(r)(t) = beta/k_mean * sum_{j in N(i)} I_j^(r)(t)
+    cum_foi_traj <- array(0, dim = c(n_t, n_rep, N))
+    for (r in seq_len(n_rep)) {
+      I_traj_r <- I_mat[, r, ]                                 # [n_t, N]
+      FI_r     <- (I_traj_r %*% t(c_ij)) * (beta / k_mean)     # [n_t, N]
+      cum_foi_traj[, r, ] <- .cum_trapz(FI_r, timepoints)
+    }
+
+    # Hybrid EATE: matching side uses P_factual, flipped side uses the
+    # frozen counterfactual averaged over replicates.
+    eate_t <- numeric(n_t)
+    crr_t  <- numeric(n_t)
+    for (it in seq_len(n_t)) {
+      cfi        <- cum_foi_traj[it, , ]                       # [n_rep, N]
+      P_vac_cf   <- 1 - colMeans(exp(-alpha * cfi))            # length N
+      P_unvac_cf <- 1 - colMeans(exp(-cfi))                    # length N
+      P_fac      <- P_factual[it, ]                            # length N
+      num   <- sum(P_fac[vac])     + sum(P_vac_cf[non_vac])
+      denom <- sum(P_fac[non_vac]) + sum(P_unvac_cf[vac])
+      eate_t[it] <- num / denom
+      crr_t[it]  <- (sum(P_fac[vac])     / length(vac)) /
+                    (sum(P_fac[non_vac]) / length(non_vac))
+    }
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}
+
+
+# ---------------------------------------------------------------------------
+# Stochastic EATE via frozen-field counterfactual (frailty / homogeneous)
+# ---------------------------------------------------------------------------
+#
+# Same hybrid form as get_stoch_eate_network, but the population is split
+# into 2*n_frailty groups (n_frailty unvac bins + n_frailty vac bins).
+# Mixing is uniform, so the FOI experienced by any individual is identical
+# at each (t, replicate) — we accumulate a single cum_foi_rep[t, r]
+# trajectory per replicate and broadcast it across bins.
+#
+#   FOI(t, r) = beta * sum_g trans_g * I_g^(r)(t) / (n_groups * N_total)
+#   cum_foi_rep[t, r] = trapezoidal integral of FOI over timepoints
+#   sus_v_k = frailty[k] for v=0 (unvac), alpha * frailty[k] for v=1 (vac)
+#   P_v_k(t) = 1 - mean_r exp( - sus_v_k * cum_foi_rep[t, r] )
+#   num   = sum_k [ C_vac_bin[t, k]   + P_vac_k(t)   * N_unvac_grp[k] ]
+#   denom = sum_k [ C_unvac_bin[t, k] + P_unvac_k(t) * N_vac_grp[k]   ]
+#   EATE  = num / denom
+#
+# The "no heterogeneity" case is n_frailty = 1 with sd = sd_trans = 0:
+# the population has 2 groups (unvac + vac), the formula simplifies to
+# the user's e^{-(1 - alpha * v) * s * FOI} form with the codebase
+# convention sus_v = (1-v) + alpha * v and s = frailty[k] = 1.
+
+get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NULL,
+                                   f = 0.5, N = 1000, t = 30, n_frailty = 1,
+                                   n_vac = 10, n_rep = 20,
+                                   gamma = 1, dt = 0.1, timepoints = NULL,
+                                   I_ini_total = 1, mc.cores = 10,
+                                   inner_cores = 1) {
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t <- length(timepoints)
+
+  if (n_frailty == 1L) {
+    if (sd > 0 || sd_trans > 0) {
+      warning("n_frailty=1 collapses bins; sd / sd_trans inputs are ignored.")
+    }
+    fr_p          <- 1
+    frailty       <- 1
+    trans_frailty <- 1
+  } else {
+    sd_pop <- if (sd > 0) sd else sd_trans
+    if (sd_pop <= 0) {
+      stop("get_stoch_eate_frailty with n_frailty>1 requires sd>0 or sd_trans>0")
+    }
+    fr      <- get_frailty(sd = sd_pop, n = n_frailty)
+    fr_p    <- fr$p
+    frailty <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+    trans_frailty <- if (sd_trans > 0) {
+      if (sd_trans == sd_pop) {
+        exp(2.5 * fr$x)
+      } else {
+        cf_pop <- (0.25 / sd_pop^2)   - 1
+        cf_t   <- (0.25 / sd_trans^2) - 1
+        ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
+        exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
+      }
+    } else {
+      rep(1, n_frailty)
+    }
+  }
+
+  n_total_k     <- round(2 * N * fr_p)
+  n_groups      <- 2L * n_frailty
+  trans_all     <- c(trans_frailty, trans_frailty)
+  sus_unvac_bin <- frailty
+  sus_vac_bin   <- alpha * frailty
+  N_total       <- sum(n_total_k)
+
+  if (!is.null(R)) {
+    beta <- get_beta(R, alpha, sd, sd_trans = sd_trans, f = f,
+                     N = N, n_frailty = n_frailty, gamma = gamma)
+  }
+
+  spread <- function(total, sizes) {
+    if (total == 0L) return(integer(length(sizes)))
+    target <- total * sizes / sum(sizes)
+    ini    <- pmin(floor(target), sizes)
+    rem    <- total - sum(ini)
+    if (rem > 0L) {
+      for (idx in order(target - ini, decreasing = TRUE)) {
+        if (rem == 0L) break
+        if (ini[idx] < sizes[idx]) {
+          ini[idx] <- ini[idx] + 1L
+          rem      <- rem - 1L
+        }
+      }
+    }
+    as.integer(ini)
+  }
+
+  run_one_allocation <- function() {
+    n_vac_total <- round(f * N_total)
+    vac_counts  <- if (n_frailty == 1L) {
+      as.integer(n_vac_total)
+    } else {
+      tabulate(sample(rep(seq_len(n_frailty), n_total_k), n_vac_total),
+               nbins = n_frailty)
+    }
+    sim_id <- runif(1)
+
+    N_groups <- c(n_total_k - vac_counts, vac_counts)
+    susceptibility   <- c(frailty,       alpha * frailty)
+    transmissibility <- c(trans_frailty, trans_frailty)
+    mm <- matrix(1, nrow = n_groups, ncol = n_groups) / n_groups
+
+    N_unvac_grp <- N_groups[seq_len(n_frailty)]
+    N_vac_grp   <- N_groups[(n_frailty + 1L):n_groups]
+    total_unvac <- sum(N_unvac_grp); total_vac <- sum(N_vac_grp)
+
+    ut          <- I_ini_total * total_unvac / (total_unvac + total_vac)
+    unvac_seeds <- min(floor(ut), total_unvac)
+    vac_seeds   <- I_ini_total - unvac_seeds
+    if (vac_seeds > total_vac) {
+      deficit     <- vac_seeds - total_vac
+      vac_seeds   <- as.integer(total_vac)
+      unvac_seeds <- unvac_seeds + deficit
+    } else if (ut - unvac_seeds > 0.5 && unvac_seeds < total_unvac && vac_seeds > 0L) {
+      unvac_seeds <- unvac_seeds + 1L; vac_seeds <- vac_seeds - 1L
+    }
+    I_ini <- c(spread(as.integer(unvac_seeds), N_unvac_grp),
+               spread(as.integer(vac_seeds),   N_vac_grp))
+
+    raw <- run_stoch_cd_dust(mm, beta = beta, N = N_groups, t = t,
+                             I_ini = I_ini,
+                             susceptibility = susceptibility,
+                             transmissibility = transmissibility,
+                             gamma = gamma, dt = dt,
+                             timepoints = timepoints,
+                             n_sim = n_rep, cores = inner_cores)
+    setDT(raw)
+
+    # I_mat[t, r, g] for all 2*n_frailty groups.
+    I_mat <- array(0, dim = c(n_t, n_rep, n_groups))
+    for (g in seq_len(n_groups)) {
+      I_mat[,, g] <- .dt_col_to_t_rep_matrix(raw[[paste0("I", g)]], n_t, n_rep)
+    }
+
+    # Uniform mixing => one common FOI per (t, rep). Matches the
+    # deterministic frozen-field normalisation in get_frailty_eate.
+    cum_foi_rep <- matrix(0, nrow = n_t, ncol = n_rep)
+    for (r in seq_len(n_rep)) {
+      I_traj_r     <- if (n_groups == 1L) {
+        matrix(I_mat[, r, ], nrow = n_t, ncol = 1)
+      } else {
+        I_mat[, r, ]                                              # [n_t, n_groups]
+      }
+      I_weighted_r <- as.numeric(I_traj_r %*% trans_all)          # [n_t]
+      FI_r         <- beta * I_weighted_r / (n_groups * N_total)  # [n_t]
+      cum_foi_rep[, r] <- .cum_trapz(matrix(FI_r, ncol = 1), timepoints)[, 1]
+    }
+
+    # Factual cumulative cases per bin, averaged over reps.
+    C_unvac_bin <- matrix(0, nrow = n_t, ncol = n_frailty)
+    C_vac_bin   <- matrix(0, nrow = n_t, ncol = n_frailty)
+    for (k in seq_len(n_frailty)) {
+      C_unvac_bin[, k] <- rowMeans(.dt_col_to_t_rep_matrix(
+        raw[[paste0("C", k)]], n_t, n_rep))
+      C_vac_bin[, k]   <- rowMeans(.dt_col_to_t_rep_matrix(
+        raw[[paste0("C", n_frailty + k)]], n_t, n_rep))
+    }
+
+    # Hybrid EATE per timepoint: matching side uses factual cases, flipped
+    # side uses the per-bin frozen counterfactual scaled by bin population.
+    eate_t <- numeric(n_t)
+    for (it in seq_len(n_t)) {
+      cfi <- cum_foi_rep[it, ]                                    # [n_rep]
+      # outer(cfi, sus_bin) -> [n_rep, n_frailty]; colMeans gives [n_frailty].
+      surv_vac_k   <- colMeans(exp(-outer(cfi, sus_vac_bin)))
+      surv_unvac_k <- colMeans(exp(-outer(cfi, sus_unvac_bin)))
+      P_vac_k      <- 1 - surv_vac_k
+      P_unvac_k    <- 1 - surv_unvac_k
+
+      num   <- sum(C_vac_bin[it, ])   + sum(P_vac_k   * N_unvac_grp)
+      denom <- sum(C_unvac_bin[it, ]) + sum(P_unvac_k * N_vac_grp)
+      eate_t[it] <- num / denom
+    }
+    crr_t <- (rowSums(C_vac_bin) / total_vac) /
+             (rowSums(C_unvac_bin) / total_unvac)
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
 }
