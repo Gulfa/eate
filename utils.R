@@ -27,9 +27,13 @@ get_beta <- function(R, alpha, sd, sd_trans=0, f=0.5, N=1000, n_frailty=100, gam
   sd_pop <- if (sd > 0) sd else sd_trans
   if (sd_pop > 0) {
     fr        <- get_frailty(sd=sd_pop, n=n_frailty)
-    sus_bin   <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+    # Normalised to population-mean 1 so beta=R0/gamma in the homogeneous
+    # limit (matches run_stoch_frailty_cd / get_frailty_eate).
+    sus_bin   <- if (sd > 0) {
+      raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+    } else rep(1, n_frailty)
     trans_bin <- if (sd_trans > 0) {
-      if (sd_trans == sd_pop) {
+      raw <- if (sd_trans == sd_pop) {
         exp(2.5 * fr$x)
       } else {
         cf_pop <- (0.25 / sd_pop^2)   - 1
@@ -37,6 +41,7 @@ get_beta <- function(R, alpha, sd, sd_trans=0, f=0.5, N=1000, n_frailty=100, gam
         ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
         exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
       }
+      raw / sum(fr$p * raw)
     } else {
       rep(1, n_frailty)
     }
@@ -49,7 +54,10 @@ get_beta <- function(R, alpha, sd, sd_trans=0, f=0.5, N=1000, n_frailty=100, gam
     tr    <- c(1, 1)
   }
   n_g <- length(S_ini)
-  mm  <- matrix(1, nrow=n_g, ncol=n_g) / n_g
+  # Unit mixing entries (NOT /n_g) to match run_stoch_frailty_cd /
+  # run_frailty_cd convention; combined with frailty arrays normalised to
+  # mean 1, this gives R0 = beta/gamma in the homogeneous limit.
+  mm  <- matrix(1, nrow=n_g, ncol=n_g)
   ng  <- outer(sus * S_ini, tr) * mm / (gamma * 2 * N)
   eig <- Re(eigen(ng, only.values=TRUE)$values[1])
   R / eig

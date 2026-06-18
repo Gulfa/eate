@@ -194,10 +194,16 @@ run_frailty_cd <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000,
   sd_pop <- if (sd > 0) sd else sd_trans
   if(sd_pop > 0){
     fr <- get_frailty(sd=sd_pop, n=n_frailty)
-    frailty <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+    # Frailty arrays are normalised to population-mean 1 (sum(fr$p * x) = 1)
+    # so that beta retains R0 = beta/gamma interpretation in the homogeneous
+    # limit; heterogeneity then only contributes through the variance of the
+    # NGM, not through a shift in the mean transmission rate.
+    frailty <- if (sd > 0) {
+      raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+    } else rep(1, n_frailty)
     # Rank-correlated trans frailty (mirrors run_stoch_frailty_cd).
     trans_frailty <- if (sd_trans > 0) {
-      if (sd_trans == sd_pop) {
+      raw <- if (sd_trans == sd_pop) {
         exp(2.5 * fr$x)
       } else {
         cf_pop <- (0.25 / sd_pop^2)   - 1
@@ -205,6 +211,7 @@ run_frailty_cd <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000,
         ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
         exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
       }
+      raw / sum(fr$p * raw)
     } else {
       rep(1, n_frailty)
     }
@@ -324,9 +331,13 @@ get_frailty_eate <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=100
   sd_pop    <- if (sd > 0) sd else sd_trans
   if (sd_pop <= 0) stop("get_frailty_eate requires sd > 0 or sd_trans > 0")
   fr        <- get_frailty(sd=sd_pop, n=n_frailty)
-  frailty   <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+  # Frailty arrays normalised to population-mean 1; see comment in
+  # run_frailty_cd.
+  frailty   <- if (sd > 0) {
+    raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+  } else rep(1, n_frailty)
   trans_frailty <- if (sd_trans > 0) {
-    if (sd_trans == sd_pop) {
+    raw <- if (sd_trans == sd_pop) {
       exp(2.5 * fr$x)
     } else {
       cf_pop <- (0.25 / sd_pop^2)   - 1
@@ -334,6 +345,7 @@ get_frailty_eate <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=100
       ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
       exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
     }
+    raw / sum(fr$p * raw)
   } else {
     rep(1, n_frailty)
   }

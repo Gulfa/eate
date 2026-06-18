@@ -415,7 +415,7 @@ run_coupled_frailty_sir <- function(alpha, sd, beta=1, R=NULL, f=0.5, N=200, t=3
   if (!is.null(R)) beta <- get_beta(R, alpha, sd, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
 
   fr      <- get_frailty(sd=sd, n=n_frailty)
-  frailty <- exp(2.5 * fr$x)
+  frailty <- { raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw) }
   n_total <- round(2 * N * fr$p)
   if (is.null(vac_counts_x)) vac_counts_x <- round(f * n_total)
   if (is.null(vac_counts_z)) vac_counts_z <- round(f * n_total)
@@ -553,7 +553,7 @@ run_stoch_frailty_linear <- function(alpha, sd, beta=1, f=0.5, N=1000, t=100,
                                       method=c("ctmc", "dust"), dt=0.1) {
   method <- match.arg(method)
   fr      <- get_frailty(sd=sd, n=n_frailty)
-  frailty <- exp(2.5 * fr$x)
+  frailty <- { raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw) }
   n_total <- round(2 * N * fr$p)
   if (is.null(vac_counts)) vac_counts <- round(f * n_total)
 
@@ -658,7 +658,7 @@ run_coupled_frailty_linear <- function(alpha, sd, beta=1, f=0.5, N=1000, t=100,
                                         n_frailty=100, vac_counts_x=NULL, vac_counts_z=NULL,
                                         timepoints=seq(0, t, 1), n_sim=100, cores=10) {
   fr      <- get_frailty(sd=sd, n=n_frailty)
-  frailty <- exp(2.5 * fr$x)
+  frailty <- { raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw) }
   n_total <- round(2 * N * fr$p)
   if (is.null(vac_counts_x)) vac_counts_x <- round(f * n_total)
   if (is.null(vac_counts_z)) vac_counts_z <- round(f * n_total)
@@ -724,13 +724,19 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
   if (is.null(vac_counts)) vac_counts <- round(f * n_total)
 
   # Per-bin susceptibility frailty. When sd = 0 there is no sus heterogeneity.
-  frailty <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+  # Both arrays are normalised to population-mean 1 (sum(fr$p * x) = 1) so
+  # heterogeneity contributes only via the NGM variance, not via a shift in
+  # the mean transmission rate — beta therefore retains the R0 = beta/gamma
+  # interpretation in the homogeneous limit.
+  frailty <- if (sd > 0) {
+    raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+  } else rep(1, n_frailty)
 
   # Per-bin transmissibility frailty, rank-correlated with sus. If sd_trans
   # matches the population sd_pop the bins already sit at the right values;
   # otherwise map ranks through the matching Beta inverse CDF.
   trans_frailty <- if (sd_trans > 0) {
-    if (sd_trans == sd_pop) {
+    raw <- if (sd_trans == sd_pop) {
       exp(2.5 * fr$x)
     } else {
       cf_pop        <- (0.25 / sd_pop^2)   - 1
@@ -738,6 +744,7 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
       ranks         <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
       exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
     }
+    raw / sum(fr$p * raw)
   } else {
     rep(1, n_frailty)
   }
@@ -1119,9 +1126,12 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
     }
     fr      <- get_frailty(sd = sd_pop, n = n_frailty)
     fr_p    <- fr$p
-    frailty <- if (sd > 0) exp(2.5 * fr$x) else rep(1, n_frailty)
+    # Frailty arrays normalised to population-mean 1; see run_stoch_frailty_cd.
+    frailty <- if (sd > 0) {
+      raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+    } else rep(1, n_frailty)
     trans_frailty <- if (sd_trans > 0) {
-      if (sd_trans == sd_pop) {
+      raw <- if (sd_trans == sd_pop) {
         exp(2.5 * fr$x)
       } else {
         cf_pop <- (0.25 / sd_pop^2)   - 1
@@ -1129,6 +1139,7 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
         ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
         exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
       }
+      raw / sum(fr$p * raw)
     } else {
       rep(1, n_frailty)
     }

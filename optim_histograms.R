@@ -33,8 +33,9 @@ data_C1   <- 50        # target mean unvac cases at t*
 data_C2   <- 25        # target mean vac cases at t*
 t_star    <- 8
 
-n_sim_opt   <- 500     # stochastic replicates per loss evaluation
+n_sim_opt   <- 1000    # stochastic replicates per loss evaluation
 n_sim_final <- 1000    # stochastic replicates for the histogram run
+n_restarts  <- 3       # extra Nelder-Mead restarts if simplex degenerates
 
 gamma     <- 1         # project convention
 I_ini_2g  <- c(10, 10) # seeds per group for SIR / frailty
@@ -200,6 +201,22 @@ for (mname in names(models)) {
   o <- optim(par = start$log_par, fn = loss,
              method = "Nelder-Mead",
              control = list(maxit = optim_maxit, reltol = 1e-4))
+  # Restart with a fresh simplex if Nelder-Mead exited non-zero. Most often
+  # we see conv = 10 (simplex degeneracy) on noisy stochastic losses; the
+  # restart re-seeds the simplex from the current best and usually breaks
+  # the deadlock. Keep the lowest-loss result across attempts.
+  best <- o
+  for (rs in seq_len(n_restarts)) {
+    if (o$convergence == 0) break
+    o <- optim(par = o$par, fn = loss,
+               method = "Nelder-Mead",
+               control = list(maxit = optim_maxit, reltol = 1e-4))
+    if (o$value < best$value) best <- o
+    message(glue("  restart {rs}: beta = {round(exp(o$par[1]), 4)}  ",
+                 "alpha = {round(exp(o$par[2]), 4)}  ",
+                 "loss = {round(o$value, 3)}  conv = {o$convergence}"))
+  }
+  o <- best
   pars <- exp(o$par)
   opt_results[[mname]] <- list(beta = pars[1], alpha = pars[2],
                                loss = o$value, convergence = o$convergence)
