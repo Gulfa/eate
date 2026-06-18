@@ -219,7 +219,10 @@ run_frailty_cd <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000,
       S_ini=c(n_total - vac_counts, vac_counts),
       susceptibility=c(frailty, alpha*frailty),
       transmisibility=c(trans_frailty, trans_frailty))   # vaccine acts on sus only
-    mm <- matrix(1, nrow=params$n, ncol=params$n) / params$n
+    # Unit mixing entries (NOT /n_groups) so beta=R0*gamma in the
+    # homogeneous limit — matches the run_det_cd convention used by the
+    # homogeneous 2-group SIR.
+    mm <- matrix(1, nrow=params$n, ncol=params$n)
 
     if(!is.null(R)){
       beta <- get_beta(R, alpha, sd, sd_trans=sd_trans, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
@@ -367,7 +370,9 @@ get_frailty_eate <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=100
     I_mat       <- as.matrix(full_res_slow$full[, paste0("I[", 1:n, "]")])
     I_weighted  <- as.numeric(I_mat %*% trans_all)
     N_total     <- sum(n_total_k)
-    cum_foi_all <- cumsum((beta/slowdown) * I_weighted / (n * N_total))
+    # Frozen-field FOI matching run_frailty_cd's mm = matrix(1) convention
+    # (rates are beta * I_total/N in the homogeneous limit).
+    cum_foi_all <- cumsum((beta/slowdown) * I_weighted / N_total)
 
     num_all   <- rep(0, t_slow)
     denom_all <- rep(0, t_slow)

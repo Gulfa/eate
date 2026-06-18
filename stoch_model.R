@@ -746,7 +746,11 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
   N_groups       <- c(n_total - vac_counts, vac_counts)
   susceptibility <- c(frailty, alpha * frailty)
   transmissibility <- c(trans_frailty, trans_frailty)  # vaccine acts on sus only
-  mm             <- matrix(1, nrow=n_groups, ncol=n_groups) / n_groups
+  # Unit mixing entries (NOT /n_groups). The dust SIR model uses
+  #   foi = beta * sum_j mm[i,j] * I_j / N
+  # so this gives foi = beta * I_total/N in the homogeneous limit, i.e.
+  # R0 = beta/gamma — matching the homog SIR wrapper's mm = matrix(1,2,2).
+  mm             <- matrix(1, nrow=n_groups, ncol=n_groups)
   
   # Spread I_ini_total seeds proportionally across vac and unvac populations,
   # then within each across frailty bins. Two-step rounding keeps the
@@ -1079,7 +1083,7 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
 # at each (t, replicate) — we accumulate a single cum_foi_rep[t, r]
 # trajectory per replicate and broadcast it across bins.
 #
-#   FOI(t, r) = beta * sum_g trans_g * I_g^(r)(t) / (n_groups * N_total)
+#   FOI(t, r) = beta * sum_g trans_g * I_g^(r)(t) / N_total
 #   cum_foi_rep[t, r] = trapezoidal integral of FOI over timepoints
 #   sus_v_k = frailty[k] for v=0 (unvac), alpha * frailty[k] for v=1 (vac)
 #   P_v_k(t) = 1 - mean_r exp( - sus_v_k * cum_foi_rep[t, r] )
@@ -1172,7 +1176,9 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
     N_groups <- c(n_total_k - vac_counts, vac_counts)
     susceptibility   <- c(frailty,       alpha * frailty)
     transmissibility <- c(trans_frailty, trans_frailty)
-    mm <- matrix(1, nrow = n_groups, ncol = n_groups) / n_groups
+    # Unit mixing entries (NOT /n_groups) so beta=R0*gamma in the
+    # homogeneous limit — matches run_stoch_frailty_cd.
+    mm <- matrix(1, nrow = n_groups, ncol = n_groups)
 
     N_unvac_grp <- N_groups[seq_len(n_frailty)]
     N_vac_grp   <- N_groups[(n_frailty + 1L):n_groups]
@@ -1216,7 +1222,7 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
         I_mat[, r, ]                                              # [n_t, n_groups]
       }
       I_weighted_r <- as.numeric(I_traj_r %*% trans_all)          # [n_t]
-      FI_r         <- beta * I_weighted_r / (n_groups * N_total)  # [n_t]
+      FI_r         <- beta * I_weighted_r / N_total               # [n_t]
       cum_foi_rep[, r] <- .cum_trapz(matrix(FI_r, ncol = 1), timepoints)[, 1]
     }
 

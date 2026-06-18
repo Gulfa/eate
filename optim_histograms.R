@@ -139,12 +139,11 @@ run_sir_trans_frailty <- function(beta, alpha, n_sim) {
 }
 
 run_network <- function(beta, alpha, n_sim) {
-  # run_stoch_network internally multiplies its `beta` by N/k_mean before
-  # passing to dust. Rescale so the optimiser sees `beta` in SIR-equivalent
-  # units (≈ R0 in the mass-action limit), comparable to the other
-  # wrappers. With this transform `dust_beta = beta / k_mean`, which is
-  # the per-contact rate in the standard network-SIR formulation.
-  out <- run_stoch_network(beta = beta / N_total, N = N_total,
+  # run_stoch_network already gives R0 = beta/gamma in the homogeneous-
+  # network limit (its dust_beta = N*beta/k_mean combines with the adj
+  # model's foi = beta_dust/N*sum_neighbours to produce R0 = beta/gamma).
+  # No extra rescale needed here.
+  out <- run_stoch_network(beta = beta, N = N_total,
                            susceptibility = c(1, alpha),
                            t = t_star, c_ij = c_ij_fixed, vac = vac_fixed,
                            k_mean = mean_k, gamma = gamma,
