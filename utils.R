@@ -141,3 +141,74 @@ contact_matrix_to_weighted_adj <- function(contact_matrix) {
 add_theme <- function(q){
   q + theme_bw() + theme(text = element_text(size=8)) + scale_size_identity()
 }
+
+
+# ---------------------------------------------------------------------------
+# Approximate posterior covariance (J^-1 Sigma J^-T)
+# ---------------------------------------------------------------------------
+#
+# Given a stochastic simulator and a fitted (beta, alpha), estimate the
+# Gaussian/Laplace posterior covariance via the sandwich
+#     Cov(theta_hat) ~ J^-1 Sigma J^-T
+# where
+#   J[i, j] = d E[C_i] / d theta_j  (central finite differences),
+#   Sigma   = Cov(C_i) / n_sim      (the standard error of mean estimates),
+# computed with common random numbers (CRN) — the same dust2 seed is
+# used for all 5 simulator calls so the finite-difference noise drops
+# from O(1/sqrt(n_sim)) to O(h^2). The base run also supplies Sigma so
+# we don't have to pool the ± perturbed runs (which would inflate Sigma
+# with a between-group component).
+#
+# `simulator(beta, alpha, n_sim, seed)` must return a data.frame with
+# columns C1, C2 (one row per replicate at the focal time).
+#
+# Returns a list with
+#   cov   2x2 posterior covariance of (beta, alpha)
+#   J     2x2 Jacobian (rows = (C1, C2), cols = (beta, alpha))
+#   Sigma 2x2 covariance of the means of (C1, C2)
+#   base  the centre-point simulator output (for diagnostics)
+#   sd    named vector (beta, alpha) of marginal posterior SDs
+estimate_posterior_cov <- function(simulator, beta, alpha,
+                                   n_sim = 1000, seed = 42L,
+                                   h_rel = 0.01) {
+  hb <- beta  * h_rel
+  ha <- alpha * h_rel
+
+  # Boundary safety: if symmetric central step would leave the support,
+  # shrink h. (Both beta and alpha are required positive by the simulators.)
+  if (beta - hb <= 0)  hb <- beta  / 2
+  if (alpha - ha <= 0) ha <- alpha / 2
+
+  base     <- simulator(beta,           alpha,            n_sim, seed = seed)
+  pb_plus  <- simulator(beta + hb,      alpha,            n_sim, seed = seed)
+  pb_minus <- simulator(beta - hb,      alpha,            n_sim, seed = seed)
+  pa_plus  <- simulator(beta,           alpha + ha,       n_sim, seed = seed)
+  pa_minus <- simulator(beta,           alpha - ha,       n_sim, seed = seed)
+
+  J <- matrix(
+    c((mean(pb_plus$C1) - mean(pb_minus$C1)) / (2 * hb),
+      (mean(pb_plus$C2) - mean(pb_minus$C2)) / (2 * hb),
+      (mean(pa_plus$C1) - mean(pa_minus$C1)) / (2 * ha),
+      (mean(pa_plus$C2) - mean(pa_minus$C2)) / (2 * ha)),
+    nrow = 2, byrow = FALSE,
+    dimnames = list(c("C1", "C2"), c("beta", "alpha"))
+  )
+
+  Sigma <- cov(cbind(base$C1, base$C2)) / n_sim
+  dimnames(Sigma) <- list(c("C1", "C2"), c("C1", "C2"))
+
+  Jinv <- tryCatch(solve(J),
+                   error = function(e) {
+                     warning("Jacobian is singular; returning NA covariance. ",
+                             "Inspect $J for the cause.")
+                     matrix(NA_real_, 2, 2)
+                   })
+  cov_par <- Jinv %*% Sigma %*% t(Jinv)
+  dimnames(cov_par) <- list(c("beta", "alpha"), c("beta", "alpha"))
+
+  list(cov   = cov_par,
+       J     = J,
+       Sigma = Sigma,
+       base  = base,
+       sd    = sqrt(c(beta = cov_par[1, 1], alpha = cov_par[2, 2])))
+}

@@ -36,6 +36,7 @@ t_star    <- 8
 n_sim_opt   <- 1000    # stochastic replicates per loss evaluation
 n_sim_final <- 1000    # stochastic replicates for the histogram run
 n_restarts  <- 3       # extra Nelder-Mead restarts if simplex degenerates
+restart_loss_threshold <- 5  # skip restarts once loss is below this (noise floor)
 
 gamma     <- 1         # project convention
 I_ini_2g  <- c(10, 10) # seeds per group for SIR / frailty
@@ -91,29 +92,29 @@ at_tstar <- function(out) {
   out[time == t_star, .(sim, C1, C2)]
 }
 
-run_linear <- function(beta, alpha, n_sim) {
+run_linear <- function(beta, alpha, n_sim, seed = NULL) {
   out <- run_stoch_linear_dust(beta = beta,
                                N = c(N_cont, N_vac),
                                susceptibility = c(1, alpha),
                                t = t_star, dt = dt,
                                timepoints = seq(1, t_star, 1),
-                               n_sim = n_sim, cores = cores)
+                               n_sim = n_sim, cores = cores, seed = seed)
   # linear output has columns S1, S2, C1, C2 — rename C1/C2 stays as is
   at_tstar(out)
 }
 
-run_sir <- function(beta, alpha, n_sim) {
+run_sir <- function(beta, alpha, n_sim, seed = NULL) {
   out <- run_stoch_cd_dust(matrix(rep(1, 4), nrow = 2),
                            beta = beta, N = c(N_cont, N_vac),
                            t = t_star, I_ini = I_ini_2g,
                            susceptibility = c(1, alpha),
                            gamma = gamma, dt = dt,
                            timepoints = seq(1, t_star, 1),
-                           n_sim = n_sim, cores = cores)
+                           n_sim = n_sim, cores = cores, seed = seed)
   at_tstar(out)
 }
 
-run_sir_sus_frailty <- function(beta, alpha, n_sim) {
+run_sir_sus_frailty <- function(beta, alpha, n_sim, seed = NULL) {
   out <- run_stoch_frailty_cd(sd = sd_sus, sd_trans = 0,
                               susceptibility = c(1, alpha),
                               beta = beta,
@@ -122,11 +123,11 @@ run_sir_sus_frailty <- function(beta, alpha, n_sim) {
                               gamma = gamma, I_ini_total = sum(I_ini_2g),
                               timepoints = seq(1, t_star, 1),
                               n_sim = n_sim, cores = cores,
-                              method = "dust", dt = dt, f = 0.5)
+                              method = "dust", dt = dt, f = 0.5, seed = seed)
   at_tstar(out)
 }
 
-run_sir_trans_frailty <- function(beta, alpha, n_sim) {
+run_sir_trans_frailty <- function(beta, alpha, n_sim, seed = NULL) {
   out <- run_stoch_frailty_cd(sd = 0, sd_trans = sd_trans_v,
                               susceptibility = c(1, alpha),
                               beta = beta,
@@ -135,11 +136,11 @@ run_sir_trans_frailty <- function(beta, alpha, n_sim) {
                               gamma = gamma, I_ini_total = sum(I_ini_2g),
                               timepoints = seq(1, t_star, 1),
                               n_sim = n_sim, cores = cores,
-                              method = "dust", dt = dt, f = 0.5)
+                              method = "dust", dt = dt, f = 0.5, seed = seed)
   at_tstar(out)
 }
 
-run_network <- function(beta, alpha, n_sim) {
+run_network <- function(beta, alpha, n_sim, seed = NULL) {
   # run_stoch_network already gives R0 = beta/gamma in the homogeneous-
   # network limit (its dust_beta = N*beta/k_mean combines with the adj
   # model's foi = beta_dust/N*sum_neighbours to produce R0 = beta/gamma).
@@ -149,7 +150,8 @@ run_network <- function(beta, alpha, n_sim) {
                            t = t_star, c_ij = c_ij_fixed, vac = vac_fixed,
                            k_mean = mean_k, gamma = gamma,
                            dt = dt, timepoints = seq(1, t_star, 1),
-                           n_sim = n_sim, cores = cores, I_ini = init_I_nw)
+                           n_sim = n_sim, cores = cores, I_ini = init_I_nw,
+                           seed = seed)
   at_tstar(out)
 }
 
@@ -204,10 +206,13 @@ for (mname in names(models)) {
   # Restart with a fresh simplex if Nelder-Mead exited non-zero. Most often
   # we see conv = 10 (simplex degeneracy) on noisy stochastic losses; the
   # restart re-seeds the simplex from the current best and usually breaks
-  # the deadlock. Keep the lowest-loss result across attempts.
+  # the deadlock. Skip restarts once the loss is at the noise floor — a
+  # degenerate simplex at the optimum is expected and restarting wastes
+  # compute. Keep the lowest-loss result across attempts.
   best <- o
   for (rs in seq_len(n_restarts)) {
     if (o$convergence == 0) break
+    if (best$value < restart_loss_threshold) break
     o <- optim(par = o$par, fn = loss,
                method = "Nelder-Mead",
                control = list(maxit = optim_maxit, reltol = 1e-4))
@@ -232,6 +237,46 @@ opt_dt <- rbindlist(lapply(names(opt_results), function(m) {
 fwrite(opt_dt, file.path(out_dir, "optimised_params.csv"))
 message("\nOptimised parameters:")
 print(opt_dt)
+
+# ---------------------------------------------------------------------------
+# Approximate posterior cov via J^-1 Sigma J^-T (CRN, central differences)
+# ---------------------------------------------------------------------------
+# 5 simulator calls per model (base + ±beta + ±alpha), all sharing the
+# same dust2 seed so finite-difference noise drops to O(h^2).
+
+post_cov_seed <- 1234L
+post_cov_h    <- 0.01
+
+post_rows <- list()
+for (mname in names(models)) {
+  r <- opt_results[[mname]]
+  message(glue("Posterior cov for {mname} (beta={round(r$beta, 4)}, alpha={round(r$alpha, 4)})..."))
+  ec <- estimate_posterior_cov(models[[mname]],
+                               beta = r$beta, alpha = r$alpha,
+                               n_sim = n_sim_final,
+                               seed  = post_cov_seed,
+                               h_rel = post_cov_h)
+  rho <- if (all(ec$sd > 0)) ec$cov[1, 2] / prod(ec$sd) else NA_real_
+  message(glue("  sd_beta = {signif(ec$sd['beta'], 3)}  ",
+               "sd_alpha = {signif(ec$sd['alpha'], 3)}  ",
+               "rho = {signif(rho, 3)}"))
+  post_rows[[mname]] <- data.table(
+    model     = mname,
+    beta      = r$beta, alpha = r$alpha,
+    sd_beta   = ec$sd[["beta"]],
+    sd_alpha  = ec$sd[["alpha"]],
+    cov_ba    = ec$cov[1, 2],
+    cor_ba    = rho,
+    J_dC1_dbeta  = ec$J["C1", "beta"],
+    J_dC1_dalpha = ec$J["C1", "alpha"],
+    J_dC2_dbeta  = ec$J["C2", "beta"],
+    J_dC2_dalpha = ec$J["C2", "alpha"]
+  )
+}
+post_dt <- rbindlist(post_rows)
+fwrite(post_dt, file.path(out_dir, "posterior_cov.csv"))
+message("\nPosterior (beta, alpha) covariance:")
+print(post_dt)
 
 # ---------------------------------------------------------------------------
 # Final stochastic simulations + histograms

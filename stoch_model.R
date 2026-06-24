@@ -112,7 +112,8 @@ run_stoch_cd_ctmc <- function(mixing_matrix, beta, N, t, I_ini,
 run_stoch_cd_dust <- function(mixing_matrix, beta, N, t, I_ini,
                               susceptibility=NULL, transmissibility=NULL,
                               gamma=1/3, waning=0, dt=0.1,
-                              timepoints=seq(0, t, 1), n_sim=100, cores=10) {
+                              timepoints=seq(0, t, 1), n_sim=100, cores=10,
+                              seed=NULL) {
   n <- nrow(mixing_matrix)
   if (is.null(susceptibility))   susceptibility   <- rep(1, n)
   if (is.null(transmissibility)) transmissibility <- rep(1, n)
@@ -139,7 +140,8 @@ run_stoch_cd_dust <- function(mixing_matrix, beta, N, t, I_ini,
                                    n_particles = n_sim,
                                    n_threads   = cores,
                                    dt          = dt,
-                                   time        = 0)
+                                   time        = 0,
+                                   seed        = seed)
   dust2::dust_system_set_state_initial(sys)
   raw <- dust2::dust_system_simulate(sys, timepoints)
   # raw shape: [n_states, n_particles, n_times] (or [n_states, n_times] if n_sim==1)
@@ -173,7 +175,8 @@ run_stoch_cd_dust <- function(mixing_matrix, beta, N, t, I_ini,
 run_stoch_adj <- function(contact_matrix, beta, t, I_ini,
                           N=NULL, susceptibility=NULL, transmissibility=NULL,
                           gamma=1/3, waning=0, dt=0.1,
-                          timepoints=seq(0, t, 1), n_sim=100, cores=10) {
+                          timepoints=seq(0, t, 1), n_sim=100, cores=10,
+                          seed=NULL) {
   n   <- nrow(contact_matrix)
   adj <- contact_matrix_to_adj(contact_matrix)
 
@@ -201,7 +204,8 @@ run_stoch_adj <- function(contact_matrix, beta, t, I_ini,
                                    n_particles = n_sim,
                                    n_threads   = cores,
                                    dt          = dt,
-                                   time        = 0)
+                                   time        = 0,
+                                   seed        = seed)
   dust2::dust_system_set_state_initial(sys)
   raw <- dust2::dust_system_simulate(sys, timepoints)
   if (length(dim(raw)) == 2L) {
@@ -292,7 +296,7 @@ run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
                               vac_frac=0.5, vac=NULL, gamma=1/3,
                               c_ij=NULL, k_mean=6,
                               dt=0.1, timepoints=seq(0, t, 1),I_ini=2,
-                              n_sim=100, cores=10) {
+                              n_sim=100, cores=10, seed=NULL) {
   if (is.null(c_ij))  c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
   if (is.null(vac))   vac  <- sample(seq_len(N), vac_frac * N)
 
@@ -306,7 +310,7 @@ run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
   full <- run_stoch_adj(c_ij, beta = N * beta / k_mean, t = t, I_ini = I_ini,
                         susceptibility = susept, gamma = gamma,
                         dt = dt, timepoints = timepoints,
-                        n_sim = n_sim, cores = cores)
+                        n_sim = n_sim, cores = cores, seed = seed)
 
   vac_cols   <- paste0("C", vac)
   unvac_cols <- paste0("C", non_vac)
@@ -511,7 +515,7 @@ run_stoch_linear <- function(beta, N, t, susceptibility=NULL,
 # run_stoch_cd_dust — shrink dt when susceptibility * beta is large.
 run_stoch_linear_dust <- function(beta, N, t, susceptibility=NULL,
                                   dt=0.1, timepoints=seq(0, t, 1),
-                                  n_sim=100, cores=10) {
+                                  n_sim=100, cores=10, seed=NULL) {
   n <- length(N)
   if (is.null(susceptibility)) susceptibility <- rep(1, n)
 
@@ -526,7 +530,8 @@ run_stoch_linear_dust <- function(beta, N, t, susceptibility=NULL,
                                    n_particles = n_sim,
                                    n_threads   = cores,
                                    dt          = dt,
-                                   time        = 0)
+                                   time        = 0,
+                                   seed        = seed)
   dust2::dust_system_set_state_initial(sys)
   raw <- dust2::dust_system_simulate(sys, timepoints)
   if (length(dim(raw)) == 2L) {
@@ -710,7 +715,8 @@ run_coupled_frailty_linear <- function(alpha, sd, beta=1, f=0.5, N=1000, t=100,
 run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, t=100,
                                   n_frailty=100, gamma=1/2, vac_counts=NULL,
                                   I_ini_total=1, timepoints=seq(0, t, 1), n_sim=100, cores=10,
-                                  method=c("ctmc", "dust"), dt=0.1, susceptibility=c(1,0.5)) {
+                                  method=c("ctmc", "dust"), dt=0.1, susceptibility=c(1,0.5),
+                                  seed=NULL) {
   method <- match.arg(method)
   alpha <- susceptibility[2] 
   if (!is.null(R)) beta <- get_beta(R, alpha, sd, sd_trans=sd_trans, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
@@ -808,7 +814,8 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
     run_stoch_cd_dust(mm, beta=beta, N=N_groups, t=t, I_ini=I_ini,
                       susceptibility=susceptibility,
                       transmissibility=transmissibility, gamma=gamma,
-                      dt=dt, timepoints=timepoints, n_sim=n_sim, cores=cores)
+                      dt=dt, timepoints=timepoints, n_sim=n_sim, cores=cores,
+                      seed=seed)
   }
 
   N_vac   <- sum(vac_counts)
