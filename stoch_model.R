@@ -1287,3 +1287,139 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
                             mc.cores = mc.cores)
   rbindlist(res, fill = TRUE)
 }
+
+
+# ---------------------------------------------------------------------------
+# Stochastic EATE via frozen-field counterfactual (linear)
+# ---------------------------------------------------------------------------
+#
+# Linear (exposure-only) model: each individual is infected independently
+# at rate beta * susceptibility, no FOI from infected. The cumulative FOI
+# experienced is therefore deterministic — cum_foi(t) = beta * t — and the
+# counterfactual case probabilities are analytical:
+#   P_v(t) = 1 - exp(-sus_v * beta * t)
+# Stochastic noise enters only via the factual case counts per replicate.
+# The hybrid EATE mirrors get_stoch_eate_network: factually matching
+# individuals contribute their factual case probability (mean over reps),
+# flipped individuals contribute the frozen counterfactual.
+get_stoch_eate_linear <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
+                                  N = 200, t = 30,
+                                  n_vac = 10, n_rep = 20,
+                                  dt = 0.1, timepoints = NULL,
+                                  mc.cores = 10, inner_cores = 1, seed = NULL) {
+  alpha <- susceptibility[2]
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t     <- length(timepoints)
+  N_unvac <- round(N * (1 - f))
+  N_vac   <- N - N_unvac
+
+  # cumFOI is deterministic for the linear model.
+  cum_foi    <- beta * timepoints
+  P_unvac_cf <- 1 - exp(-1     * cum_foi)
+  P_vac_cf   <- 1 - exp(-alpha * cum_foi)
+
+  run_one_allocation <- function() {
+    sim_id <- runif(1)
+    raw <- run_stoch_linear_dust(
+      beta = beta, N = c(N_unvac, N_vac),
+      susceptibility = c(1, alpha),
+      t = t, dt = dt, timepoints = timepoints,
+      n_sim = n_rep, cores = inner_cores, seed = seed)
+    setDT(raw)
+
+    C1_mat <- .dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)
+    C2_mat <- .dt_col_to_t_rep_matrix(raw$C2, n_t, n_rep)
+    P_fac_unvac <- rowMeans(C1_mat) / N_unvac
+    P_fac_vac   <- rowMeans(C2_mat) / N_vac
+
+    eate_t <- (N_vac   * P_fac_vac   + N_unvac * P_vac_cf) /
+              (N_unvac * P_fac_unvac + N_vac   * P_unvac_cf)
+    crr_t  <- P_fac_vac / P_fac_unvac
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}
+
+
+# ---------------------------------------------------------------------------
+# Stochastic EATE via frozen-field counterfactual (homogeneous SIR)
+# ---------------------------------------------------------------------------
+#
+# Two-group SIR (vac + unvac, mass-action mixing). FOI on every
+# susceptible is identical at each (t, replicate):
+#   FOI^(r)(t) = beta * (I_unvac^(r)(t) + I_vac^(r)(t)) / N
+# Cumulative FOI is integrated by trapezoidal rule across timepoints, and
+# the hybrid EATE mirrors get_stoch_eate_network / get_stoch_eate_frailty:
+#   num   = N_vac   * P_fac_vac   + N_unvac * P_vac_cf
+#   denom = N_unvac * P_fac_unvac + N_vac   * P_unvac_cf
+#   EATE  = num / denom
+# Matches get_EATEs frozen-field formula but with the deterministic
+# factual full_0 replaced by an n_rep-average factual stochastic run.
+get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
+                               N = 200, t = 30, gamma = 1, I_ini = c(2, 2),
+                               n_vac = 10, n_rep = 20,
+                               dt = 0.1, timepoints = NULL,
+                               mc.cores = 10, inner_cores = 1, seed = NULL) {
+  alpha <- susceptibility[2]
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t     <- length(timepoints)
+  N_unvac <- round(N * (1 - f))
+  N_vac   <- N - N_unvac
+
+  run_one_allocation <- function() {
+    sim_id <- runif(1)
+    raw <- run_stoch_cd_dust(
+      matrix(rep(1, 4), nrow = 2),
+      beta = beta, N = c(N_unvac, N_vac),
+      t = t, I_ini = I_ini,
+      susceptibility = c(1, alpha),
+      gamma = gamma, dt = dt,
+      timepoints = timepoints,
+      n_sim = n_rep, cores = inner_cores, seed = seed)
+    setDT(raw)
+
+    I1_mat      <- .dt_col_to_t_rep_matrix(raw$I1, n_t, n_rep)
+    I2_mat      <- .dt_col_to_t_rep_matrix(raw$I2, n_t, n_rep)
+    I_total_mat <- I1_mat + I2_mat
+    FI_mat      <- beta * I_total_mat / N
+    cum_foi     <- .cum_trapz(FI_mat, timepoints)
+
+    P_vac_cf   <- 1 - rowMeans(exp(-alpha * cum_foi))
+    P_unvac_cf <- 1 - rowMeans(exp(-1     * cum_foi))
+
+    C1_mat <- .dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)
+    C2_mat <- .dt_col_to_t_rep_matrix(raw$C2, n_t, n_rep)
+    P_fac_unvac <- rowMeans(C1_mat) / N_unvac
+    P_fac_vac   <- rowMeans(C2_mat) / N_vac
+
+    eate_t <- (N_vac   * P_fac_vac   + N_unvac * P_vac_cf) /
+              (N_unvac * P_fac_unvac + N_vac   * P_unvac_cf)
+    crr_t  <- P_fac_vac / P_fac_unvac
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}
