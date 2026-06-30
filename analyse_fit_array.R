@@ -39,8 +39,8 @@ message(glue("{length(ok)}/{length(flat)} jobs returned a result"))
 
 fit_dt <- rbindlist(lapply(ok, function(r) {
   data.table(
-    name            = r$name,
-    model_type      = r$model_type,
+    name            = as.character(r$name),
+    model_type      = as.character(r$model_type),
     network_seed    = r$network_seed    %||% NA_integer_,
     allocation_seed = r$allocation_seed %||% NA_integer_,
     beta            = r$fit$beta,
@@ -177,8 +177,8 @@ ggsave(file.path(out_dir, "forest_alpha_per_allocation.png"),
 # Long VE table: one row per (job, t, sim, method)
 ve_long <- rbindlist(lapply(ok, function(r) {
   v <- copy(r$ve)
-  v[, name            := r$name]
-  v[, model_type      := r$model_type]
+  v[, name            := as.character(r$name)]
+  v[, model_type      := as.character(r$model_type)]
   v[, network_seed    := r$network_seed    %||% NA_integer_]
   v[, allocation_seed := r$allocation_seed %||% NA_integer_]
   v
