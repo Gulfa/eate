@@ -244,4 +244,88 @@ fwrite(ve_final, file.path(out_dir, "ve_final.csv"))
 message("\n=== VE at t* (allocations pooled) ===")
 print(ve_final)
 
+# ---------------------------------------------------------------------------
+# VE with propagated parameter uncertainty
+# ---------------------------------------------------------------------------
+
+# Long table: one row per (job, param_sample, allocation/sim, t, method)
+ve_unc_long <- rbindlist(lapply(ok, function(r) {
+  if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+  v <- copy(r$ve_uncertainty)
+  v[, name            := as.character(r$name)]
+  v[, model_type      := as.character(r$model_type)]
+  v[, network_seed    := r$network_seed    %||% NA_integer_]
+  v[, allocation_seed := r$allocation_seed %||% NA_integer_]
+  v
+}), fill = TRUE)
+
+if (nrow(ve_unc_long) > 0) {
+  ve_unc_long[, VE := 1 - eate]
+  ve_unc <- ve_unc_long[method == "full_stoch"]
+
+  # Variance decomposition into "parameter-only" vs "allocation-only":
+  # for each (job, t):
+  #   VE_param(k) = mean over allocations of VE for sample k
+  #   VE_alloc(a) = mean over samples of VE for allocation a
+  #   total       = all (k, a) draws
+  # Quantiles of each give the inner/outer ribbons.
+
+  vu_param <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
+                    by = .(t, model_type, network_seed, allocation_seed, param_sample)]
+  vu_alloc <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
+                    by = .(t, model_type, network_seed, allocation_seed, sim)]
+  # Pool across outer allocation_seeds for the network case so the
+  # ribbons combine within-job param/alloc variance with across-job
+  # outer-allocation variance.
+  param_band <- vu_param[, .(VE_med = median(VE),
+                             lo = quantile(VE, 0.025, na.rm = TRUE),
+                             hi = quantile(VE, 0.975, na.rm = TRUE),
+                             n  = .N),
+                         by = .(t, model_type)]
+  alloc_band <- vu_alloc[, .(VE_med = median(VE),
+                             lo = quantile(VE, 0.025, na.rm = TRUE),
+                             hi = quantile(VE, 0.975, na.rm = TRUE),
+                             n  = .N),
+                         by = .(t, model_type)]
+  total_band <- ve_unc[, .(VE_med = median(VE),
+                           lo = quantile(VE, 0.025, na.rm = TRUE),
+                           hi = quantile(VE, 0.975, na.rm = TRUE),
+                           n  = .N),
+                       by = .(t, model_type)]
+
+  param_band[, source := "param"]
+  alloc_band[, source := "allocation"]
+  total_band[, source := "total"]
+  bands <- rbindlist(list(param_band, alloc_band, total_band))
+
+  fwrite(bands, file.path(out_dir, "ve_uncertainty_bands.csv"))
+
+  # Double-ribbon plot: inner (param-only) + outer (total). Allocation
+  # band shown by colour overlay if you want, but for the headline plot
+  # param + total is most informative.
+  p_unc <- ggplot(total_band, aes(x = t, y = VE_med)) +
+    geom_ribbon(aes(ymin = lo, ymax = hi),
+                fill = "grey60", alpha = 0.4) +
+    geom_ribbon(data = param_band,
+                aes(ymin = lo, ymax = hi),
+                fill = "steelblue", alpha = 0.5) +
+    geom_line(size = 1, colour = "black") +
+    facet_wrap(~ model_type, scales = "free_y") +
+    theme_minimal(base_size = 13) +
+    labs(x = "t", y = "VE = 1 - EATE",
+         title = "VE(t) with posterior uncertainty",
+         subtitle = "blue band = parameter uncertainty only; grey band = total (params + allocations)")
+  ggsave(file.path(out_dir, "ve_trajectory_with_uncertainty.png"),
+         p_unc, width = 11, height = 7, dpi = 130)
+
+  # Final-time VE per model with the two CIs
+  ve_unc_final <- bands[t == max(t)]
+  fwrite(dcast(ve_unc_final, model_type ~ source,
+               value.var = c("VE_med", "lo", "hi", "n")),
+         file.path(out_dir, "ve_final_intervals.csv"))
+
+  message("\n=== VE at t* with uncertainty (param vs total) ===")
+  print(ve_unc_final[, .(model_type, source, VE_med, lo, hi, n)])
+}
+
 message(glue("\nWrote plots and CSVs to {out_dir}/"))

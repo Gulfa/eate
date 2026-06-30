@@ -63,6 +63,13 @@ post_cov_h     <- 0.01
 ve_n_vac <- 5
 ve_n_rep <- 200
 
+# Posterior uncertainty propagation: K parameter samples drawn from
+# MVN(fit, posterior_cov), each fed through compute_ve. Use a smaller
+# n_rep on this pass since K * n_vac inner allocations already average
+# out a lot of per-rep noise.
+K_post_samples   <- 30
+ve_n_rep_uncert  <- 50
+
 # Internal dust threading (per simulator call). Outer parallelism is via
 # slurm array tasks, so keep this modest.
 inner_cores <- 4
@@ -91,7 +98,8 @@ base <- list(
   grid_n = grid_n, inner_cores = inner_cores,
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
   post_cov_h = post_cov_h,
-  ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep
+  ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
+  K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
 )
 
 configs <- list()
@@ -292,6 +300,64 @@ compute_ve <- function(cfg, beta, alpha) {
 }
 
 # ---------------------------------------------------------------------------
+# Posterior sampling + VE with propagated parameter uncertainty
+# ---------------------------------------------------------------------------
+
+# Draw K samples (beta, alpha) from MVN(c(beta_hat, alpha_hat), cov), via
+# Cholesky. Reject samples that fall into the negative orthant (rare when
+# posterior is tight; if the rejection fraction is high it signals the
+# Gaussian approximation is wrong for that fit). Returns a [<=K, 2] matrix.
+sample_posterior <- function(beta_hat, alpha_hat, cov, K,
+                             max_attempts_factor = 5) {
+  mu <- c(beta_hat, alpha_hat)
+  L  <- tryCatch(chol(cov),
+                 error = function(e) chol(cov + diag(1e-10, 2)))
+  out      <- matrix(NA_real_, nrow = K, ncol = 2,
+                     dimnames = list(NULL, c("beta", "alpha")))
+  n_filled <- 0L
+  attempts <- 0L
+  max_attempts <- as.integer(max_attempts_factor * K)
+  while (n_filled < K && attempts < max_attempts) {
+    chunk <- K - n_filled
+    Z       <- matrix(rnorm(2L * chunk), nrow = chunk, ncol = 2)
+    samples <- sweep(Z %*% L, 2, mu, "+")
+    valid   <- samples[, 1] > 0 & samples[, 2] > 0
+    n_valid <- sum(valid)
+    if (n_valid > 0L) {
+      take <- min(n_valid, K - n_filled)
+      out[(n_filled + 1L):(n_filled + take), ] <-
+        samples[valid, , drop = FALSE][seq_len(take), , drop = FALSE]
+      n_filled <- n_filled + take
+    }
+    attempts <- attempts + chunk
+  }
+  if (n_filled < K) {
+    warning(sprintf("Only %d / %d valid posterior samples after %d attempts (Gaussian posterior may be a poor fit here)",
+                    n_filled, K, attempts))
+  }
+  out[seq_len(n_filled), , drop = FALSE]
+}
+
+# For each (beta_k, alpha_k) sample, call compute_ve which returns the
+# EATE function's full per-allocation, per-time output (long format with
+# `sim` = inner allocation/replicate index). Tag with param_sample and
+# the corresponding (beta_k, alpha_k) so downstream can decompose
+# variance into "parameter" vs "allocation" components.
+compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
+                                        K, n_rep_override) {
+  samples <- sample_posterior(fit$beta, fit$alpha, posterior_cov, K)
+  cfg_u <- cfg
+  cfg_u$ve_n_rep <- n_rep_override
+  rbindlist(lapply(seq_len(nrow(samples)), function(k) {
+    ve_k <- compute_ve(cfg_u, samples[k, "beta"], samples[k, "alpha"])
+    ve_k[, param_sample := k]
+    ve_k[, beta_k       := samples[k, "beta"]]
+    ve_k[, alpha_k      := samples[k, "alpha"]]
+    ve_k
+  }), fill = TRUE)
+}
+
+# ---------------------------------------------------------------------------
 # Per-job runner
 # ---------------------------------------------------------------------------
 
@@ -315,6 +381,11 @@ run_one_job <- function(cfg) {
   message(glue("[{cfg$name}] VE..."))
   ve <- compute_ve(cfg, fit$beta, fit$alpha)
 
+  message(glue("[{cfg$name}] VE with uncertainty (K = {cfg$K_post_samples})..."))
+  ve_unc <- compute_ve_with_uncertainty(cfg, fit, pcov$cov,
+                                        K = cfg$K_post_samples,
+                                        n_rep_override = cfg$ve_n_rep_uncert)
+
   list(
     name            = cfg$name,
     model_type      = cfg$model_type,
@@ -323,7 +394,8 @@ run_one_job <- function(cfg) {
     fit             = fit,
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),
-    ve              = ve
+    ve              = ve,
+    ve_uncertainty  = ve_unc
   )
 }
 
