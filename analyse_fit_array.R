@@ -263,30 +263,40 @@ if (nrow(ve_unc_long) > 0) {
   ve_unc_long[, VE := 1 - eate]
   ve_unc <- ve_unc_long[method == "full_stoch"]
 
-  # Variance decomposition into "parameter-only" vs "allocation-only":
-  # for each (job, t):
-  #   VE_param(k) = mean over allocations of VE for sample k
-  #   VE_alloc(a) = mean over samples of VE for allocation a
-  #   total       = all (k, a) draws
-  # Quantiles of each give the inner/outer ribbons.
+  # Variance decomposition: we want a clean "parameter-only" band that
+  # doesn't accidentally mix in outer-allocation spread.
+  #   1. For each (job, param_sample, t): mean VE over inner sims.
+  #   2. For each (job, t): take the 2.5/50/97.5 quantile across
+  #      param_samples -> per-job parameter-only spread.
+  #   3. Pool across jobs by averaging the within-job bounds (so the
+  #      band is "typical per-allocation parameter uncertainty").
+  # The allocation-only band is symmetric (collapse over param_sample
+  # first, then quantile over allocations within model).
+  # Total band: pool every (param_sample, sim, outer alloc) per (t, model).
+  vu_jps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
+                  by = .(t, model_type, network_seed, allocation_seed, param_sample)]
 
-  vu_param <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
-                    by = .(t, model_type, network_seed, allocation_seed, param_sample)]
+  param_per_job <- vu_jps[, .(med = median(VE),
+                              lo  = quantile(VE, 0.025, na.rm = TRUE),
+                              hi  = quantile(VE, 0.975, na.rm = TRUE)),
+                          by = .(t, model_type, network_seed, allocation_seed)]
+  param_band <- param_per_job[, .(VE_med = median(med),
+                                  lo = mean(lo), hi = mean(hi),
+                                  n  = .N),
+                              by = .(t, model_type)]
+
   vu_alloc <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                     by = .(t, model_type, network_seed, allocation_seed, sim)]
-  # Pool across outer allocation_seeds for the network case so the
-  # ribbons combine within-job param/alloc variance with across-job
-  # outer-allocation variance.
-  param_band <- vu_param[, .(VE_med = median(VE),
-                             lo = quantile(VE, 0.025, na.rm = TRUE),
-                             hi = quantile(VE, 0.975, na.rm = TRUE),
-                             n  = .N),
-                         by = .(t, model_type)]
-  alloc_band <- vu_alloc[, .(VE_med = median(VE),
-                             lo = quantile(VE, 0.025, na.rm = TRUE),
-                             hi = quantile(VE, 0.975, na.rm = TRUE),
-                             n  = .N),
-                         by = .(t, model_type)]
+  # Per-param allocation-only spread (mirror of the param logic but
+  # collapsing over param_sample first).
+  vu_aps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
+                  by = .(t, model_type, network_seed, allocation_seed, sim)]
+  alloc_band <- vu_aps[, .(VE_med = median(VE),
+                           lo = quantile(VE, 0.025, na.rm = TRUE),
+                           hi = quantile(VE, 0.975, na.rm = TRUE),
+                           n  = .N),
+                       by = .(t, model_type)]
+
   total_band <- ve_unc[, .(VE_med = median(VE),
                            lo = quantile(VE, 0.025, na.rm = TRUE),
                            hi = quantile(VE, 0.975, na.rm = TRUE),

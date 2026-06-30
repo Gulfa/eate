@@ -83,10 +83,11 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 #   - n_networks x n_allocations configs for network
 # ---------------------------------------------------------------------------
 
-n_networks    <- 10
-n_allocations <- 10
-pl_alpha      <- 3
-mean_k        <- 6
+n_networks            <- 10
+n_allocations         <- 10   # outer allocations per network_seed
+n_allocations_frailty <- 10   # outer allocations per frailty config
+pl_alpha              <- 3
+mean_k                <- 6
 
 base <- list(
   N_cont = N_cont, N_vac = N_vac,
@@ -104,19 +105,30 @@ base <- list(
 
 configs <- list()
 
+# Linear and homogeneous SIR: allocation has no effect (exchangeable
+# individuals), so a single config each + ve_n_vac = 1 inside the EATE
+# function. No outer allocation_seed.
 configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "linear", model_type = "linear"))
+  name = "linear", model_type = "linear", ve_n_vac = 1))
 
 configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "sir", model_type = "sir"))
+  name = "sir", model_type = "sir", ve_n_vac = 1))
 
-configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "sir_sus_frailty", model_type = "sir_sus_frailty",
-  sd = 0.3, sd_trans = 0, n_frailty = 10))
-
-configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "sir_trans_frailty", model_type = "sir_trans_frailty",
-  sd = 0, sd_trans = 0.3, n_frailty = 10))
+# Frailty models: allocation matters (which bins get vaccinated), so
+# add an outer allocation_seed loop. The simulator will use the
+# pre-materialised vac_counts in fit + posterior cov calls.
+for (alloc_seed in seq_len(n_allocations_frailty)) {
+  configs[[length(configs)+1]] <- modifyList(base, list(
+    name            = glue("sir_sus_frailty_a{alloc_seed}"),
+    model_type      = "sir_sus_frailty",
+    sd = 0.3, sd_trans = 0, n_frailty = 10,
+    allocation_seed = alloc_seed))
+  configs[[length(configs)+1]] <- modifyList(base, list(
+    name            = glue("sir_trans_frailty_a{alloc_seed}"),
+    model_type      = "sir_trans_frailty",
+    sd = 0, sd_trans = 0.3, n_frailty = 10,
+    allocation_seed = alloc_seed))
+}
 
 for (network_seed in seq_len(n_networks)) {
   for (alloc_seed in seq_len(n_allocations)) {
@@ -169,6 +181,7 @@ build_simulator <- function(cfg) {
         N = N_total / 2, t = cfg$t_star,
         n_frailty = cfg$n_frailty, gamma = cfg$gamma,
         I_ini_total = sum(cfg$I_ini_2g),
+        vac_counts = cfg$.vac_counts,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
         method = "dust", dt = cfg$dt, f = 0.5, seed = seed), cfg$t_star)
@@ -180,6 +193,7 @@ build_simulator <- function(cfg) {
         N = N_total / 2, t = cfg$t_star,
         n_frailty = cfg$n_frailty, gamma = cfg$gamma,
         I_ini_total = sum(cfg$I_ini_2g),
+        vac_counts = cfg$.vac_counts,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
         method = "dust", dt = cfg$dt, f = 0.5, seed = seed), cfg$t_star)
@@ -208,6 +222,18 @@ materialise_cfg <- function(cfg) {
     set.seed(NULL)
     set.seed(cfg$allocation_seed)
     cfg$.vac <- sample(seq_len(cfg$N_cont + cfg$N_vac), cfg$N_vac)
+    set.seed(NULL)
+  } else if (cfg$model_type %in% c("sir_sus_frailty", "sir_trans_frailty")) {
+    # Per-bin vac counts from the allocation_seed; matches build_frailty_mod
+    # in estimate_from_data.R. Without this, run_stoch_frailty_cd would
+    # default to round(f*n_total) per bin (no allocation variability).
+    sd_pop  <- if (cfg$sd > 0) cfg$sd else cfg$sd_trans
+    fr      <- get_frailty(sd = sd_pop, n = cfg$n_frailty)
+    n_total <- round((cfg$N_cont + cfg$N_vac) * fr$p)
+    bin     <- rep(seq_along(n_total), n_total)
+    set.seed(cfg$allocation_seed)
+    cfg$.vac_counts <- tabulate(bin[sample(length(bin), cfg$N_vac)],
+                                nbins = length(n_total))
     set.seed(NULL)
   }
   cfg
