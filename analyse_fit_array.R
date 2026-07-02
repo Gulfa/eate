@@ -211,7 +211,7 @@ for (lvl in names(levels_def)) {
   if (nrow(df_ve)) {
     ggsave(file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.png")),
            forest_plot(df_ve, glue("VE at t = {t_star_ve} — {level_titles[[lvl]]}"),
-                       "VE = 1 - EATE", vline = 0) + small,
+                       "VE = 1 - EATE") + small,
            width = 8, height = h, dpi = 130, limitsize = FALSE)
   }
 
