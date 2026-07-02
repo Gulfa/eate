@@ -66,29 +66,40 @@ print(fit_dt[, .(min_loss = min(loss), med_loss = median(loss),
              by = model_type])
 
 # ---------------------------------------------------------------------------
-# Group labels for forest plots (mirrors analyse_array.R conventions).
+# Group labels — three consistent aggregation levels:
+#   L1 all_splits   : one row per job (every allocation, every network)
+#   L2 pool_allocs  : one row per (model | network_seed), allocations pooled
+#   L3 pool_nets    : one row per model, all allocations AND networks pooled
 # ---------------------------------------------------------------------------
 
-label_separate <- function(r) {
+.frailty_short <- function(mt) sub("^sir_", "", mt)   # sir_sus_frailty -> sus_frailty
+
+labels_L1_all_splits <- function(r) {
   switch(r$model_type,
-         network = sprintf("network_n%02d", r$network_seed),
-         r$name)
+         network           = sprintf("network_n%02d_a%02d", r$network_seed, r$allocation_seed),
+         sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
+         sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
+         r$model_type)
 }
-label_combined <- function(r) {
+labels_L2_pool_allocs <- function(r) {
   switch(r$model_type,
-         network = "network_all",
-         r$name)
+         network           = sprintf("network_n%02d", r$network_seed),
+         sir_sus_frailty   = "sus_frailty",
+         sir_trans_frailty = "trans_frailty",
+         r$model_type)
 }
-label_per_alloc <- function(r) {
+labels_L3_pool_nets <- function(r) {
   switch(r$model_type,
-         network = sprintf("network_n%02d_a%02d", r$network_seed, r$allocation_seed),
-         r$name)
+         network           = "network_all",
+         sir_sus_frailty   = "sus_frailty",
+         sir_trans_frailty = "trans_frailty",
+         r$model_type)
 }
 
 order_key <- function(label) {
-  if (label %in% c("linear", "sir"))            return(paste0("0_", label))
-  if (grepl("^sir_.*frailty$", label))          return(paste0("1_", label))
-  if (label == "network_all")                   return("2_network_all")
+  if (label %in% c("linear", "sir"))    return(paste0("0_", label))
+  if (grepl("frailty", label))          return(paste0("1_", label))
+  if (label == "network_all")           return("2_network_all")
   paste0("3_", label)
 }
 
@@ -138,37 +149,77 @@ forest_plot <- function(df, title, xlab, vline = NULL) {
   p
 }
 
-# --- beta ---
-beta_sep  <- summarise_param(ok, label_separate, "beta")
-beta_comb <- summarise_param(ok, label_combined, "beta")
-ggsave(file.path(out_dir, "forest_beta_separate.png"),
-       forest_plot(beta_sep,  "beta — per network (allocations pooled)", "beta"),
-       width = 8, height = 7, dpi = 130)
-ggsave(file.path(out_dir, "forest_beta_combined.png"),
-       forest_plot(beta_comb, "beta — networks pooled", "beta"),
-       width = 8, height = 3.5, dpi = 130)
+# ---------------------------------------------------------------------------
+# VE at t* summariser (uses ve_uncertainty draws for CIs)
+# ---------------------------------------------------------------------------
 
-# --- alpha ---
-alpha_sep  <- summarise_param(ok, label_separate, "alpha")
-alpha_comb <- summarise_param(ok, label_combined, "alpha")
-ggsave(file.path(out_dir, "forest_alpha_separate.png"),
-       forest_plot(alpha_sep,  "alpha (vac susceptibility) — per network",
-                   "alpha", vline = 1),
-       width = 8, height = 7, dpi = 130)
-ggsave(file.path(out_dir, "forest_alpha_combined.png"),
-       forest_plot(alpha_comb, "alpha (vac susceptibility) — networks pooled",
-                   "alpha", vline = 1),
-       width = 8, height = 3.5, dpi = 130)
+# Determine t*
+t_star_ve <- max(unlist(lapply(ok, function(r) {
+  if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) max(r$ve_uncertainty$t) else NA_real_
+})), na.rm = TRUE)
+if (!is.finite(t_star_ve)) t_star_ve <- max(unlist(lapply(ok, function(r) max(r$ve$t, na.rm = TRUE))), na.rm = TRUE)
+message(glue("Using t* = {t_star_ve} for VE forest plots"))
 
-# --- per-allocation alpha forest (tall plot, one row per MCMC fit) ---
-alpha_per_alloc <- summarise_param(ok, label_per_alloc, "alpha")
-n_rows <- nrow(alpha_per_alloc)
-p_apa <- forest_plot(alpha_per_alloc,
-                     "alpha — per allocation", "alpha", vline = 1) +
-  theme(axis.text.y = element_text(size = 7))
-ggsave(file.path(out_dir, "forest_alpha_per_allocation.png"),
-       p_apa, width = 8, height = max(4, 0.15 * n_rows),
-       dpi = 130, limitsize = FALSE)
+summarise_ve_by <- function(ok, group_fn, t_target) {
+  draws <- rbindlist(lapply(ok, function(r) {
+    if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+    v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
+    if (!nrow(v)) return(NULL)
+    data.table(group = group_fn(r), VE = 1 - v$eate)
+  }))
+  if (!nrow(draws)) return(data.table())
+  s <- draws[, .(n = .N,
+                 estimate = median(VE, na.rm = TRUE),
+                 lo       = quantile(VE, 0.025, na.rm = TRUE),
+                 hi       = quantile(VE, 0.975, na.rm = TRUE)),
+             by = group]
+  s[order(sapply(group, order_key))]
+}
+
+# ---------------------------------------------------------------------------
+# Level-driven forest plots for beta, alpha, VE at t*
+# ---------------------------------------------------------------------------
+
+levels_def <- list(
+  all_splits  = labels_L1_all_splits,
+  pool_allocs = labels_L2_pool_allocs,
+  pool_nets   = labels_L3_pool_nets
+)
+level_titles <- list(
+  all_splits  = "all splits (per job)",
+  pool_allocs = "allocations pooled (per network / model)",
+  pool_nets   = "everything pooled (per model)"
+)
+
+for (lvl in names(levels_def)) {
+  lbl_fn <- levels_def[[lvl]]
+
+  df_beta  <- summarise_param(ok, lbl_fn, "beta")
+  df_alpha <- summarise_param(ok, lbl_fn, "alpha")
+  df_ve    <- summarise_ve_by(ok, lbl_fn, t_star_ve)
+
+  # Scale height with row count so labels stay legible
+  h <- max(3.5, 0.28 * nrow(df_beta))
+  small <- if (lvl == "all_splits") theme(axis.text.y = element_text(size = 7)) else NULL
+
+  ggsave(file.path(out_dir, glue("forest_beta_{lvl}.png")),
+         forest_plot(df_beta, glue("beta — {level_titles[[lvl]]}"), "beta") + small,
+         width = 8, height = h, dpi = 130, limitsize = FALSE)
+  ggsave(file.path(out_dir, glue("forest_alpha_{lvl}.png")),
+         forest_plot(df_alpha, glue("alpha — {level_titles[[lvl]]}"), "alpha", vline = 1) + small,
+         width = 8, height = h, dpi = 130, limitsize = FALSE)
+  if (nrow(df_ve)) {
+    ggsave(file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.png")),
+           forest_plot(df_ve, glue("VE at t = {t_star_ve} — {level_titles[[lvl]]}"),
+                       "VE = 1 - EATE", vline = 0) + small,
+           width = 8, height = h, dpi = 130, limitsize = FALSE)
+  }
+
+  # Also save the underlying summary CSVs
+  fwrite(df_beta,  file.path(out_dir, glue("forest_beta_{lvl}.csv")))
+  fwrite(df_alpha, file.path(out_dir, glue("forest_alpha_{lvl}.csv")))
+  if (nrow(df_ve)) fwrite(df_ve, file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.csv")))
+}
 
 # ---------------------------------------------------------------------------
 # VE trajectories
