@@ -40,17 +40,18 @@ setDTthreads(1)
 # is pooled across experiments in the plots.
 
 experiments <- list(
-  list(id = "expA_N200",
+  list(id = "expA_N200_t8",
        N_cont = 100, N_vac = 100,
        data_C1 = 50, data_C2 = 25,
+       t_star = 8,
        I_ini_2g = c(10, 10), init_I_nw = 2),
-  list(id = "expB_N400_larger_seed",
+  list(id = "expB_N400_t12",
        N_cont = 200, N_vac = 200,
        data_C1 = 100, data_C2 = 50,
+       t_star = 12,
        I_ini_2g = c(20, 20), init_I_nw = 4)
 )
 
-t_star <- 8
 gamma  <- 1
 dt     <- 0.01
 
@@ -99,7 +100,7 @@ pl_alphas             <- c(2, 3, 5)   # Pareto exponents to sweep (kept separate
 mean_k                <- 6
 
 base_common <- list(
-  t_star = t_star, gamma = gamma, dt = dt,
+  gamma = gamma, dt = dt,
   n_sim_opt = n_sim_opt, optim_maxit = optim_maxit,
   n_restarts = n_restarts, restart_loss_threshold = restart_loss_threshold,
   grid_n = grid_n, inner_cores = inner_cores,
@@ -114,6 +115,7 @@ build_configs_for_experiment <- function(exp) {
                      list(experiment_id = exp$id,
                           N_cont = exp$N_cont, N_vac = exp$N_vac,
                           data_C1 = exp$data_C1, data_C2 = exp$data_C2,
+                          t_star = exp$t_star,
                           I_ini_2g = exp$I_ini_2g, init_I_nw = exp$init_I_nw))
   cs <- list()
 
