@@ -30,12 +30,24 @@ if (length(files) == 0) stop("No results_*.RDS files in ", results_dir)
 message(glue("Loading {length(files)} RDS files from {results_dir}"))
 
 flat <- unlist(lapply(files, readRDS), recursive = FALSE)
-ok   <- Filter(function(x) !is.null(x) && !is.null(x$fit), flat)
-message(glue("{length(ok)}/{length(flat)} jobs returned a result"))
+ok_all <- Filter(function(x) !is.null(x) && !is.null(x$fit), flat)
+message(glue("{length(ok_all)}/{length(flat)} jobs returned a result"))
+
+# Split by experiment_id (backwards-compat: NA -> "default")
+experiment_ids <- vapply(ok_all,
+                         function(r) r$experiment_id %||% "default",
+                         character(1))
+experiments_present <- unique(experiment_ids)
+message(glue("Experiments found: {paste(experiments_present, collapse=', ')}"))
 
 # ---------------------------------------------------------------------------
-# Per-config fit table
+# Everything below runs per-experiment: takes a filtered ok list and an
+# experiment-specific out_dir. Called once per experiment_id further down.
 # ---------------------------------------------------------------------------
+
+analyse_one_experiment <- function(ok, out_dir) {
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 fit_dt <- rbindlist(lapply(ok, function(r) {
   data.table(
@@ -66,40 +78,44 @@ print(fit_dt[, .(min_loss = min(loss), med_loss = median(loss),
              by = model_type])
 
 # ---------------------------------------------------------------------------
-# Group labels — three consistent aggregation levels:
-#   L1 all_splits   : one row per job (every allocation, every network)
-#   L2 pool_allocs  : one row per (model | network_seed), allocations pooled
-#   L3 pool_nets    : one row per model, all allocations AND networks pooled
+# Group labels — three consistent aggregation levels. pl_alpha is a
+# separate axis for network configs and is preserved at every level.
+#   L1 all_splits   : one row per job (network per pl_alpha x seed x alloc)
+#   L2 pool_allocs  : one row per (model | pl_alpha,network_seed);
+#                     allocations pooled but pl_alpha and seed kept apart
+#   L3 pool_nets    : one row per (model | pl_alpha); pl_alphas separate
 # ---------------------------------------------------------------------------
 
-.frailty_short <- function(mt) sub("^sir_", "", mt)   # sir_sus_frailty -> sus_frailty
+.pa_str <- function(pa) sprintf("pa%s", format(pa, trim = TRUE))
 
 labels_L1_all_splits <- function(r) {
   switch(r$model_type,
-         network           = sprintf("network_n%02d_a%02d", r$network_seed, r$allocation_seed),
+         network           = sprintf("network_%s_n%02d_a%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
          sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
          sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
          r$model_type)
 }
 labels_L2_pool_allocs <- function(r) {
   switch(r$model_type,
-         network           = sprintf("network_n%02d", r$network_seed),
+         network           = sprintf("network_%s_n%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed),
          sir_sus_frailty   = "sus_frailty",
          sir_trans_frailty = "trans_frailty",
          r$model_type)
 }
 labels_L3_pool_nets <- function(r) {
   switch(r$model_type,
-         network           = "network_all",
+         network           = sprintf("network_%s_all", .pa_str(r$pl_alpha)),
          sir_sus_frailty   = "sus_frailty",
          sir_trans_frailty = "trans_frailty",
          r$model_type)
 }
 
 order_key <- function(label) {
-  if (label %in% c("linear", "sir"))    return(paste0("0_", label))
-  if (grepl("frailty", label))          return(paste0("1_", label))
-  if (label == "network_all")           return("2_network_all")
+  if (label %in% c("linear", "sir")) return(paste0("0_", label))
+  if (grepl("frailty", label))       return(paste0("1_", label))
+  if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
   paste0("3_", label)
 }
 
@@ -390,3 +406,20 @@ if (nrow(ve_unc_long) > 0) {
 }
 
 message(glue("\nWrote plots and CSVs to {out_dir}/"))
+
+}   # end analyse_one_experiment
+
+# ---------------------------------------------------------------------------
+# Run per-experiment
+# ---------------------------------------------------------------------------
+
+for (exp_id in experiments_present) {
+  ok_exp <- ok_all[experiment_ids == exp_id]
+  message(glue("\n========== Experiment: {exp_id}  ({length(ok_exp)} jobs) =========="))
+  exp_out_dir <- file.path(out_dir, exp_id)
+  tryCatch(
+    analyse_one_experiment(ok_exp, exp_out_dir),
+    error = function(e) message("Error in experiment ", exp_id, ": ", conditionMessage(e))
+  )
+}
+message("\nAll experiments done.")

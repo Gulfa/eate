@@ -31,19 +31,28 @@ RhpcBLASctl::omp_set_num_threads(1)
 setDTthreads(1)
 
 # ---------------------------------------------------------------------------
-# Shared targets / fit / VE knobs
+# Experiments and shared knobs
 # ---------------------------------------------------------------------------
+#
+# Each "experiment" is a scenario with its own population, targets, and
+# initial-infection seeds. Every experiment gets its own set of configs
+# spanning all model types (linear / sir / frailty / network) — nothing
+# is pooled across experiments in the plots.
 
-N_cont    <- 100
-N_vac     <- 100
-data_C1   <- 50
-data_C2   <- 25
-t_star    <- 8
+experiments <- list(
+  list(id = "expA_N200",
+       N_cont = 100, N_vac = 100,
+       data_C1 = 50, data_C2 = 25,
+       I_ini_2g = c(10, 10), init_I_nw = 2),
+  list(id = "expB_N400_larger_seed",
+       N_cont = 200, N_vac = 200,
+       data_C1 = 100, data_C2 = 50,
+       I_ini_2g = c(20, 20), init_I_nw = 4)
+)
 
-gamma     <- 1
-I_ini_2g  <- c(10, 10)
-init_I_nw <- 2
-dt        <- 0.01
+t_star <- 8
+gamma  <- 1
+dt     <- 0.01
 
 # Optim
 n_sim_opt   <- 1000
@@ -86,14 +95,11 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 n_networks            <- 10
 n_allocations         <- 10   # outer allocations per network_seed
 n_allocations_frailty <- 10   # outer allocations per frailty config
-pl_alpha              <- 3
+pl_alphas             <- c(2, 3, 5)   # Pareto exponents to sweep (kept separate)
 mean_k                <- 6
 
-base <- list(
-  N_cont = N_cont, N_vac = N_vac,
-  data_C1 = data_C1, data_C2 = data_C2,
-  t_star = t_star, gamma = gamma,
-  I_ini_2g = I_ini_2g, init_I_nw = init_I_nw, dt = dt,
+base_common <- list(
+  t_star = t_star, gamma = gamma, dt = dt,
   n_sim_opt = n_sim_opt, optim_maxit = optim_maxit,
   n_restarts = n_restarts, restart_loss_threshold = restart_loss_threshold,
   grid_n = grid_n, inner_cores = inner_cores,
@@ -103,43 +109,56 @@ base <- list(
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
 )
 
-configs <- list()
+build_configs_for_experiment <- function(exp) {
+  base <- modifyList(base_common,
+                     list(experiment_id = exp$id,
+                          N_cont = exp$N_cont, N_vac = exp$N_vac,
+                          data_C1 = exp$data_C1, data_C2 = exp$data_C2,
+                          I_ini_2g = exp$I_ini_2g, init_I_nw = exp$init_I_nw))
+  cs <- list()
 
-# Linear and homogeneous SIR: allocation has no effect (exchangeable
-# individuals), so a single config each + ve_n_vac = 1 inside the EATE
-# function. No outer allocation_seed.
-configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "linear", model_type = "linear", ve_n_vac = 1))
+  # Linear and homogeneous SIR: allocation has no effect (exchangeable
+  # individuals), so a single config each + ve_n_vac = 1 inside the EATE
+  # function.
+  cs[[length(cs)+1]] <- modifyList(base, list(
+    name = glue("{exp$id}__linear"),
+    model_type = "linear", ve_n_vac = 1))
+  cs[[length(cs)+1]] <- modifyList(base, list(
+    name = glue("{exp$id}__sir"),
+    model_type = "sir", ve_n_vac = 1))
 
-configs[[length(configs)+1]] <- modifyList(base, list(
-  name = "sir", model_type = "sir", ve_n_vac = 1))
-
-# Frailty models: allocation matters (which bins get vaccinated), so
-# add an outer allocation_seed loop. The simulator will use the
-# pre-materialised vac_counts in fit + posterior cov calls.
-for (alloc_seed in seq_len(n_allocations_frailty)) {
-  configs[[length(configs)+1]] <- modifyList(base, list(
-    name            = glue("sir_sus_frailty_a{alloc_seed}"),
-    model_type      = "sir_sus_frailty",
-    sd = 0.3, sd_trans = 0, n_frailty = 10,
-    allocation_seed = alloc_seed))
-  configs[[length(configs)+1]] <- modifyList(base, list(
-    name            = glue("sir_trans_frailty_a{alloc_seed}"),
-    model_type      = "sir_trans_frailty",
-    sd = 0, sd_trans = 0.3, n_frailty = 10,
-    allocation_seed = alloc_seed))
-}
-
-for (network_seed in seq_len(n_networks)) {
-  for (alloc_seed in seq_len(n_allocations)) {
-    configs[[length(configs)+1]] <- modifyList(base, list(
-      name            = glue("network_n{network_seed}_a{alloc_seed}"),
-      model_type      = "network",
-      pl_alpha        = pl_alpha, mean_k = mean_k,
-      network_seed    = network_seed,
+  # Frailty models: allocation matters (which bins get vaccinated).
+  for (alloc_seed in seq_len(n_allocations_frailty)) {
+    cs[[length(cs)+1]] <- modifyList(base, list(
+      name            = glue("{exp$id}__sir_sus_frailty_a{alloc_seed}"),
+      model_type      = "sir_sus_frailty",
+      sd = 0.3, sd_trans = 0, n_frailty = 10,
+      allocation_seed = alloc_seed))
+    cs[[length(cs)+1]] <- modifyList(base, list(
+      name            = glue("{exp$id}__sir_trans_frailty_a{alloc_seed}"),
+      model_type      = "sir_trans_frailty",
+      sd = 0, sd_trans = 0.3, n_frailty = 10,
       allocation_seed = alloc_seed))
   }
+
+  # Network: sweep pl_alpha as an outer axis, kept separate in all plots.
+  for (pa in pl_alphas) {
+    for (network_seed in seq_len(n_networks)) {
+      for (alloc_seed in seq_len(n_allocations)) {
+        cs[[length(cs)+1]] <- modifyList(base, list(
+          name            = glue("{exp$id}__network_pa{pa}_n{network_seed}_a{alloc_seed}"),
+          model_type      = "network",
+          pl_alpha        = pa, mean_k = mean_k,
+          network_seed    = network_seed,
+          allocation_seed = alloc_seed))
+      }
+    }
+  }
+  cs
 }
+
+configs <- unlist(lapply(experiments, build_configs_for_experiment),
+                  recursive = FALSE)
 
 message(glue("Built {length(configs)} configs."))
 
@@ -414,7 +433,9 @@ run_one_job <- function(cfg) {
 
   list(
     name            = cfg$name,
+    experiment_id   = cfg$experiment_id   %||% NA_character_,
     model_type      = cfg$model_type,
+    pl_alpha        = cfg$pl_alpha        %||% NA_real_,
     network_seed    = cfg$network_seed    %||% NA_integer_,
     allocation_seed = cfg$allocation_seed %||% NA_integer_,
     fit             = fit,
