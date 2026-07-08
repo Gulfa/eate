@@ -44,7 +44,12 @@ pl_alphas    <- c(2, 3, 5)
 frailty_sds  <- c(0.1, 0.3, 0.5)
 
 # Common epidemic parameters
-beta         <- 1.5   # transmission rate; R0 = beta/gamma in homog limit
+beta         <- 1.5   # transmission rate for sir / frailty / network
+                      # (R0 = beta/gamma in the homogeneous limit).
+beta_linear  <- 0.1   # linear model has no recovery / herd effect, so
+                      # cum FOI = beta * t. beta_linear = 0.1 over t = 8
+                      # gives an unvac attack rate ~ 1 - exp(-0.8) ~ 0.55,
+                      # comparable to R0 = 1.5 SIR's final size.
 gamma        <- 1
 N            <- 200
 t_horizon    <- 8
@@ -133,7 +138,7 @@ run_job <- function(job) {
   susc <- c(1, job$alpha)
   ve <- switch(job$model,
     linear = get_stoch_eate_linear(
-      beta = beta, susceptibility = susc, f = 0.5, N = N,
+      beta = beta_linear, susceptibility = susc, f = 0.5, N = N,
       t = t_horizon, n_vac = 1, n_rep = n_rep,
       timepoints = timepoints, mc.cores = inner_cores),
     sir = get_stoch_eate_sir(
@@ -199,54 +204,51 @@ message(glue("Wrote {out_dir}/raw.csv ({nrow(all_res)} rows)"))
 ve_dt <- all_res[method == "full_stoch"]
 ve_dt[, VE := 1 - eate]
 
-# Combined label for colour aesthetic (empty variant => just the model)
-ve_dt[, model_variant := ifelse(variant == "" | is.na(variant),
-                                as.character(model),
-                                paste0(model, "_", variant))]
+# Combined label for colour aesthetic. Network keeps its network_seed
+# in the label so each draw is a separate curve (only inner
+# allocations are averaged over).
+ve_dt[, model_variant := ifelse(
+  model == "network",
+  sprintf("network_%s_n%02d", variant, network_seed),   # e.g. network_pa3_n01
+  ifelse(variant == "" | is.na(variant),
+         as.character(model),
+         paste0(model, "_", variant)))]
 
-# Median + 95% quantile across all (network_seed, sim) at fixed
-# (t, model_variant, alpha). For network this pools over the
-# n_network_seeds contact matrices AND the n_vac_allocs allocations
-# within each. For frailty it pools over allocations.
-summary_dt <- ve_dt[, .(VE_med = median(VE, na.rm = TRUE),
-                        VE_lo  = quantile(VE, 0.025, na.rm = TRUE),
-                        VE_hi  = quantile(VE, 0.975, na.rm = TRUE),
-                        n      = .N),
+# Mean VE at fixed (t, model_variant, alpha). For network this
+# averages only over the n_vac_allocs internal allocations within one
+# graph — different graphs stay as separate lines. For frailty it
+# averages over allocations. No uncertainty bands — VE is defined as
+# the average.
+summary_dt <- ve_dt[, .(VE = mean(VE, na.rm = TRUE), n = .N),
                     by = .(t, model, variant, model_variant, alpha)]
 fwrite(summary_dt, file.path(out_dir, "summary.csv"))
 
 # Plot 1: VE(t), facet by alpha, colour by (model + variant)
 p_by_alpha <- ggplot(summary_dt,
-                     aes(x = t, y = VE_med,
-                         colour = model_variant, fill = model_variant,
+                     aes(x = t, y = VE,
+                         colour = model_variant,
                          group  = model_variant)) +
-  geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi),
-              alpha = 0.18, colour = NA) +
   geom_line(size = 1) +
   facet_wrap(~ alpha, labeller = label_both) +
   scale_colour_viridis_d(name = "model") +
-  scale_fill_viridis_d(name   = "model") +
   theme_minimal(base_size = 13) +
-  labs(x = "t", y = "VE = 1 - EATE (full_stoch)",
-       title = glue("VE(t) by model — beta = {beta}, gamma = {gamma}, N = {N}"))
+  labs(x = "t", y = "VE = 1 - EATE (mean over allocations)",
+       title = glue("VE(t) by model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
 ggsave(file.path(out_dir, "ve_by_alpha.png"),
        p_by_alpha,
        width = 13, height = 8, dpi = 130)
 
 # Plot 2: VE(t), facet by (model + variant), colour by alpha
 p_by_model <- ggplot(summary_dt,
-                     aes(x = t, y = VE_med,
-                         colour = factor(alpha), fill = factor(alpha),
+                     aes(x = t, y = VE,
+                         colour = factor(alpha),
                          group  = interaction(model_variant, alpha))) +
-  geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi),
-              alpha = 0.15, colour = NA) +
   geom_line(size = 1) +
   facet_wrap(~ model_variant, scales = "free_y") +
   scale_colour_viridis_d(name = "alpha") +
-  scale_fill_viridis_d(name   = "alpha") +
   theme_minimal(base_size = 13) +
-  labs(x = "t", y = "VE = 1 - EATE",
-       title = glue("VE(t) per model — beta = {beta}, gamma = {gamma}, N = {N}"))
+  labs(x = "t", y = "VE (mean over allocations)",
+       title = glue("VE(t) per model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
 ggsave(file.path(out_dir, "ve_by_model.png"),
        p_by_model,
        width = 13, height = 9, dpi = 130)
