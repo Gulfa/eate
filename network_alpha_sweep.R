@@ -22,10 +22,18 @@ library(dplyr)
 library(data.table)
 library(ggplot2)
 library(glue)
+library(RColorBrewer)
 
 source("det_model.R")
 source("stoch_model.R")
 source("utils.R")
+
+# Dark2 palette extended to n groups via colorRampPalette when needed.
+dark2_scale <- function(n, name = NULL) {
+  cols <- if (n <= 8L) brewer.pal(max(n, 3L), "Dark2")[seq_len(n)]
+          else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
+  scale_colour_manual(name = name, values = cols)
+}
 
 # ---------------------------------------------------------------------------
 # Parameters (edit here)
@@ -190,7 +198,15 @@ results <- parallel::mclapply(jobs, run_job,
 
 errs <- vapply(results, inherits, logical(1), what = "try-error")
 if (any(errs)) {
-  warning(glue("{sum(errs)}/{length(jobs)} jobs failed; dropping."))
+  message(glue("=== {sum(errs)}/{length(jobs)} jobs failed ==="))
+  for (idx in which(errs)) {
+    job <- jobs[[idx]]
+    cond_msg <- attr(results[[idx]], "condition")$message
+    if (is.null(cond_msg)) cond_msg <- as.character(results[[idx]])
+    message(glue("  [{idx}] model={job$model}  variant={job$variant}  ",
+                 "alpha={job$alpha}  net_seed={job$network_seed %||% NA}  ",
+                 "-> {cond_msg}"))
+  }
   results <- results[!errs]
 }
 all_res <- rbindlist(results, fill = TRUE)
@@ -226,6 +242,9 @@ summary_dt <- ve_dt[, .(VE = mean(VE, na.rm = TRUE), n = .N),
                     by = .(t, model, variant, color_group, line_id, alpha)]
 fwrite(summary_dt, file.path(out_dir, "summary.csv"))
 
+n_groups   <- length(unique(summary_dt$color_group))
+n_alphas   <- length(unique(summary_dt$alpha))
+
 # Plot 1: VE(t), facet by alpha. Colour by color_group so network
 # draws of the same pl_alpha share a colour; group by line_id so each
 # network seed is its own line.
@@ -234,8 +253,8 @@ p_by_alpha <- ggplot(summary_dt,
                          colour = color_group,
                          group  = line_id)) +
   geom_line(size = 1) +
-  facet_wrap(~ alpha, labeller = label_both) +
-  scale_colour_viridis_d(name = "model") +
+  facet_wrap(~ alpha, labeller = label_both, scales = "free_y") +
+  dark2_scale(n_groups, name = "model") +
   theme_minimal(base_size = 13) +
   labs(x = "t", y = "VE = 1 - EATE (mean over allocations)",
        title = glue("VE(t) by model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
@@ -251,7 +270,7 @@ p_by_model <- ggplot(summary_dt,
                          group  = interaction(line_id, alpha))) +
   geom_line(size = 1) +
   facet_wrap(~ color_group, scales = "free_y") +
-  scale_colour_viridis_d(name = "alpha") +
+  dark2_scale(n_alphas, name = "alpha") +
   theme_minimal(base_size = 13) +
   labs(x = "t", y = "VE (mean over allocations)",
        title = glue("VE(t) per model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
