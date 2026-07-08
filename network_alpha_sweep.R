@@ -1,18 +1,25 @@
-# Stochastic VE sweep over (pl_alpha, network_seed, alpha). For each
-# pl_alpha (Pareto exponent of the contact distribution) we materialise
-# `network_seeds` independent contact graphs, and for every alpha
-# (vaccine-susceptibility) value compute EATE / VE through
-# get_stoch_eate_network: n_rep stochastic factual replicates per
-# allocation plus the per-individual frozen-field counterfactual derived
-# from the extracted FOI trajectories. No MCMC fitting. Useful for
-# seeing how VE changes across degree heterogeneity, network
-# realisations, and vaccine effectiveness.
+# Stochastic VE sweep across models and vaccine-susceptibility values.
+# Runs each model type at a fixed transmission rate (beta) for every alpha
+# in `alphas`, keeping model-specific structural parameters as separate
+# axes:
+#   - linear / sir: no extra axis
+#   - sir_sus_frailty, sir_trans_frailty: sweep over `frailty_sds`
+#   - network: sweep over `pl_alphas` (Pareto exponent). n_network_seeds
+#     independent contact graphs are averaged over per pl_alpha.
+#
+# For frailty and network the EATE function internally averages over
+# `n_vac_allocs` vac allocations (per replicate) so no extra allocation
+# loop is needed. n_rep dust replicates per allocation control the
+# stochastic noise floor.
+#
+# Output: per-model VE(t) trajectories with 95% quantile bands, faceted
+# by alpha in one plot and by model in another.
 #
 # Usage:
 #   Rscript network_alpha_sweep.R
 
-library(data.table)
 library(dplyr)
+library(data.table)
 library(ggplot2)
 library(glue)
 
@@ -24,158 +31,224 @@ source("utils.R")
 # Parameters (edit here)
 # ---------------------------------------------------------------------------
 
-pl_alphas      <- c(2.5, 3, 5)               # Pareto exponents to sweep
-mean_k         <- 6                          # mean degree
-N              <- 200                        # population size
-t              <- 8                          # horizon (matches run_array)
-beta           <- 0.5                        # transmission rate
-gamma          <- 1                          # project convention; passed via run_mean_field
-init_I         <- 2                          # seed infections per run
-vac_frac       <- 0.5                        # coverage
+# Vaccine-susceptibility values to sweep (each becomes one facet in the
+# per-alpha plot).
+alphas       <- c(0.1, 0.25, 0.5, 0.75, 0.9)
 
-network_seeds  <- 1:10                       # contact-matrix realisations per pl_alpha
-alphas         <- c(0.5)                     # vaccine susceptibility values
+# Network Pareto exponents (kept separate; each is its own curve in the
+# network facet).
+pl_alphas    <- c(2, 3, 5)
 
-eate_n_vac     <- 5                          # vac re-samples inside get_stoch_eate_network
-eate_n_rep     <- 1000                       # stochastic factual reps per allocation
+# Frailty SD values applied to both sus- and trans-frailty models. Each
+# SD becomes its own curve.
+frailty_sds  <- c(0.1, 0.3, 0.5)
 
-# Parallelism: outer = across (pl_alpha, network_seed, alpha) cells,
-# inner = across the eate_n_vac allocations inside one cell. Outer is
-# the bigger axis (length(pl_alphas) * length(network_seeds) *
-# length(alphas)) so default sends all cores there. Avoid nested forking
-# by keeping inner_cores = 1 unless cells are few.
-outer_cores    <- 4
-inner_cores    <- 1
+# Common epidemic parameters
+beta         <- 1.5   # transmission rate; R0 = beta/gamma in homog limit
+gamma        <- 1
+N            <- 200
+t_horizon    <- 8
+mean_k       <- 6
+n_frailty    <- 10
+init_I_2g    <- c(10, 10)   # initial infected per group for SIR/frailty
+init_I_nw    <- 2
 
-out_dir        <- "output/network_alpha_sweep"
+# EATE knobs
+n_network_seeds <- 5    # independent Pareto graphs per pl_alpha
+n_vac_allocs    <- 10   # inner allocation iterations (EATE n_vac)
+n_rep           <- 100  # dust replicates per allocation
+
+# Parallelism: outer mclapply across (model x alpha x variant) jobs;
+# inner dust threading per call. Default sends all available cores to
+# the outer loop (~115 jobs fit in 1-2 mclapply rounds on a 100-core
+# machine, no slurm needed). Respects SLURM_CPUS_PER_TASK if set so a
+# slurm sbatch with --cpus-per-task=N does the right thing.
+outer_cores <- {
+  slurm_cpus <- Sys.getenv("SLURM_CPUS_PER_TASK", unset = "")
+  if (nzchar(slurm_cpus)) as.integer(slurm_cpus)
+  else max(1L, parallel::detectCores() - 1L)
+}
+inner_cores <- 1
+
+out_dir <- "output/network_alpha_sweep"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+timepoints <- seq(1, t_horizon, 1)
+
 # ---------------------------------------------------------------------------
-# Materialise networks: one per (pl_alpha, network_seed). Using a
-# (pl_alpha, seed) keyed RNG so seeds are independent across pl_alphas.
+# Materialise networks once per (pl_alpha, seed)
 # ---------------------------------------------------------------------------
 
-message(glue("Building {length(pl_alphas)} x {length(network_seeds)} contact matrices ",
-             "(N={N}, mean_k={mean_k})"))
 networks <- list()
-for (pl in pl_alphas) {
-    for (s in network_seeds) {
-        set.seed(1000L * round(pl * 10) + s)   # avoid seed collisions across pl_alphas
-        key <- sprintf("%s|%d", format(pl), s)
-        networks[[key]] <- get_conact_matrix_pl(N, alpha = pl, mean_k = mean_k)
-    }
+for (pa in pl_alphas) {
+  for (ns in seq_len(n_network_seeds)) {
+    set.seed(1000L * round(pa * 10) + ns)
+    key <- sprintf("pa%s_n%02d", format(pa, trim = TRUE), ns)
+    networks[[key]] <- get_conact_matrix_pl(N, alpha = pa, mean_k = mean_k)
+  }
 }
 set.seed(NULL)
+message(glue("Built {length(networks)} contact matrices ({length(pl_alphas)} pl_alphas x {n_network_seeds} seeds)"))
 
 # ---------------------------------------------------------------------------
-# Run the sweep — flat job list dispatched via mclapply
+# Build the job list
 # ---------------------------------------------------------------------------
 
 jobs <- list()
-for (pl in pl_alphas) {
-    for (s in network_seeds) {
-        for (a in alphas) {
-            jobs[[length(jobs) + 1]] <- list(pl_alpha = pl, network_seed = s, alpha = a)
-        }
+
+for (a in alphas) {
+  jobs[[length(jobs) + 1L]] <- list(model = "linear",  variant = "",
+                                    alpha = a, sd_val = NA_real_)
+  jobs[[length(jobs) + 1L]] <- list(model = "sir",     variant = "",
+                                    alpha = a, sd_val = NA_real_)
+  for (sd in frailty_sds) {
+    jobs[[length(jobs) + 1L]] <- list(
+      model = "sir_sus_frailty",
+      variant = sprintf("sd%.2f", sd),
+      alpha = a, sd_val = sd)
+    jobs[[length(jobs) + 1L]] <- list(
+      model = "sir_trans_frailty",
+      variant = sprintf("sd%.2f", sd),
+      alpha = a, sd_val = sd)
+  }
+  for (pa in pl_alphas) {
+    for (ns in seq_len(n_network_seeds)) {
+      jobs[[length(jobs) + 1L]] <- list(
+        model = "network",
+        variant = sprintf("pa%s", format(pa, trim = TRUE)),
+        alpha = a, sd_val = NA_real_,
+        pl_alpha = pa, network_seed = ns,
+        key = sprintf("pa%s_n%02d", format(pa, trim = TRUE), ns))
     }
-}
-n_total <- length(jobs)
-message(glue("Dispatching {n_total} cells across outer_cores={outer_cores}, inner_cores={inner_cores}"))
-
-run_cell <- function(job) {
-    c_ij <- networks[[sprintf("%s|%d", format(job$pl_alpha), job$network_seed)]]
-    message(glue("  cell pl_alpha={job$pl_alpha} seed={job$network_seed} alpha={job$alpha}"))
-    res <- get_stoch_eate_network(beta           = beta,
-                                  susceptibility = c(1, job$alpha),
-                                  f              = vac_frac,
-                                  N              = N,
-                                  t              = t,
-                                  c_ij           = c_ij,
-                                  n_vac          = eate_n_vac,
-                                  n_rep          = eate_n_rep,
-                                  k_mean         = mean_k,
-                                  gamma          = gamma,
-                                  mc.cores       = inner_cores,
-                                  init_I         = init_I)
-    setDT(res)
-    res[, pl_alpha     := job$pl_alpha]
-    res[, network_seed := job$network_seed]
-    res[, alpha        := job$alpha]
-    res
+  }
 }
 
-results <- parallel::mclapply(jobs, run_cell,
+message(glue("Built {length(jobs)} jobs total."))
+
+# ---------------------------------------------------------------------------
+# Per-job runner
+# ---------------------------------------------------------------------------
+
+run_job <- function(job) {
+  susc <- c(1, job$alpha)
+  ve <- switch(job$model,
+    linear = get_stoch_eate_linear(
+      beta = beta, susceptibility = susc, f = 0.5, N = N,
+      t = t_horizon, n_vac = 1, n_rep = n_rep,
+      timepoints = timepoints, mc.cores = inner_cores),
+    sir = get_stoch_eate_sir(
+      beta = beta, susceptibility = susc, f = 0.5, N = N,
+      t = t_horizon, gamma = gamma, I_ini = init_I_2g,
+      n_vac = 1, n_rep = n_rep,
+      timepoints = timepoints, mc.cores = inner_cores),
+    sir_sus_frailty = get_stoch_eate_frailty(
+      alpha = job$alpha, sd = job$sd_val, sd_trans = 0, beta = beta,
+      f = 0.5, N = N / 2, t = t_horizon,
+      n_frailty = n_frailty, gamma = gamma,
+      I_ini_total = sum(init_I_2g),
+      n_vac = n_vac_allocs, n_rep = n_rep,
+      timepoints = timepoints, mc.cores = inner_cores),
+    sir_trans_frailty = get_stoch_eate_frailty(
+      alpha = job$alpha, sd = 0, sd_trans = job$sd_val, beta = beta,
+      f = 0.5, N = N / 2, t = t_horizon,
+      n_frailty = n_frailty, gamma = gamma,
+      I_ini_total = sum(init_I_2g),
+      n_vac = n_vac_allocs, n_rep = n_rep,
+      timepoints = timepoints, mc.cores = inner_cores),
+    network = get_stoch_eate_network(
+      beta = beta, susceptibility = susc, f = 0.5, N = N,
+      t = t_horizon, c_ij = networks[[job$key]], k_mean = mean_k,
+      gamma = gamma,
+      n_vac = n_vac_allocs, n_rep = n_rep,
+      timepoints = timepoints, init_I = init_I_nw,
+      mc.cores = inner_cores),
+    stop("Unknown model: ", job$model))
+  setDT(ve)
+  ve[, model        := job$model]
+  ve[, variant      := job$variant]
+  ve[, alpha        := job$alpha]
+  ve[, network_seed := job$network_seed %||% NA_integer_]
+  ve[]
+}
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+message(glue("Dispatching {length(jobs)} jobs across outer_cores={outer_cores}, inner_cores={inner_cores}"))
+
+results <- parallel::mclapply(jobs, run_job,
                               mc.cores       = outer_cores,
                               mc.preschedule = FALSE)
 
-# Surface mclapply errors instead of letting rbindlist choke on them later.
 errs <- vapply(results, inherits, logical(1), what = "try-error")
 if (any(errs)) {
-    bad <- which(errs)
-    warning(glue("{length(bad)}/{n_total} cells failed; dropping. First error:\n",
-                 conditionMessage(attr(results[[bad[1]]], "condition"))))
-    results <- results[!errs]
+  warning(glue("{sum(errs)}/{length(jobs)} jobs failed; dropping."))
+  results <- results[!errs]
 }
-
 all_res <- rbindlist(results, fill = TRUE)
 fwrite(all_res, file.path(out_dir, "raw.csv"))
 message(glue("Wrote {out_dir}/raw.csv ({nrow(all_res)} rows)"))
 
 # ---------------------------------------------------------------------------
-# Summarise + plot
+# Aggregate + plot
 # ---------------------------------------------------------------------------
 
-# VE(t) trajectory for the stochastic full method only, one row per
-# (t, pl_alpha, network_seed, alpha) averaged over the eate_n_vac
-# inner vac re-samples.
-ve_t <- all_res[method == "full_stoch",
-                .(VE      = mean(1 - eate, na.rm = TRUE),
-                  VE_q025 = quantile(1 - eate, 0.025, na.rm = TRUE),
-                  VE_q975 = quantile(1 - eate, 0.975, na.rm = TRUE),
-                  n       = .N),
-                by = .(t, pl_alpha, network_seed, alpha)]
-fwrite(ve_t, file.path(out_dir, "summary.csv"))
+ve_dt <- all_res[method == "full_stoch"]
+ve_dt[, VE := 1 - eate]
 
-alpha_lab <- paste(unique(ve_t$alpha), collapse = ", ")
+# Combined label for colour aesthetic (empty variant => just the model)
+ve_dt[, model_variant := ifelse(variant == "" | is.na(variant),
+                                as.character(model),
+                                paste0(model, "_", variant))]
 
-# Trajectories: VE(t), one line per network realisation, rows = pl_alpha.
-# If multiple alphas are used the lines for different alphas get mixed
-# in each panel — fine for the single-alpha case the user is starting
-# from; otherwise add `+ facet_grid(pl_alpha ~ alpha, ...)`.
-p_lines <- ggplot(ve_t, aes(x = t, y = VE,
-                            group = factor(network_seed),
-                            colour = factor(network_seed))) +
-    geom_line(alpha = 0.8) +
-    geom_point(size = 1.5, alpha = 0.6) +
-    facet_wrap(~ pl_alpha, labeller = label_both, nrow = 1) +
-    scale_colour_viridis_d(name = "network_seed") +
-    theme_minimal(base_size = 13) +
-    labs(x = "t",
-         y = "VE = 1 - EATE (full)",
-         title = glue("VE(t) per network — mean_k={mean_k}, N={N}, beta={beta}, alpha={alpha_lab}"))
-ggsave(file.path(out_dir, "ve_trajectory.png"), p_lines,
-       width = 4 * length(pl_alphas), height = 4, dpi = 130)
+# Median + 95% quantile across all (network_seed, sim) at fixed
+# (t, model_variant, alpha). For network this pools over the
+# n_network_seeds contact matrices AND the n_vac_allocs allocations
+# within each. For frailty it pools over allocations.
+summary_dt <- ve_dt[, .(VE_med = median(VE, na.rm = TRUE),
+                        VE_lo  = quantile(VE, 0.025, na.rm = TRUE),
+                        VE_hi  = quantile(VE, 0.975, na.rm = TRUE),
+                        n      = .N),
+                    by = .(t, model, variant, model_variant, alpha)]
+fwrite(summary_dt, file.path(out_dir, "summary.csv"))
 
-# Band: median + min/max across networks at each (t, pl_alpha).
-band <- ve_t[, .(VE_median = median(VE),
-                 VE_min    = min(VE),
-                 VE_max    = max(VE)),
-             by = .(t, pl_alpha, alpha)]
-p_band <- ggplot(band, aes(x = t, y = VE_median,
-                           group = factor(pl_alpha),
-                           colour = factor(pl_alpha),
-                           fill = factor(pl_alpha))) +
-    geom_ribbon(aes(ymin = VE_min, ymax = VE_max), alpha = 0.2, colour = NA) +
-    geom_line(size = 1) +
-    geom_point(size = 2) +
-    scale_colour_viridis_d(name = "pl_alpha") +
-    scale_fill_viridis_d(name = "pl_alpha") +
-    theme_minimal(base_size = 13) +
-    labs(x = "t",
-         y = "VE (full)",
-         title = glue("Median VE(t) across {length(network_seeds)} network realisations per pl_alpha (band = min/max)"))
-ggsave(file.path(out_dir, "ve_band.png"), p_band,
-       width = 9, height = 5, dpi = 130)
+# Plot 1: VE(t), facet by alpha, colour by (model + variant)
+p_by_alpha <- ggplot(summary_dt,
+                     aes(x = t, y = VE_med,
+                         colour = model_variant, fill = model_variant,
+                         group  = model_variant)) +
+  geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi),
+              alpha = 0.18, colour = NA) +
+  geom_line(size = 1) +
+  facet_wrap(~ alpha, labeller = label_both) +
+  scale_colour_viridis_d(name = "model") +
+  scale_fill_viridis_d(name   = "model") +
+  theme_minimal(base_size = 13) +
+  labs(x = "t", y = "VE = 1 - EATE (full_stoch)",
+       title = glue("VE(t) by model — beta = {beta}, gamma = {gamma}, N = {N}"))
+ggsave(file.path(out_dir, "ve_by_alpha.png"),
+       p_by_alpha,
+       width = 13, height = 8, dpi = 130)
 
-message(glue("Wrote plots to {out_dir}/"))
-message("Done.")
+# Plot 2: VE(t), facet by (model + variant), colour by alpha
+p_by_model <- ggplot(summary_dt,
+                     aes(x = t, y = VE_med,
+                         colour = factor(alpha), fill = factor(alpha),
+                         group  = interaction(model_variant, alpha))) +
+  geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi),
+              alpha = 0.15, colour = NA) +
+  geom_line(size = 1) +
+  facet_wrap(~ model_variant, scales = "free_y") +
+  scale_colour_viridis_d(name = "alpha") +
+  scale_fill_viridis_d(name   = "alpha") +
+  theme_minimal(base_size = 13) +
+  labs(x = "t", y = "VE = 1 - EATE",
+       title = glue("VE(t) per model — beta = {beta}, gamma = {gamma}, N = {N}"))
+ggsave(file.path(out_dir, "ve_by_model.png"),
+       p_by_model,
+       width = 13, height = 9, dpi = 130)
+
+message(glue("Done. Outputs in {out_dir}/"))
