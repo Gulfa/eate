@@ -204,30 +204,35 @@ message(glue("Wrote {out_dir}/raw.csv ({nrow(all_res)} rows)"))
 ve_dt <- all_res[method == "full_stoch"]
 ve_dt[, VE := 1 - eate]
 
-# Combined label for colour aesthetic. Network keeps its network_seed
-# in the label so each draw is a separate curve (only inner
-# allocations are averaged over).
-ve_dt[, model_variant := ifelse(
+# Two labels:
+#   color_group: what determines line colour. For network this is
+#     model + variant WITHOUT network_seed, so all draws of the same
+#     pl_alpha share a colour.
+#   line_id: uniquely identifies a curve. For network this includes
+#     network_seed so each draw is its own line.
+ve_dt[, color_group := ifelse(
+  variant == "" | is.na(variant),
+  as.character(model),
+  paste0(model, "_", variant))]
+ve_dt[, line_id := ifelse(
   model == "network",
-  sprintf("network_%s_n%02d", variant, network_seed),   # e.g. network_pa3_n01
-  ifelse(variant == "" | is.na(variant),
-         as.character(model),
-         paste0(model, "_", variant)))]
+  sprintf("%s_n%02d", color_group, network_seed),
+  color_group)]
 
-# Mean VE at fixed (t, model_variant, alpha). For network this
-# averages only over the n_vac_allocs internal allocations within one
-# graph — different graphs stay as separate lines. For frailty it
-# averages over allocations. No uncertainty bands — VE is defined as
-# the average.
+# Mean VE at fixed (t, line_id, alpha). Network: mean over inner
+# n_vac_allocs allocations only, different graphs stay separate.
+# Frailty: mean over allocations.
 summary_dt <- ve_dt[, .(VE = mean(VE, na.rm = TRUE), n = .N),
-                    by = .(t, model, variant, model_variant, alpha)]
+                    by = .(t, model, variant, color_group, line_id, alpha)]
 fwrite(summary_dt, file.path(out_dir, "summary.csv"))
 
-# Plot 1: VE(t), facet by alpha, colour by (model + variant)
+# Plot 1: VE(t), facet by alpha. Colour by color_group so network
+# draws of the same pl_alpha share a colour; group by line_id so each
+# network seed is its own line.
 p_by_alpha <- ggplot(summary_dt,
                      aes(x = t, y = VE,
-                         colour = model_variant,
-                         group  = model_variant)) +
+                         colour = color_group,
+                         group  = line_id)) +
   geom_line(size = 1) +
   facet_wrap(~ alpha, labeller = label_both) +
   scale_colour_viridis_d(name = "model") +
@@ -238,13 +243,14 @@ ggsave(file.path(out_dir, "ve_by_alpha.png"),
        p_by_alpha,
        width = 13, height = 8, dpi = 130)
 
-# Plot 2: VE(t), facet by (model + variant), colour by alpha
+# Plot 2: VE(t), facet by color_group, colour by alpha. Multiple
+# network draws of the same pl_alpha share the same facet.
 p_by_model <- ggplot(summary_dt,
                      aes(x = t, y = VE,
                          colour = factor(alpha),
-                         group  = interaction(model_variant, alpha))) +
+                         group  = interaction(line_id, alpha))) +
   geom_line(size = 1) +
-  facet_wrap(~ model_variant, scales = "free_y") +
+  facet_wrap(~ color_group, scales = "free_y") +
   scale_colour_viridis_d(name = "alpha") +
   theme_minimal(base_size = 13) +
   labs(x = "t", y = "VE (mean over allocations)",
