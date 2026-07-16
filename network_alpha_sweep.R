@@ -245,19 +245,60 @@ fwrite(summary_dt, file.path(out_dir, "summary.csv"))
 n_groups   <- length(unique(summary_dt$color_group))
 n_alphas   <- length(unique(summary_dt$alpha))
 
-# Plot 1: VE(t), facet by alpha. Colour by color_group so network
-# draws of the same pl_alpha share a colour; group by line_id so each
-# network seed is its own line.
+# Publication-ready display name mapping. Ordered so the legend flows
+# from simplest (linear) to most structured (network).
+display_name <- function(color_group) {
+  out <- character(length(color_group))
+  for (i in seq_along(color_group)) {
+    g <- color_group[i]
+    out[i] <- if (g == "linear") "Linear"
+    else if (g == "sir") "SIR (homogeneous)"
+    else if (grepl("^sir_sus_frailty_sd", g)) {
+      sd <- sub("^sir_sus_frailty_sd", "", g)
+      sprintf("SIR + sus. frailty (σ = %s)", sd)
+    } else if (grepl("^sir_trans_frailty_sd", g)) {
+      sd <- sub("^sir_trans_frailty_sd", "", g)
+      sprintf("SIR + trans. frailty (σ = %s)", sd)
+    } else if (grepl("^network_pa", g)) {
+      pa <- sub("^network_pa", "", g)
+      sprintf("Network (Pareto exp. = %s)", pa)
+    } else g
+  }
+  out
+}
+
+# Build an ordered factor so legend + colour cycle in a sensible order.
+groups_ordered <- unique(summary_dt$color_group)
+order_score <- function(g) {
+  if (g == "linear")                          return(1)
+  if (g == "sir")                             return(2)
+  if (grepl("^sir_sus_frailty_sd", g))        return(3 + as.numeric(sub("^sir_sus_frailty_sd", "", g)))
+  if (grepl("^sir_trans_frailty_sd", g))      return(5 + as.numeric(sub("^sir_trans_frailty_sd", "", g)))
+  if (grepl("^network_pa", g))                return(7 + as.numeric(sub("^network_pa", "", g)))
+  99
+}
+groups_ordered <- groups_ordered[order(sapply(groups_ordered, order_score))]
+group_labels   <- setNames(display_name(groups_ordered), groups_ordered)
+
+summary_dt[, display := factor(color_group, levels = groups_ordered,
+                                labels = group_labels[groups_ordered])]
+
+# Plot 1: VE(t), facet by alpha. Publication style — Dark2 palette,
+# white background, legend at bottom, larger text.
 p_by_alpha <- ggplot(summary_dt,
                      aes(x = t, y = VE,
-                         colour = color_group,
+                         colour = display,
                          group  = line_id)) +
-  geom_line(size = 1) +
+  geom_line(size = 0.9) +
   facet_wrap(~ alpha, labeller = label_both, scales = "free_y") +
-  dark2_scale(n_groups, name = "model") +
-  theme_minimal(base_size = 13) +
-  labs(x = "t", y = "VE = 1 - EATE (mean over allocations)",
-       title = glue("VE(t) by model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
+  dark2_scale(n_groups, name = NULL) +
+  theme_bw(base_size = 15) +
+  theme(legend.position = "bottom",
+        legend.title    = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  guides(colour = guide_legend(nrow = 2, byrow = TRUE)) +
+  labs(x = "t", y = "VE")
 ggsave(file.path(out_dir, "ve_by_alpha.png"),
        p_by_alpha,
        width = 13, height = 8, dpi = 130)
