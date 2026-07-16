@@ -23,19 +23,19 @@ source("utils.R")
 # Parameters
 # ---------------------------------------------------------------------------
 
-pl_alphas    <- c(2, 5)
-N            <- 200
+pl_alphas    <- c(1, 10)
+N            <- 500
 mean_k       <- 6
 alpha        <- 0.5             # vaccine susceptibility
 beta         <- 1.5             # R0 = beta / gamma in homog limit
 gamma        <- 1
-init_I       <- 2
+init_I       <- 30
 t_horizon    <- 8
 dt           <- 0.01
 timepoints   <- seq(1, t_horizon, 1)
 
 n_allocs     <- 10
-n_rep        <- 500
+n_rep        <- 1000
 inner_cores  <- 4               # dust threads per EATE call
 outer_cores  <- 2               # mclapply across allocations inside EATE
 
@@ -87,25 +87,25 @@ fwrite(results, file.path(out_dir, "results.csv"))
 plot_dt <- results[method %in% c("full_stoch", "CRR")]
 plot_dt[, metric := factor(method,
                            levels = c("CRR", "full_stoch"),
-                           labels = c("1 - CIR (pseudo-VE)",
-                                      "VE (frozen-field flipping)"))]
+                           labels = c("1 - CIR",
+                                      "allocation specific VE"))]
 plot_dt[, pl_alpha_lbl := factor(paste0("Pareto exp. = ", pl_alpha),
                                  levels = paste0("Pareto exp. = ", pl_alphas))]
 
-n_alloc <- length(unique(plot_dt$alloc))
-pal <- if (n_alloc <= 8) brewer.pal(max(n_alloc, 3L), "Dark2")[seq_len(n_alloc)]
-       else colorRampPalette(brewer.pal(8L, "Dark2"))(n_alloc)
+# Mean across allocations at each (t, metric, pl_alpha) — bold line overlay.
+avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE)),
+                  by = .(t, metric, pl_alpha_lbl)]
 
-p <- ggplot(plot_dt, aes(x = t, y = VE,
-                          colour = factor(alloc), group = alloc)) +
-  geom_line(size = 0.9) +
-  facet_grid(pl_alpha_lbl ~ metric, scales = "free_y") +
-  scale_colour_manual(name = "allocation", values = pal) +
+alloc_col <- brewer.pal(3L, "Dark2")[1]
+
+p <- ggplot(plot_dt, aes(x = t, y = VE)) +
+  geom_line(aes(group = alloc), colour = alloc_col,
+            alpha = 0.45, size = 0.7) +
+  geom_line(data = avg_dt, colour = "black", size = 1.3) +
+  facet_grid(pl_alpha_lbl ~ metric) +
   theme_bw(base_size = 15) +
-  theme(legend.position = "bottom",
-        panel.grid.minor = element_blank(),
+  theme(panel.grid.minor = element_blank(),
         strip.background = element_rect(fill = "grey95", colour = NA)) +
-  guides(colour = guide_legend(nrow = 1)) +
   labs(x = "t", y = NULL)
 
 ggsave(file.path(out_dir, "allocation_effect.png"), p,
