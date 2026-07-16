@@ -1008,14 +1008,20 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                                    n_vac = 10, n_rep = 20,
                                    k_mean = 6, gamma = 1 / 3, dt = 0.1,
                                    timepoints = NULL, init_I = 2,
-                                   mc.cores = 10, inner_cores = 1) {
+                                   mc.cores = 10, inner_cores = 1,
+                                   vac_list = NULL) {
   alpha <- susceptibility[2]
   if (is.null(c_ij))       c_ij       <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
 
-  run_one_allocation <- function() {
-    vac      <- sample(seq_len(N), round(f * N))
+  # If explicit allocations are supplied, use them in order and override
+  # n_vac to match; otherwise sample a fresh vac set per iteration.
+  if (!is.null(vac_list)) n_vac <- length(vac_list)
+
+  run_one_allocation <- function(i) {
+    vac      <- if (!is.null(vac_list)) vac_list[[i]]
+                else sample(seq_len(N), round(f * N))
     non_vac  <- setdiff(seq_len(N), vac)
     sim_id   <- runif(1)
 
@@ -1081,7 +1087,7 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
   }
 
   res <- parallel::mclapply(seq_len(n_vac),
-                            function(i) run_one_allocation(),
+                            function(i) run_one_allocation(i),
                             mc.cores = mc.cores)
   rbindlist(res, fill = TRUE)
 }
