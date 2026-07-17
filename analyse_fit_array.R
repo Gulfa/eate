@@ -13,6 +13,7 @@ library(data.table)
 library(ggplot2)
 library(dplyr)
 library(glue)
+library(RColorBrewer)
 
 args        <- commandArgs(trailingOnly = TRUE)
 results_dir <- if (length(args) >= 1) args[1] else "output/fit_array_results"
@@ -423,3 +424,96 @@ for (exp_id in experiments_present) {
   )
 }
 message("\nAll experiments done.")
+
+# ---------------------------------------------------------------------------
+# Combined cross-experiment L3 (pool_nets) plots
+# ---------------------------------------------------------------------------
+# One dodged forest per parameter (beta, alpha, VE at t*) with all
+# experiments overlaid, coloured by experiment_id. Uses the per-
+# experiment L3 CSVs already written inside analyse_one_experiment.
+
+combined_dir <- file.path(out_dir, "_combined")
+dir.create(combined_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Read one experiment's L3 CSV for a parameter, tag with experiment_id.
+.read_l3 <- function(eid, param) {
+  csv <- file.path(out_dir, eid, glue("forest_{param}_pool_nets.csv"))
+  if (!file.exists(csv)) return(NULL)
+  dt <- fread(csv)
+  dt[, experiment_id := eid]
+  dt[]
+}
+
+# VE has t_star embedded in the filename (glob for it).
+.read_l3_ve <- function(eid) {
+  files <- list.files(file.path(out_dir, eid),
+                      pattern = "^forest_VE_t.*_pool_nets\\.csv$",
+                      full.names = TRUE)
+  if (!length(files)) return(NULL)
+  dt <- fread(files[1])
+  t_val <- as.numeric(sub("^forest_VE_t([0-9.]+)_pool_nets\\.csv$", "\\1",
+                          basename(files[1])))
+  dt[, experiment_id := eid]
+  dt[, t_star := t_val]
+  dt[]
+}
+
+beta_combined  <- rbindlist(lapply(experiments_present, .read_l3, param = "beta"), fill = TRUE)
+alpha_combined <- rbindlist(lapply(experiments_present, .read_l3, param = "alpha"), fill = TRUE)
+ve_combined    <- rbindlist(lapply(experiments_present, .read_l3_ve), fill = TRUE)
+
+# Consistent group ordering across experiments (use order_key from
+# analyse_one_experiment scope — redefine here for the top-level plots).
+.order_group <- function(dt) {
+  if (!nrow(dt)) return(dt)
+  lvl <- unique(dt$group)
+  lvl <- lvl[order(sapply(lvl, order_key))]
+  dt[, group := factor(group, levels = rev(lvl))]  # rev so top row = first
+  dt
+}
+beta_combined  <- .order_group(beta_combined)
+alpha_combined <- .order_group(alpha_combined)
+ve_combined    <- .order_group(ve_combined)
+
+# Dark2 palette by experiment.
+combined_forest <- function(df, xlab, title, vline = NULL, out_file) {
+  if (!nrow(df)) return(invisible(NULL))
+  n_exp <- length(unique(df$experiment_id))
+  pal   <- if (n_exp <= 8L) brewer.pal(max(n_exp, 3L), "Dark2")[seq_len(n_exp)]
+           else colorRampPalette(brewer.pal(8L, "Dark2"))(n_exp)
+  p <- ggplot(df, aes(y = group, x = estimate,
+                       colour = experiment_id, group = experiment_id)) +
+    geom_point(position = position_dodge(width = 0.6), size = 2.6) +
+    geom_errorbarh(aes(xmin = lo, xmax = hi),
+                   position = position_dodge(width = 0.6), height = 0.25) +
+    scale_colour_manual(name = "experiment", values = pal) +
+    theme_bw(base_size = 14) +
+    theme(legend.position = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA)) +
+    labs(x = xlab, y = NULL, title = title)
+  if (!is.null(vline))
+    p <- p + geom_vline(xintercept = vline, linetype = "dashed", colour = "grey50")
+  h <- max(4, 0.55 * length(unique(df$group)))
+  ggsave(out_file, p, width = 10, height = h, dpi = 130, limitsize = FALSE)
+}
+
+combined_forest(beta_combined,
+                xlab = "beta",
+                title = "beta (pool_nets) across experiments",
+                out_file = file.path(combined_dir, "combined_forest_beta.png"))
+combined_forest(alpha_combined,
+                xlab = "alpha",
+                title = "alpha (pool_nets) across experiments",
+                vline = 1,
+                out_file = file.path(combined_dir, "combined_forest_alpha.png"))
+combined_forest(ve_combined,
+                xlab = "VE = 1 - EATE",
+                title = "VE at t* (pool_nets) across experiments",
+                out_file = file.path(combined_dir, "combined_forest_VE.png"))
+
+fwrite(beta_combined,  file.path(combined_dir, "combined_beta.csv"))
+fwrite(alpha_combined, file.path(combined_dir, "combined_alpha.csv"))
+fwrite(ve_combined,    file.path(combined_dir, "combined_VE.csv"))
+
+message(glue("Wrote combined cross-experiment plots to {combined_dir}/"))
