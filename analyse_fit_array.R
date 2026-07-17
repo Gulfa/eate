@@ -42,6 +42,45 @@ experiments_present <- unique(experiment_ids)
 message(glue("Experiments found: {paste(experiments_present, collapse=', ')}"))
 
 # ---------------------------------------------------------------------------
+# Top-level helpers used by both the per-experiment loop and the
+# post-loop combined plots. Keep OUTSIDE analyse_one_experiment so they
+# remain visible after the loop.
+# ---------------------------------------------------------------------------
+
+.pa_str <- function(pa) sprintf("pa%s", format(pa, trim = TRUE))
+
+labels_L1_all_splits <- function(r) {
+  switch(r$model_type,
+         network           = sprintf("network_%s_n%02d_a%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
+         sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
+         sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
+         r$model_type)
+}
+labels_L2_pool_allocs <- function(r) {
+  switch(r$model_type,
+         network           = sprintf("network_%s_n%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed),
+         sir_sus_frailty   = "sus_frailty",
+         sir_trans_frailty = "trans_frailty",
+         r$model_type)
+}
+labels_L3_pool_nets <- function(r) {
+  switch(r$model_type,
+         network           = sprintf("network_%s_all", .pa_str(r$pl_alpha)),
+         sir_sus_frailty   = "sus_frailty",
+         sir_trans_frailty = "trans_frailty",
+         r$model_type)
+}
+
+order_key <- function(label) {
+  if (label %in% c("linear", "sir")) return(paste0("0_", label))
+  if (grepl("frailty", label))       return(paste0("1_", label))
+  if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
+  paste0("3_", label)
+}
+
+# ---------------------------------------------------------------------------
 # Everything below runs per-experiment: takes a filtered ok list and an
 # experiment-specific out_dir. Called once per experiment_id further down.
 # ---------------------------------------------------------------------------
@@ -78,47 +117,9 @@ print(fit_dt[, .(min_loss = min(loss), med_loss = median(loss),
                  n = .N),
              by = model_type])
 
-# ---------------------------------------------------------------------------
-# Group labels — three consistent aggregation levels. pl_alpha is a
-# separate axis for network configs and is preserved at every level.
-#   L1 all_splits   : one row per job (network per pl_alpha x seed x alloc)
-#   L2 pool_allocs  : one row per (model | pl_alpha,network_seed);
-#                     allocations pooled but pl_alpha and seed kept apart
-#   L3 pool_nets    : one row per (model | pl_alpha); pl_alphas separate
-# ---------------------------------------------------------------------------
-
-.pa_str <- function(pa) sprintf("pa%s", format(pa, trim = TRUE))
-
-labels_L1_all_splits <- function(r) {
-  switch(r$model_type,
-         network           = sprintf("network_%s_n%02d_a%02d",
-                                     .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
-         sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
-         sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
-         r$model_type)
-}
-labels_L2_pool_allocs <- function(r) {
-  switch(r$model_type,
-         network           = sprintf("network_%s_n%02d",
-                                     .pa_str(r$pl_alpha), r$network_seed),
-         sir_sus_frailty   = "sus_frailty",
-         sir_trans_frailty = "trans_frailty",
-         r$model_type)
-}
-labels_L3_pool_nets <- function(r) {
-  switch(r$model_type,
-         network           = sprintf("network_%s_all", .pa_str(r$pl_alpha)),
-         sir_sus_frailty   = "sus_frailty",
-         sir_trans_frailty = "trans_frailty",
-         r$model_type)
-}
-
-order_key <- function(label) {
-  if (label %in% c("linear", "sir")) return(paste0("0_", label))
-  if (grepl("frailty", label))       return(paste0("1_", label))
-  if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
-  paste0("3_", label)
-}
+# Group labels / order_key are defined at top-level scope (above the
+# function definition) so they're visible both here and in the
+# combined cross-experiment section that runs after the loop.
 
 # ---------------------------------------------------------------------------
 # Posterior-aware pooling: for a group with multiple fits (e.g. network
