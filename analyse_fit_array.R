@@ -159,8 +159,6 @@ forest_plot <- function(df, title, xlab, vline = NULL) {
   p <- ggplot(df, aes(y = group, x = estimate)) +
     geom_point(size = 2.6) +
     geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
-    geom_text(aes(label = sprintf("n=%d", n)),
-              x = Inf, hjust = 1.1, size = 3, colour = "grey40") +
     theme_minimal(base_size = 13) +
     labs(x = xlab, y = NULL, title = title)
   if (!is.null(vline)) p <- p + geom_vline(xintercept = vline, linetype = "dashed", colour = "grey50")
@@ -224,7 +222,7 @@ for (lvl in names(levels_def)) {
          forest_plot(df_beta, glue("beta — {level_titles[[lvl]]}"), "beta") + small,
          width = 8, height = h, dpi = 130, limitsize = FALSE)
   ggsave(file.path(out_dir, glue("forest_alpha_{lvl}.png")),
-         forest_plot(df_alpha, glue("alpha — {level_titles[[lvl]]}"), "alpha", vline = 1) + small,
+         forest_plot(df_alpha, glue("alpha — {level_titles[[lvl]]}"), "alpha") + small,
          width = 8, height = h, dpi = 130, limitsize = FALSE)
   if (nrow(df_ve)) {
     ggsave(file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.png")),
@@ -506,7 +504,6 @@ combined_forest(beta_combined,
 combined_forest(alpha_combined,
                 xlab = "alpha",
                 title = "alpha (pool_nets) across experiments",
-                vline = 1,
                 out_file = file.path(combined_dir, "combined_forest_alpha.png"))
 combined_forest(ve_combined,
                 xlab = "VE = 1 - EATE",
@@ -516,5 +513,43 @@ combined_forest(ve_combined,
 fwrite(beta_combined,  file.path(combined_dir, "combined_beta.csv"))
 fwrite(alpha_combined, file.path(combined_dir, "combined_alpha.csv"))
 fwrite(ve_combined,    file.path(combined_dir, "combined_VE.csv"))
+
+# Two-column combined plot: VE (left) + alpha (right), both
+# cross-experiment, shared y-axis (model groups), colour by experiment.
+if (nrow(ve_combined) && nrow(alpha_combined)) {
+  ve_side    <- copy(ve_combined)[,    metric := "VE"]
+  alpha_side <- copy(alpha_combined)[, metric := "alpha"]
+  keep <- c("group", "n", "estimate", "lo", "hi", "experiment_id", "metric")
+  side_by_side <- rbind(ve_side[, ..keep], alpha_side[, ..keep])
+
+  # Shared y-axis ordering from the union of groups.
+  lvl <- unique(as.character(side_by_side$group))
+  lvl <- lvl[order(sapply(lvl, order_key))]
+  side_by_side[, group := factor(group, levels = rev(lvl))]
+  side_by_side[, metric := factor(metric, levels = c("VE", "alpha"))]
+
+  n_exp <- length(unique(side_by_side$experiment_id))
+  pal   <- if (n_exp <= 8L) brewer.pal(max(n_exp, 3L), "Dark2")[seq_len(n_exp)]
+           else colorRampPalette(brewer.pal(8L, "Dark2"))(n_exp)
+
+  p_two <- ggplot(side_by_side, aes(y = group, x = estimate,
+                                     colour = experiment_id,
+                                     group = experiment_id)) +
+    geom_point(position = position_dodge(width = 0.6), size = 2.6) +
+    geom_errorbarh(aes(xmin = lo, xmax = hi),
+                   position = position_dodge(width = 0.6), height = 0.25) +
+    facet_wrap(~ metric, scales = "free_x") +
+    scale_colour_manual(name = "experiment", values = pal) +
+    theme_bw(base_size = 14) +
+    theme(legend.position = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA)) +
+    labs(x = NULL, y = NULL,
+         title = "VE (t*) and alpha across experiments (pool_nets)")
+
+  h <- max(4, 0.55 * length(lvl))
+  ggsave(file.path(combined_dir, "combined_forest_VE_alpha.png"),
+         p_two, width = 12, height = h, dpi = 130, limitsize = FALSE)
+}
 
 message(glue("Wrote combined cross-experiment plots to {combined_dir}/"))
