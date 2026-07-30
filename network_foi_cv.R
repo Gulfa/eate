@@ -22,6 +22,7 @@ library(data.table)
 library(ggplot2)
 library(glue)
 library(RColorBrewer)
+library(cowplot)
 
 source("stoch_model.R")
 source("utils.R")
@@ -40,7 +41,7 @@ t_horizon   <- 20
 dt          <- 0.02
 timepoints  <- seq(1, t_horizon, 1)
 n_rep       <- 200
-inner_cores <- 4
+inner_cores <- 8
 
 out_dir <- "output/network_foi_cv"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -64,7 +65,7 @@ cv2 <- function(x) {
 all_rows <- list()
 for (pa in pl_alphas) {
   message(glue("pl_alpha = {pa}"))
-  set.seed(pa * 1000L)
+  set.seed(pa * 1001L)
   c_ij <- get_conact_matrix_pl(N, alpha = pa, mean_k = mean_k)
   set.seed(NULL)
 
@@ -111,12 +112,19 @@ for (pa in pl_alphas) {
     }
   }
 
+  # Cumulative incidence rate per replicate at each t = fraction of the
+  # population no longer susceptible.
+  S_total  <- apply(S_arr, c(1L, 2L), sum)   # [n_t, n_rep]
+  cir_rep  <- (N - S_total) / N              # [n_t, n_rep]
+  cir_mean <- rowMeans(cir_rep)
+
   rows <- data.table(
     t              = timepoints,
     pl_alpha       = pa,
     cv2_degree     = cv2_deg,   # constant in t
     cv2_all        = rowMeans(cv2_all_rep,  na.rm = TRUE),
     cv2_unexposed  = rowMeans(cv2_susc_rep, na.rm = TRUE),
+    cir            = cir_mean,
     mean_n_susc    = rowMeans(n_susc_rep,   na.rm = TRUE))
   all_rows[[length(all_rows) + 1L]] <- rows
 }
@@ -125,11 +133,19 @@ results <- rbindlist(all_rows)
 fwrite(results, file.path(out_dir, "results.csv"))
 
 # ---------------------------------------------------------------------------
-# Plot: CV^2(t), three lines per pl_alpha facet
+# Plot: two rows stitched via cowplot
+#   Row 1: CIR(t)    — cumulative incidence rate, one line per pl_alpha
+#                      facet (mean over replicates)
+#   Row 2: CV^2(t)   — three lines per pl_alpha facet
+# Shared column layout (pl_alpha facets), Dark2 palette.
 # ---------------------------------------------------------------------------
 
+results[, pl_alpha_lbl := factor(sprintf("Pareto exp. = %s", format(pl_alpha, trim = TRUE)),
+                                 levels = sprintf("Pareto exp. = %s",
+                                                  format(pl_alphas, trim = TRUE)))]
+
 long <- melt(results,
-             id.vars       = c("t", "pl_alpha"),
+             id.vars       = c("t", "pl_alpha", "pl_alpha_lbl"),
              measure.vars  = c("cv2_degree", "cv2_all", "cv2_unexposed"),
              variable.name = "source",
              value.name    = "cv2")
@@ -138,13 +154,18 @@ long[, source := factor(source,
                         labels = c("Degree distribution",
                                    "FOI: all individuals",
                                    "FOI: still susceptible"))]
-long[, pl_alpha_lbl := factor(sprintf("Pareto exp. = %s", format(pl_alpha, trim = TRUE)),
-                              levels = sprintf("Pareto exp. = %s",
-                                               format(pl_alphas, trim = TRUE)))]
 
 pal <- brewer.pal(3L, "Dark2")
 
-p <- ggplot(long, aes(x = t, y = cv2, colour = source, group = source)) +
+p_cir <- ggplot(results, aes(x = t, y = cir)) +
+  geom_line(size = 1, colour = "black") +
+  facet_wrap(~ pl_alpha_lbl, scales = "free_y") +
+  theme_bw(base_size = 15) +
+  theme(panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  labs(x = NULL, y = "CIR(t)")
+
+p_cv2 <- ggplot(long, aes(x = t, y = cv2, colour = source, group = source)) +
   geom_line(size = 1) +
   facet_wrap(~ pl_alpha_lbl, scales = "free_y") +
   scale_colour_manual(name = NULL, values = pal) +
@@ -154,7 +175,10 @@ p <- ggplot(long, aes(x = t, y = cv2, colour = source, group = source)) +
         strip.background = element_rect(fill = "grey95", colour = NA)) +
   labs(x = "t", y = expression(CV^2))
 
+p <- cowplot::plot_grid(p_cir, p_cv2, ncol = 1L,
+                        rel_heights = c(0.9, 1.4), align = "v", axis = "lr")
+
 ggsave(file.path(out_dir, "cv2_foi.png"), p,
-       width = 4 * length(pl_alphas) + 2, height = 5.5, dpi = 130)
+       width = 4 * length(pl_alphas) + 2, height = 9, dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
