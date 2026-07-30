@@ -80,6 +80,36 @@ order_key <- function(label) {
   paste0("3_", label)
 }
 
+# Human-readable labels for the group codes used by the forest plots.
+# Handles L1 (job-specific), L2 (per network_seed), L3 (per pl_alpha)
+# variants. Anything unrecognised falls through unchanged.
+display_name <- function(x) {
+  vapply(as.character(x), function(g) {
+    if (g == "linear") return("Linear")
+    if (g == "sir")    return("SIR (homogeneous)")
+    if (grepl("^sus_frailty(_a[0-9]+)?$", g)) {
+      s <- sub("^sus_frailty",  "SIR + sus. frailty",  g)
+      return(sub("_a([0-9]+)$", " (alloc \\1)", s))
+    }
+    if (grepl("^trans_frailty(_a[0-9]+)?$", g)) {
+      s <- sub("^trans_frailty", "SIR + trans. frailty", g)
+      return(sub("_a([0-9]+)$", " (alloc \\1)", s))
+    }
+    m <- regmatches(g, regexec("^network_pa([0-9.]+)(_n([0-9]+))?(_a([0-9]+))?(_all)?$", g))[[1]]
+    if (length(m) >= 2 && nzchar(m[2])) {
+      pa   <- m[2]
+      seed <- m[4]; alloc <- m[6]; all_tag <- m[7]
+      base <- sprintf("Network (Pareto exp. = %s)", pa)
+      if (nzchar(all_tag) || (!nzchar(seed) && !nzchar(alloc))) return(base)
+      if (nzchar(seed) && nzchar(alloc))
+        return(sprintf("%s, seed %s, alloc %s", base, seed, alloc))
+      if (nzchar(seed))  return(sprintf("%s, seed %s", base, seed))
+      if (nzchar(alloc)) return(sprintf("%s, alloc %s", base, alloc))
+    }
+    g
+  }, character(1))
+}
+
 # ---------------------------------------------------------------------------
 # Everything below runs per-experiment: takes a filtered ok list and an
 # experiment-specific out_dir. Called once per experiment_id further down.
@@ -155,11 +185,15 @@ summarise_param <- function(ok, group_fn, param) {
 }
 
 forest_plot <- function(df, title, xlab, vline = NULL) {
-  df[, group := factor(group, levels = rev(df$group))]
+  ord   <- rev(as.character(df$group))
+  labs  <- setNames(display_name(ord), ord)
+  df[, group := factor(as.character(group), levels = ord, labels = labs[ord])]
   p <- ggplot(df, aes(y = group, x = estimate)) +
     geom_point(size = 2.6) +
     geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
-    theme_minimal(base_size = 13) +
+    theme_bw(base_size = 14) +
+    theme(panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA)) +
     labs(x = xlab, y = NULL, title = title)
   if (!is.null(vline)) p <- p + geom_vline(xintercept = vline, linetype = "dashed", colour = "grey50")
   p
@@ -235,6 +269,34 @@ for (lvl in names(levels_def)) {
   fwrite(df_beta,  file.path(out_dir, glue("forest_beta_{lvl}.csv")))
   fwrite(df_alpha, file.path(out_dir, glue("forest_alpha_{lvl}.csv")))
   if (nrow(df_ve)) fwrite(df_ve, file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.csv")))
+
+  # Two-column combined VE | alpha at this level. Shared y-axis of
+  # model groups, free x-scales so VE and alpha get their own ranges.
+  # No plot title.
+  if (nrow(df_ve) && nrow(df_alpha)) {
+    ve_side    <- copy(df_ve)[,    metric := "VE"]
+    alpha_side <- copy(df_alpha)[, metric := "alpha"]
+    keep <- c("group", "n", "estimate", "lo", "hi", "metric")
+    side <- rbind(ve_side[, ..keep], alpha_side[, ..keep])
+    lvl_groups <- unique(as.character(side$group))
+    lvl_groups <- lvl_groups[order(sapply(lvl_groups, order_key))]
+    disp_labs  <- setNames(display_name(lvl_groups), lvl_groups)
+    side[, group := factor(as.character(group),
+                            levels = rev(lvl_groups),
+                            labels = disp_labs[rev(lvl_groups)])]
+    side[, metric := factor(metric, levels = c("VE", "alpha"))]
+
+    p_side <- ggplot(side, aes(y = group, x = estimate)) +
+      geom_point(size = 2.6) +
+      geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
+      facet_wrap(~ metric, scales = "free_x") +
+      theme_bw(base_size = 14) +
+      theme(panel.grid.minor = element_blank(),
+            strip.background = element_rect(fill = "grey95", colour = NA)) +
+      labs(x = NULL, y = NULL)
+    ggsave(file.path(out_dir, glue("forest_VE_alpha_{lvl}.png")),
+           p_side, width = 11, height = h, dpi = 130, limitsize = FALSE)
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -465,9 +527,11 @@ ve_combined    <- rbindlist(lapply(experiments_present, .read_l3_ve), fill = TRU
 # analyse_one_experiment scope — redefine here for the top-level plots).
 .order_group <- function(dt) {
   if (!nrow(dt)) return(dt)
-  lvl <- unique(dt$group)
-  lvl <- lvl[order(sapply(lvl, order_key))]
-  dt[, group := factor(group, levels = rev(lvl))]  # rev so top row = first
+  lvl  <- unique(as.character(dt$group))
+  lvl  <- lvl[order(sapply(lvl, order_key))]
+  labs <- setNames(display_name(lvl), lvl)
+  dt[, group := factor(as.character(group),
+                        levels = rev(lvl), labels = labs[rev(lvl)])]
   dt
 }
 beta_combined  <- .order_group(beta_combined)
@@ -522,10 +586,13 @@ if (nrow(ve_combined) && nrow(alpha_combined)) {
   keep <- c("group", "n", "estimate", "lo", "hi", "experiment_id", "metric")
   side_by_side <- rbind(ve_side[, ..keep], alpha_side[, ..keep])
 
-  # Shared y-axis ordering from the union of groups.
-  lvl <- unique(as.character(side_by_side$group))
-  lvl <- lvl[order(sapply(lvl, order_key))]
-  side_by_side[, group := factor(group, levels = rev(lvl))]
+  # Shared y-axis: ve_combined and alpha_combined already carry
+  # display-name factor levels in order_key order (via .order_group),
+  # so we take the union and preserve first-seen order.
+  lvl_ve    <- levels(ve_combined$group)
+  lvl_alpha <- levels(alpha_combined$group)
+  lvl       <- union(lvl_ve, lvl_alpha)
+  side_by_side[, group := factor(as.character(group), levels = lvl)]
   side_by_side[, metric := factor(metric, levels = c("VE", "alpha"))]
 
   n_exp <- length(unique(side_by_side$experiment_id))
