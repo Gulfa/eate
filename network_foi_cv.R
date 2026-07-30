@@ -36,6 +36,9 @@ N           <- 500
 mean_k      <- 6
 beta        <- 1.5              # R0 = beta/gamma in homog limit
 gamma       <- 1
+vac_frac    <- 0.5              # fraction vaccinated
+alpha_vac   <- 0.5              # vaccine susceptibility multiplier
+alloc_seed  <- 1                # for reproducible vac allocation
 init_I      <- 5
 t_horizon   <- 20
 dt          <- 0.02
@@ -73,12 +76,23 @@ for (pa in pl_alphas) {
   degree  <- rowSums(c_ij)
   cv2_deg <- cv2(degree)
 
+  # Vaccinate a fixed fraction of the population; vaccinated individuals
+  # get susceptibility = alpha_vac, others = 1.
+  set.seed(alloc_seed)
+  vac <- sample(seq_len(N), round(vac_frac * N))
+  set.seed(NULL)
+  non_vac <- setdiff(seq_len(N), vac)
+  susept        <- rep(1, N)
+  susept[vac]   <- alpha_vac
+  N_vac         <- length(vac)
+  N_unvac       <- length(non_vac)
+
   raw <- run_stoch_adj(
     c_ij,
     beta           = N * beta / mean_k,
     t              = t_horizon,
     I_ini          = c(rep(1L, init_I), rep(0L, N - init_I)),
-    susceptibility = rep(1, N),
+    susceptibility = susept,
     gamma          = gamma,
     dt             = dt,
     timepoints     = timepoints,
@@ -112,11 +126,17 @@ for (pa in pl_alphas) {
     }
   }
 
-  # Cumulative incidence rate per replicate at each t = fraction of the
-  # population no longer susceptible.
-  S_total  <- apply(S_arr, c(1L, 2L), sum)   # [n_t, n_rep]
-  cir_rep  <- (N - S_total) / N              # [n_t, n_rep]
-  cir_mean <- rowMeans(cir_rep)
+  # Attack rate per replicate at each t = fraction of the population
+  # infected. Per-group AR restricts to (un)vaccinated indices; CIR is
+  # the ratio between them (vaccinated / unvaccinated), the classical
+  # cumulative incidence ratio.
+  S_total_all   <- apply(S_arr[, , , drop = FALSE],           c(1L, 2L), sum)
+  S_total_vac   <- apply(S_arr[, , vac,     drop = FALSE],    c(1L, 2L), sum)
+  S_total_unvac <- apply(S_arr[, , non_vac, drop = FALSE],    c(1L, 2L), sum)
+  ar_rep        <- (N       - S_total_all)   / N              # [n_t, n_rep]
+  ar_vac_rep    <- (N_vac   - S_total_vac)   / N_vac
+  ar_unvac_rep  <- (N_unvac - S_total_unvac) / N_unvac
+  cir_rep       <- ar_vac_rep / ar_unvac_rep                  # NaN when 0/0
 
   rows <- data.table(
     t              = timepoints,
@@ -124,7 +144,10 @@ for (pa in pl_alphas) {
     cv2_degree     = cv2_deg,   # constant in t
     cv2_all        = rowMeans(cv2_all_rep,  na.rm = TRUE),
     cv2_unexposed  = rowMeans(cv2_susc_rep, na.rm = TRUE),
-    cir            = cir_mean,
+    ar             = rowMeans(ar_rep,       na.rm = TRUE),
+    ar_vac         = rowMeans(ar_vac_rep,   na.rm = TRUE),
+    ar_unvac       = rowMeans(ar_unvac_rep, na.rm = TRUE),
+    cir            = rowMeans(cir_rep,      na.rm = TRUE),
     mean_n_susc    = rowMeans(n_susc_rep,   na.rm = TRUE))
   all_rows[[length(all_rows) + 1L]] <- rows
 }
@@ -133,11 +156,11 @@ results <- rbindlist(all_rows)
 fwrite(results, file.path(out_dir, "results.csv"))
 
 # ---------------------------------------------------------------------------
-# Plot: two rows stitched via cowplot
-#   Row 1: CIR(t)    — cumulative incidence rate, one line per pl_alpha
-#                      facet (mean over replicates)
-#   Row 2: CV^2(t)   — three lines per pl_alpha facet
-# Shared column layout (pl_alpha facets), Dark2 palette.
+# Plot: three rows stitched via cowplot
+#   Row 1: AR(t)     — overall attack rate (fraction of pop infected)
+#   Row 2: CIR(t)    — cumulative incidence ratio: AR_vac / AR_unvac
+#   Row 3: CV^2(t)   — three lines per pl_alpha facet
+# Shared column layout (pl_alpha facets), Dark2 palette for CV^2.
 # ---------------------------------------------------------------------------
 
 results[, pl_alpha_lbl := factor(sprintf("Pareto exp. = %s", format(pl_alpha, trim = TRUE)),
@@ -157,28 +180,35 @@ long[, source := factor(source,
 
 pal <- brewer.pal(3L, "Dark2")
 
+common_theme <- theme_bw(base_size = 15) +
+  theme(panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA))
+
+p_ar <- ggplot(results, aes(x = t, y = ar)) +
+  geom_line(size = 1, colour = "black") +
+  facet_wrap(~ pl_alpha_lbl, scales = "free_y") +
+  common_theme +
+  labs(x = NULL, y = "AR(t)")
+
 p_cir <- ggplot(results, aes(x = t, y = cir)) +
   geom_line(size = 1, colour = "black") +
   facet_wrap(~ pl_alpha_lbl, scales = "free_y") +
-  theme_bw(base_size = 15) +
-  theme(panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA)) +
-  labs(x = NULL, y = "CIR(t)")
+  common_theme +
+  labs(x = NULL, y = expression(CIR(t) == AR[vac] / AR[unvac]))
 
 p_cv2 <- ggplot(long, aes(x = t, y = cv2, colour = source, group = source)) +
   geom_line(size = 1) +
   facet_wrap(~ pl_alpha_lbl, scales = "free_y") +
   scale_colour_manual(name = NULL, values = pal) +
-  theme_bw(base_size = 15) +
-  theme(legend.position = "bottom",
-        panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  common_theme +
+  theme(legend.position = "bottom") +
   labs(x = "t", y = expression(CV^2))
 
-p <- cowplot::plot_grid(p_cir, p_cv2, ncol = 1L,
-                        rel_heights = c(0.9, 1.4), align = "v", axis = "lr")
+p <- cowplot::plot_grid(p_ar, p_cir, p_cv2, ncol = 1L,
+                        rel_heights = c(0.9, 0.9, 1.4),
+                        align = "v", axis = "lr")
 
 ggsave(file.path(out_dir, "cv2_foi.png"), p,
-       width = 4 * length(pl_alphas) + 2, height = 9, dpi = 130)
+       width = 4 * length(pl_alphas) + 2, height = 12, dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
