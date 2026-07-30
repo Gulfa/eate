@@ -303,18 +303,21 @@ ggsave(file.path(out_dir, "ve_by_alpha.png"),
        p_by_alpha,
        width = 13, height = 8, dpi = 130)
 
-# Plot 2: VE(t), facet by color_group, colour by alpha. Multiple
-# network draws of the same pl_alpha share the same facet.
+# Plot 2: VE(t), facet by display (nice model label), colour by alpha.
+# Multiple network draws of the same pl_alpha share the same facet.
 p_by_model <- ggplot(summary_dt,
                      aes(x = t, y = VE,
                          colour = factor(alpha),
                          group  = interaction(line_id, alpha))) +
-  geom_line(size = 1) +
-  facet_wrap(~ color_group, scales = "free_y") +
+  geom_line(size = 0.9) +
+  facet_wrap(~ display, scales = "free_y") +
   dark2_scale(n_alphas, name = "alpha") +
-  theme_minimal(base_size = 13) +
-  labs(x = "t", y = "VE (mean over allocations)",
-       title = glue("VE(t) per model — beta = {beta} (linear beta = {beta_linear}), gamma = {gamma}, N = {N}"))
+  theme_bw(base_size = 15) +
+  theme(legend.position = "bottom",
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  guides(colour = guide_legend(nrow = 1)) +
+  labs(x = "t", y = "VE")
 ggsave(file.path(out_dir, "ve_by_model.png"),
        p_by_model,
        width = 13, height = 9, dpi = 130)
