@@ -40,13 +40,17 @@ vac_frac    <- 0.5              # fraction vaccinated
 alpha_vac   <- 0.5              # vaccine susceptibility multiplier
 alloc_seed  <- 1                # for reproducible vac allocation
 init_I      <- 20
-t_horizon   <- 20
-# dust2 checks that every consecutive diff(timepoints) is an integer
-# multiple of dt (fp-strict). Keep 1/dt a small integer AND the
-# ratio diff/dt small — dt = 0.05 with 0.1-step timepoints gives
-# ratio 2 which is safe.
+t_horizon   <- 10
+# dust2 checks each requested time against dt with strict fp equality:
+# `time / dt` must land on an integer. Non-dyadic dt (0.05, 0.1, ...)
+# make e.g. 1.2 / 0.05 = 23.999...96, not 24, and the check rejects.
+# Build the timepoints as `integer_steps * dt` so the same fp
+# representation of dt cancels on both sides of dust's check.
 dt          <- 0.05
-timepoints  <- seq(1, t_horizon, 0.1)
+.step_out   <- round(0.1 / dt)                       # dust steps per output
+.first_step <- round(1        / dt)
+.last_step  <- round(t_horizon / dt)
+timepoints  <- seq(.first_step, .last_step, .step_out) * dt
 n_rep       <- 200
 inner_cores <- 8
 
