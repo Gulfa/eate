@@ -42,16 +42,18 @@ alloc_seed  <- 1                # for reproducible vac allocation
 init_I      <- 20
 t_horizon   <- 10
 # dust2 requires every requested time to be an fp-exact integer
-# multiple of dt. Because 0.05 / 0.1 / 4.3 / ... aren't representable
-# in IEEE754, using dt ≠ output_step accumulates roundoff at some
-# indices (4.3 = 86 * 0.05 is fp-off by 4e-16, tripping dust's check).
-# The reliable fix is dt == output_step: one dust step per report.
-# The p_IR = 1 - exp(-gamma * dt) = 1 - exp(-0.1) ≈ 0.095 per step is
-# still small enough for the binomial tau-leap to be fine.
-dt          <- 0.1
+# multiple of dt. Non-dyadic dt (0.1, 0.05, 0.02) are all IEEE754-
+# inexact, and k*dt/dt drifts off integer at some k, tripping the
+# check. The bulletproof choice is a dyadic rational (1/2^n) which
+# doubles store exactly. Closest to 0.1: dt = 0.0625 = 1/16.
+# Report every 2 dust steps -> 0.125 output spacing.
+# p_IR = 1 - exp(-gamma * dt) = 1 - exp(-0.0625) ≈ 0.061 per step
+# (comfortably in the binomial tau-leap regime).
+dt          <- 0.0625
+.step_out   <- 2L                                    # dust steps per output
 .first_step <- round(1        / dt)
 .last_step  <- round(t_horizon / dt)
-timepoints  <- seq(.first_step, .last_step, 1L) * dt
+timepoints  <- seq(.first_step, .last_step, .step_out) * dt
 n_rep       <- 200
 inner_cores <- 8
 
