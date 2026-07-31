@@ -137,16 +137,24 @@ for (pa in pl_alphas) {
     }
   }
 
-  # Attack rate per replicate at each t = fraction of the population
-  # infected. Per-group AR restricts to (un)vaccinated indices; CIR is
-  # the ratio between them (vaccinated / unvaccinated), the classical
-  # cumulative incidence ratio.
+  # Attack rate per replicate at each t. AR is the fraction of
+  # individuals *who were susceptible at t = 0* that have been
+  # infected by t (i.e. cumulative incidence in the standard epi
+  # sense, excluding the seeded infectives). Using the raw group N
+  # as the denominator would contaminate AR_vac and AR_unvac equally
+  # with the ~10/10 split of seed infectives, dragging CIR(t) toward
+  # 1 at early times instead of toward alpha_vac.
+  I_ini_vec  <- c(rep(1L, init_I), rep(0L, N - init_I))
+  S0_all     <- N       - sum(I_ini_vec)
+  S0_vac     <- N_vac   - sum(I_ini_vec[vac])
+  S0_unvac   <- N_unvac - sum(I_ini_vec[non_vac])
+
   S_total_all   <- apply(S_arr[, , , drop = FALSE],           c(1L, 2L), sum)
   S_total_vac   <- apply(S_arr[, , vac,     drop = FALSE],    c(1L, 2L), sum)
   S_total_unvac <- apply(S_arr[, , non_vac, drop = FALSE],    c(1L, 2L), sum)
-  ar_rep        <- (N       - S_total_all)   / N              # [n_t, n_rep]
-  ar_vac_rep    <- (N_vac   - S_total_vac)   / N_vac
-  ar_unvac_rep  <- (N_unvac - S_total_unvac) / N_unvac
+  ar_rep        <- (S0_all   - S_total_all)   / S0_all       # [n_t, n_rep]
+  ar_vac_rep    <- (S0_vac   - S_total_vac)   / S0_vac
+  ar_unvac_rep  <- (S0_unvac - S_total_unvac) / S0_unvac
   cir_rep       <- ar_vac_rep / ar_unvac_rep                  # NaN when 0/0
 
   rows <- data.table(
