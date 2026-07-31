@@ -41,16 +41,17 @@ alpha_vac   <- 0.5              # vaccine susceptibility multiplier
 alloc_seed  <- 1                # for reproducible vac allocation
 init_I      <- 20
 t_horizon   <- 10
-# dust2 checks each requested time against dt with strict fp equality:
-# `time / dt` must land on an integer. Non-dyadic dt (0.05, 0.1, ...)
-# make e.g. 1.2 / 0.05 = 23.999...96, not 24, and the check rejects.
-# Build the timepoints as `integer_steps * dt` so the same fp
-# representation of dt cancels on both sides of dust's check.
-dt          <- 0.05
-.step_out   <- round(0.1 / dt)                       # dust steps per output
+# dust2 requires every requested time to be an fp-exact integer
+# multiple of dt. Because 0.05 / 0.1 / 4.3 / ... aren't representable
+# in IEEE754, using dt ≠ output_step accumulates roundoff at some
+# indices (4.3 = 86 * 0.05 is fp-off by 4e-16, tripping dust's check).
+# The reliable fix is dt == output_step: one dust step per report.
+# The p_IR = 1 - exp(-gamma * dt) = 1 - exp(-0.1) ≈ 0.095 per step is
+# still small enough for the binomial tau-leap to be fine.
+dt          <- 0.1
 .first_step <- round(1        / dt)
 .last_step  <- round(t_horizon / dt)
-timepoints  <- seq(.first_step, .last_step, .step_out) * dt
+timepoints  <- seq(.first_step, .last_step, 1L) * dt
 n_rep       <- 200
 inner_cores <- 8
 
