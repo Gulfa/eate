@@ -39,10 +39,14 @@ gamma       <- 1
 vac_frac    <- 0.5              # fraction vaccinated
 alpha_vac   <- 0.5              # vaccine susceptibility multiplier
 alloc_seed  <- 1                # for reproducible vac allocation
-init_I      <- 5
+init_I      <- 20
 t_horizon   <- 20
-dt          <- 0.02
-timepoints  <- seq(1, t_horizon, 1)
+# dust2 checks that every consecutive diff(timepoints) is an integer
+# multiple of dt (fp-strict). Keep 1/dt a small integer AND the
+# ratio diff/dt small — dt = 0.05 with 0.1-step timepoints gives
+# ratio 2 which is safe.
+dt          <- 0.05
+timepoints  <- seq(1, t_horizon, 0.1)
 n_rep       <- 200
 inner_cores <- 8
 
