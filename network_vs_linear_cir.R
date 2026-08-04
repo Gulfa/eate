@@ -183,17 +183,20 @@ S0_control <- sum(1L - I_ini_vec[control_subset])
 ar_vac_rep     <- (S0_vac     - S_vac_tot)     / S0_vac
 ar_control_rep <- (S0_control - S_control_tot) / S0_control
 
-# Take means across replicates first, then the ratio: E[X/Y] is a
-# biased estimator of E[X]/E[Y] (Jensen), and at low AR that bias
-# pushes CIR upward substantially (Y small, 1/Y convex).
-ar_vac_mean     <- rowMeans(ar_vac_rep,     na.rm = TRUE)
-ar_control_mean <- rowMeans(ar_control_rep, na.rm = TRUE)
+# Per-replicate CIR — what a single study of this size would observe.
+# Drop replicates where AR_C = 0 at that t (undefined / inf ratio).
+cir_rep <- ar_vac_rep / ar_control_rep
+cir_rep[!is.finite(cir_rep)] <- NA_real_
 
 net_dt <- data.table(
   t          = timepoints,
-  ar_control = ar_control_mean,
-  ar_vac     = ar_vac_mean,
-  cir        = ar_vac_mean / ar_control_mean,
+  ar_control = rowMeans(ar_control_rep, na.rm = TRUE),
+  ar_vac     = rowMeans(ar_vac_rep,     na.rm = TRUE),
+  cir_med    = apply(cir_rep, 1L, median,   na.rm = TRUE),
+  cir_lo     = apply(cir_rep, 1L, quantile, probs = 0.25, na.rm = TRUE),
+  cir_hi     = apply(cir_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
+  cir_rom    = rowMeans(ar_vac_rep, na.rm = TRUE) /
+                rowMeans(ar_control_rep, na.rm = TRUE),   # ratio-of-means for reference
   model      = sprintf("Network (pa = %s)", pl_alpha),
   cv2        = NA_real_)
 
@@ -234,15 +237,19 @@ for (cv2_target in frailty_cv2s) {
   ar_vac_r   <- matrix(raw$vac,   nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_vac_lin
   ar_unvac_r <- matrix(raw$unvac, nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_unvac_lin
 
-  # Ratio-of-means, not mean-of-ratios (see note above network block).
-  ar_vac_mean   <- rowMeans(ar_vac_r,   na.rm = TRUE)
-  ar_unvac_mean <- rowMeans(ar_unvac_r, na.rm = TRUE)
+  # Per-replicate CIR — what one study of this size would observe.
+  cir_r <- ar_vac_r / ar_unvac_r
+  cir_r[!is.finite(cir_r)] <- NA_real_
 
   lin_rows[[length(lin_rows) + 1L]] <- data.table(
     t          = timepoints,
-    ar_control = ar_unvac_mean,
-    ar_vac     = ar_vac_mean,
-    cir        = ar_vac_mean / ar_unvac_mean,
+    ar_control = rowMeans(ar_unvac_r, na.rm = TRUE),
+    ar_vac     = rowMeans(ar_vac_r,   na.rm = TRUE),
+    cir_med    = apply(cir_r, 1L, median,   na.rm = TRUE),
+    cir_lo     = apply(cir_r, 1L, quantile, probs = 0.25, na.rm = TRUE),
+    cir_hi     = apply(cir_r, 1L, quantile, probs = 0.75, na.rm = TRUE),
+    cir_rom    = rowMeans(ar_vac_r, na.rm = TRUE) /
+                  rowMeans(ar_unvac_r, na.rm = TRUE),
     model      = sprintf("Linear (CV² = %.2f)", cv2v),
     cv2        = cv2v)
 }
@@ -263,17 +270,21 @@ all_dt[, model := factor(as.character(model), levels = model_levels)]
 n_col <- length(model_levels)
 pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)] else colorRampPalette(brewer.pal(8L, "Dark2"))(n_col)
 
-p <- ggplot(all_dt, aes(x = ar_control, y = cir,
-                        colour = model, group = model)) +
+p <- ggplot(all_dt, aes(x = ar_control, y = cir_med,
+                        colour = model, fill = model, group = model)) +
+  geom_ribbon(aes(ymin = cir_lo, ymax = cir_hi),
+              alpha = 0.18, colour = NA) +
   geom_path(size = 1) +
   geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
   scale_colour_manual(name = NULL, values = pal) +
+  scale_fill_manual(name   = NULL, values = pal) +
   theme_bw(base_size = 14) +
   theme(legend.position = "bottom",
         panel.grid.minor = element_blank()) +
-  guides(colour = guide_legend(nrow = 2)) +
+  guides(colour = guide_legend(nrow = 2),
+         fill   = guide_legend(nrow = 2)) +
   labs(x = "Attack rate in control group",
-       y = expression(CIR == AR[vac] / AR[control]))
+       y = expression("CIR (per-study, median with 25–75% band)"))
 
 ggsave(file.path(out_dir, "cir_vs_ar_control.png"), p,
        width = 10, height = 7, dpi = 130)
