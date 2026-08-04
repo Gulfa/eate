@@ -99,17 +99,19 @@ get_conact_matrix_pl <- function(N, alpha, mean_k=6){
 
 # Sparse directed Pareto (Chung-Lu style) network sampler. Draws exactly
 # the same Bernoulli edges as get_conact_matrix_pl but never materialises
-# the dense N x N matrix — instead uses a Miller-Hagberg-style geometric-
-# skip envelope so total work is O(N + m) with m ~ mean_k * N edges.
+# the dense N x N matrix. Uses row-wise vectorised rbinom so per-row cost
+# is O(N) but avoids the O(N^2) memory of a full matrix.
 #
 # Returns the same list shape as contact_matrix_to_adj:
 #   neighbors [max_degree, N] integer, mask [max_degree, N] integer,
-#   max_degree scalar, plus propensities (length N) and degree (length N)
-#   for downstream diagnostics.
+#   max_degree scalar, plus propensities (length N) and degree (length N).
 #
-# The envelope is refreshed at each landed position, so both the
-# tight-envelope regime (moderate pl_alpha, mean_k) and the saturated
-# top-row regime (heavy tails) stay efficient.
+# NOTE: an earlier Miller-Hagberg-style geometric-skip implementation
+# lived here — removed because the mid-row envelope refresh introduced a
+# subtle bias in the accept-ratio derivation for the directed variant.
+# The row-wise rbinom below is O(N^2) but bit-for-bit equivalent to the
+# dense sampler; fine at N up to ~30k, slow at N ~ 10^5. If we later need
+# real O(N + m), do it right in Rcpp or via the exact MH paper algorithm.
 sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
                               allow_self_loops = TRUE) {
   if (!is.null(seed)) {
@@ -121,41 +123,12 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
   s   <- s / mean(s)
   c_const <- mean_k / N
 
-  # Column-scan order: nodes sorted by propensity descending so the
-  # envelope p_cur = c * s_i * s_sorted[pos] is non-increasing in pos.
-  ord     <- order(s, decreasing = TRUE)
-  s_sort  <- s[ord]
-  # For each position -> original node id lookup
-  pos_of  <- integer(N); pos_of[ord] <- seq_len(N)
-
   neigh <- vector("list", N)
   for (i in seq_len(N)) {
-    si  <- s[i]
-    out <- integer(0L)
-    pos <- 1L
-    while (pos <= N) {
-      p_cur <- c_const * si * s_sort[pos]
-      if (p_cur >= 1) {
-        # Saturated region: enumerate directly. Advance while p >= 1.
-        while (pos <= N && c_const * si * s_sort[pos] >= 1) {
-          j_id <- ord[pos]
-          if (allow_self_loops || j_id != i) out <- c(out, j_id)
-          pos <- pos + 1L
-        }
-        next
-      }
-      # Geometric skip using the LOCAL envelope value.
-      gap <- rgeom(1L, p_cur)
-      pos <- pos + gap
-      if (pos > N) break
-      p_ij   <- c_const * si * s_sort[pos]
-      accept <- runif(1L) < p_ij / p_cur
-      if (accept) {
-        j_id <- ord[pos]
-        if (allow_self_loops || j_id != i) out <- c(out, j_id)
-      }
-      pos <- pos + 1L
-    }
+    p_vec <- pmin(c_const * s[i] * s, 1)
+    hits  <- rbinom(N, 1L, p_vec)
+    out   <- which(hits == 1L)
+    if (!allow_self_loops) out <- out[out != i]
     neigh[[i]] <- out
   }
 

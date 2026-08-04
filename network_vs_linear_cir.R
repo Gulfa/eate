@@ -85,7 +85,7 @@ n_frailty       <- 100
 # The old sd-of-Beta parameterisation capped CV^2 at ~0.7 no matter how
 # large sd got; switching to Gamma lets us go arbitrarily extreme.
 frailty_cv2s    <- c(0, 0.1, 0.5, 1, 2, 4, 8)
-beta_lin        <- 0.03               # gives control AR ~ 0.83 at t_horizon
+beta_lin        <- 0.05               # gives control AR ~ 0.95 at t_horizon
 n_rep_lin       <- 200
 
 # ---------------------------------------------------------------------------
@@ -314,7 +314,13 @@ all_dt[, model := factor(as.character(model), levels = model_levels)]
 n_col <- length(model_levels)
 pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)] else colorRampPalette(brewer.pal(8L, "Dark2"))(n_col)
 
-p <- ggplot(all_dt, aes(x = ar_control, y = cir_med,
+# Drop the very-early-epidemic region where AR_control < 0.5%. That part
+# is noise-dominated (both AR_vac and AR_control are single-digit case
+# counts per replicate at n_rep_lin / n_rep_net = 200/100), so the CIR
+# ribbon is wildly wide and not informative about the systematic drift.
+plot_dt <- all_dt[ar_control >= 0.005]
+
+p <- ggplot(plot_dt, aes(x = ar_control, y = cir_med,
                         colour = model, fill = model, group = model)) +
   geom_ribbon(aes(ymin = cir_lo, ymax = cir_hi),
               alpha = 0.18, colour = NA) +
