@@ -64,7 +64,7 @@ n_rep_net    <- 100                   # memory ~ 4*N*n_rep*n_t doubles
 # Sparse path: use sample_pareto_adj (O(N + m)) + run_stoch_adj_sparse
 # (group-aggregate output). Required for N >> 10000; safe (but heavier)
 # to use at any N.
-use_sparse   <- FALSE
+use_sparse   <- TRUE
 # Random unvac subset sized to match the vac group for a like-for-like
 # comparison.
 control_size <- round(vac_frac * N_net)
