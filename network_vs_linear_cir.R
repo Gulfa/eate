@@ -150,13 +150,18 @@ S0_vac     <- sum(1L - I_ini_vec[vac])
 S0_control <- sum(1L - I_ini_vec[control_subset])
 ar_vac_rep     <- (S0_vac     - S_vac_tot)     / S0_vac
 ar_control_rep <- (S0_control - S_control_tot) / S0_control
-cir_rep        <- ar_vac_rep / ar_control_rep
+
+# Take means across replicates first, then the ratio: E[X/Y] is a
+# biased estimator of E[X]/E[Y] (Jensen), and at low AR that bias
+# pushes CIR upward substantially (Y small, 1/Y convex).
+ar_vac_mean     <- rowMeans(ar_vac_rep,     na.rm = TRUE)
+ar_control_mean <- rowMeans(ar_control_rep, na.rm = TRUE)
 
 net_dt <- data.table(
   t          = timepoints,
-  ar_control = rowMeans(ar_control_rep, na.rm = TRUE),
-  ar_vac     = rowMeans(ar_vac_rep,     na.rm = TRUE),
-  cir        = rowMeans(cir_rep,        na.rm = TRUE),
+  ar_control = ar_control_mean,
+  ar_vac     = ar_vac_mean,
+  cir        = ar_vac_mean / ar_control_mean,
   model      = sprintf("Network (pa = %s)", pl_alpha),
   cv2        = NA_real_)
 
@@ -189,13 +194,16 @@ for (sd in frailty_sds) {
 
   ar_vac_r   <- matrix(out$vac,   nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_vac_lin
   ar_unvac_r <- matrix(out$unvac, nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_unvac_lin
-  cir_r      <- ar_vac_r / ar_unvac_r
+
+  # Ratio-of-means, not mean-of-ratios (see note above network block).
+  ar_vac_mean   <- rowMeans(ar_vac_r,   na.rm = TRUE)
+  ar_unvac_mean <- rowMeans(ar_unvac_r, na.rm = TRUE)
 
   lin_rows[[length(lin_rows) + 1L]] <- data.table(
     t          = timepoints,
-    ar_control = rowMeans(ar_unvac_r, na.rm = TRUE),
-    ar_vac     = rowMeans(ar_vac_r,   na.rm = TRUE),
-    cir        = rowMeans(cir_r,      na.rm = TRUE),
+    ar_control = ar_unvac_mean,
+    ar_vac     = ar_vac_mean,
+    cir        = ar_vac_mean / ar_unvac_mean,
     model      = sprintf("Linear (CV² = %.3f)", cv2v),
     cv2        = cv2v)
 }
@@ -214,8 +222,7 @@ model_levels <- c(as.character(lin_levels), unique(as.character(net_dt$model)))
 all_dt[, model := factor(as.character(model), levels = model_levels)]
 
 n_col <- length(model_levels)
-pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)]
-         else colorRampPalette(brewer.pal(8L, "Dark2"))(n_col)
+pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)] else colorRampPalette(brewer.pal(8L, "Dark2"))(n_col)
 
 p <- ggplot(all_dt, aes(x = ar_control, y = cir,
                         colour = model, group = model)) +
