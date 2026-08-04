@@ -44,8 +44,8 @@ gamma      <- 1 / 5
 # Dyadic dt = 1/4 so k*dt is fp-exact for any integer k -> dust2 happy.
 dt         <- 0.25
 t_horizon  <- 60
-# Timepoints as integer * dt (fp-safe). Output every 4 dust steps = 1 unit.
-timepoints <- seq(4L, as.integer(4 * t_horizon), 4L) * dt
+# Output every dust step so trajectories are as smooth as possible.
+timepoints <- seq_len(as.integer(t_horizon / dt)) * dt
 
 n_t <- length(timepoints)
 
@@ -73,7 +73,11 @@ init_seed    <- 4
 
 N_lin_per_group <- 1000
 n_frailty       <- 100
-frailty_sds     <- c(0.001, 0.05, 0.15, 0.25, 0.35, 0.45)
+# Target CV^2 of the frailty distribution. Uses Gamma(shape = 1/cv^2,
+# rate = 1/cv^2) quantiles renormalised to mean = 1 (see build_frailty).
+# The old sd-of-Beta parameterisation capped CV^2 at ~0.7 no matter how
+# large sd got; switching to Gamma lets us go arbitrarily extreme.
+frailty_cv2s    <- c(0, 0.1, 0.5, 1, 2, 4, 8)
 beta_lin        <- 0.03               # gives control AR ~ 0.83 at t_horizon
 n_rep_lin       <- 200
 
@@ -81,28 +85,54 @@ n_rep_lin       <- 200
 # Output
 # ---------------------------------------------------------------------------
 
-out_dir <- "output/network_vs_linear_cir"
-dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+out_dir       <- "output/network_vs_linear_cir"
+cache_dir     <- "output/network_cache"
+dir.create(out_dir,   recursive = TRUE, showWarnings = FALSE)
+dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-cv2_of_frailty <- function(sd, n_frailty) {
-  fr <- get_frailty(sd = sd, n = n_frailty)
-  raw <- exp(2.5 * fr$x)
-  fn  <- raw / sum(fr$p * raw)
-  sum(fr$p * (fn - 1)^2)               # var / mean^2 with mean = 1
+# Gamma-quantile frailty with target CV^2 (variance/mean^2 with mean = 1).
+# Returns (x, p) with equal-weight bins. cv2 = 0 -> homogeneous (all 1).
+build_frailty <- function(cv2, n_bins) {
+  if (cv2 <= 1e-8) return(list(x = rep(1, n_bins), p = rep(1 / n_bins, n_bins)))
+  shape <- 1 / cv2
+  probs <- (seq_len(n_bins) - 0.5) / n_bins
+  x     <- qgamma(probs, shape = shape, rate = shape)
+  x     <- x / mean(x)                 # renormalise so weighted mean is exactly 1
+  list(x = x, p = rep(1 / n_bins, n_bins))
+}
+
+realised_cv2 <- function(fr) {
+  m <- sum(fr$p * fr$x)
+  sum(fr$p * (fr$x - m)^2) / m^2
+}
+
+# Cache the Pareto contact matrix (expensive to rebuild at N = 10000).
+get_or_build_c_ij <- function(N, pl_alpha, mean_k, seed) {
+  key  <- sprintf("c_ij_N%d_pa%s_k%d_seed%d.rds",
+                  N, format(pl_alpha, trim = TRUE), mean_k, seed)
+  path <- file.path(cache_dir, key)
+  if (file.exists(path)) {
+    message(glue("Loading cached contact matrix: {path}"))
+    return(readRDS(path))
+  }
+  message(glue("Building Pareto network (N = {N}, pa = {pl_alpha}) ..."))
+  set.seed(seed)
+  c_ij <- get_conact_matrix_pl(N, alpha = pl_alpha, mean_k = mean_k)
+  set.seed(NULL)
+  saveRDS(c_ij, path)
+  message(glue("Cached to {path}"))
+  c_ij
 }
 
 # ---------------------------------------------------------------------------
 # Network run
 # ---------------------------------------------------------------------------
 
-message(glue("Building Pareto network (N = {N_net}, pa = {pl_alpha}) ..."))
-set.seed(net_seed)
-c_ij <- get_conact_matrix_pl(N_net, alpha = pl_alpha, mean_k = mean_k)
-set.seed(NULL)
+c_ij <- get_or_build_c_ij(N_net, pl_alpha, mean_k, net_seed)
 
 set.seed(alloc_seed)
 vac <- sample(seq_len(N_net), round(vac_frac * N_net))
@@ -173,27 +203,34 @@ rm(raw_net); invisible(gc(verbose = FALSE))
 # ---------------------------------------------------------------------------
 
 lin_rows <- list()
-for (sd in frailty_sds) {
-  cv2v <- cv2_of_frailty(sd, n_frailty)
-  message(glue("Running linear + frailty (sd = {sd}, CV^2 = {round(cv2v, 3)}) ..."))
+for (cv2_target in frailty_cv2s) {
+  fr    <- build_frailty(cv2_target, n_frailty)
+  cv2v  <- realised_cv2(fr)
+  message(glue("Running linear + frailty (CV^2 target = {cv2_target}, ",
+               "realised = {round(cv2v, 3)}) ..."))
 
-  out <- run_stoch_frailty_linear(
-    alpha = alpha_vac, sd = sd, beta = beta_lin, f = 0.5,
-    N = N_lin_per_group, t = t_horizon, n_frailty = n_frailty,
-    timepoints = timepoints, n_sim = n_rep_lin, cores = 8,
-    method = "dust", dt = dt)
-  setDT(out)
-
-  # Reconstruct group totals to normalise. run_stoch_frailty_linear uses
-  # n_total = round(2 * N * fr$p) then vac_counts = round(0.5 * n_total).
-  fr <- get_frailty(sd = sd, n = n_frailty)
+  # Bins: 1..n_frailty = unvac, (n_frailty+1)..2n = vac. Each bin holds
+  # 2 * N_per_group * p_bin individuals, split evenly between vac/unvac.
   n_total     <- round(2 * N_lin_per_group * fr$p)
   vac_counts  <- round(0.5 * n_total)
   N_vac_lin   <- sum(vac_counts)
   N_unvac_lin <- sum(n_total - vac_counts)
+  N_groups    <- c(n_total - vac_counts, vac_counts)
+  susceptibility <- c(fr$x, alpha_vac * fr$x)
 
-  ar_vac_r   <- matrix(out$vac,   nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_vac_lin
-  ar_unvac_r <- matrix(out$unvac, nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_unvac_lin
+  raw <- run_stoch_linear_dust(
+    beta = beta_lin, N = N_groups, t = t_horizon,
+    susceptibility = susceptibility,
+    dt = dt, timepoints = timepoints,
+    n_sim = n_rep_lin, cores = 8)
+  setDT(raw)
+
+  # Sum cumulative infections across bins per group.
+  raw[, vac   := rowSums(.SD), .SDcols = paste0("C", (n_frailty + 1L):(2L * n_frailty))]
+  raw[, unvac := rowSums(.SD), .SDcols = paste0("C", 1L:n_frailty)]
+
+  ar_vac_r   <- matrix(raw$vac,   nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_vac_lin
+  ar_unvac_r <- matrix(raw$unvac, nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_unvac_lin
 
   # Ratio-of-means, not mean-of-ratios (see note above network block).
   ar_vac_mean   <- rowMeans(ar_vac_r,   na.rm = TRUE)
@@ -204,7 +241,7 @@ for (sd in frailty_sds) {
     ar_control = ar_unvac_mean,
     ar_vac     = ar_vac_mean,
     cir        = ar_vac_mean / ar_unvac_mean,
-    model      = sprintf("Linear (CV² = %.3f)", cv2v),
+    model      = sprintf("Linear (CV² = %.2f)", cv2v),
     cv2        = cv2v)
 }
 lin_dt <- rbindlist(lin_rows)
