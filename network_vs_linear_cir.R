@@ -60,6 +60,11 @@ vac_frac     <- 0.20
 beta_net     <- 1.0                   # R0-equivalent scale in homog limit
 init_I       <- 20
 n_rep_net    <- 100                   # memory ~ 4*N*n_rep*n_t doubles
+
+# Sparse path: use sample_pareto_adj (O(N + m)) + run_stoch_adj_sparse
+# (group-aggregate output). Required for N >> 10000; safe (but heavier)
+# to use at any N.
+use_sparse   <- FALSE
 # Random unvac subset sized to match the vac group for a like-for-like
 # comparison.
 control_size <- round(vac_frac * N_net)
@@ -113,6 +118,9 @@ realised_cv2 <- function(fr) {
 }
 
 # Cache the Pareto contact matrix (expensive to rebuild at N = 10000).
+# Dense variant returns the full N x N matrix; sparse variant returns the
+# adjacency-list object from sample_pareto_adj (used with
+# run_stoch_adj_sparse and unblocks N ~ 10^5).
 get_or_build_c_ij <- function(N, pl_alpha, mean_k, seed) {
   key  <- sprintf("c_ij_N%d_pa%s_k%d_seed%d.rds",
                   N, format(pl_alpha, trim = TRUE), mean_k, seed)
@@ -130,11 +138,24 @@ get_or_build_c_ij <- function(N, pl_alpha, mean_k, seed) {
   c_ij
 }
 
+get_or_build_adj <- function(N, pl_alpha, mean_k, seed) {
+  key  <- sprintf("adj_N%d_pa%s_k%d_seed%d.rds",
+                  N, format(pl_alpha, trim = TRUE), mean_k, seed)
+  path <- file.path(cache_dir, key)
+  if (file.exists(path)) {
+    message(glue("Loading cached adjacency list: {path}"))
+    return(readRDS(path))
+  }
+  message(glue("Building sparse Pareto adjacency (N = {N}, pa = {pl_alpha}) ..."))
+  adj <- sample_pareto_adj(N, alpha = pl_alpha, mean_k = mean_k, seed = seed)
+  saveRDS(adj, path)
+  message(glue("Cached to {path}"))
+  adj
+}
+
 # ---------------------------------------------------------------------------
 # Network run
 # ---------------------------------------------------------------------------
-
-c_ij <- get_or_build_c_ij(N_net, pl_alpha, mean_k, net_seed)
 
 set.seed(alloc_seed)
 vac <- sample(seq_len(N_net), round(vac_frac * N_net))
@@ -154,32 +175,55 @@ I_ini_vec <- integer(N_net); I_ini_vec[seeded] <- 1L
 
 susept <- rep(1, N_net); susept[vac] <- alpha_vac
 
-message(glue("Running network SIR (n_rep = {n_rep_net}, dt = {dt}) ..."))
-raw_net <- run_stoch_adj(
-  c_ij,
-  beta           = N_net * beta_net / mean_k,
-  t              = t_horizon,
-  I_ini          = I_ini_vec,
-  susceptibility = susept,
-  gamma          = gamma,
-  dt             = dt,
-  timepoints     = timepoints,
-  n_sim          = n_rep_net,
-  cores          = 8)
-setDT(raw_net)
-
-# Accumulate S_vac and S_control over reps *without* materialising the
-# full [n_t, n_rep, N] array — network sim has N=10000, so this saves
-# ~1 GB.
-S_vac_tot     <- matrix(0, nrow = n_t, ncol = n_rep_net)
-S_control_tot <- matrix(0, nrow = n_t, ncol = n_rep_net)
-for (k in vac)
-  S_vac_tot <- S_vac_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
-for (k in control_subset)
-  S_control_tot <- S_control_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
-
 S0_vac     <- sum(1L - I_ini_vec[vac])
 S0_control <- sum(1L - I_ini_vec[control_subset])
+
+if (use_sparse) {
+  # --- Sparse path: sample_pareto_adj + run_stoch_adj_sparse -------------
+  # Contact structure and dust output both stay O(N * mean_k) instead of
+  # O(N^2). Only aggregate S_vac, S_control totals per (t, rep) come back.
+  adj <- get_or_build_adj(N_net, pl_alpha, mean_k, net_seed)
+  message(glue("Running network SIR — SPARSE (n_rep = {n_rep_net}, dt = {dt}) ..."))
+  raw_net <- run_stoch_adj_sparse(
+    adj,
+    beta             = N_net * beta_net / mean_k,
+    t                = t_horizon,
+    I_ini            = I_ini_vec,
+    groups           = list(vac = vac, ctrl = control_subset),
+    susceptibility   = susept,
+    gamma            = gamma,
+    dt               = dt,
+    timepoints       = timepoints,
+    n_sim            = n_rep_net,
+    cores            = 8)
+  setDT(raw_net)
+  S_vac_tot     <- matrix(raw_net$S_vac,  nrow = n_t, ncol = n_rep_net, byrow = TRUE)
+  S_control_tot <- matrix(raw_net$S_ctrl, nrow = n_t, ncol = n_rep_net, byrow = TRUE)
+} else {
+  # --- Dense path: cached full c_ij + run_stoch_adj ----------------------
+  c_ij <- get_or_build_c_ij(N_net, pl_alpha, mean_k, net_seed)
+  message(glue("Running network SIR — DENSE (n_rep = {n_rep_net}, dt = {dt}) ..."))
+  raw_net <- run_stoch_adj(
+    c_ij,
+    beta           = N_net * beta_net / mean_k,
+    t              = t_horizon,
+    I_ini          = I_ini_vec,
+    susceptibility = susept,
+    gamma          = gamma,
+    dt             = dt,
+    timepoints     = timepoints,
+    n_sim          = n_rep_net,
+    cores          = 8)
+  setDT(raw_net)
+  # Column-wise reduction to avoid a [n_t, n_rep, N] intermediate.
+  S_vac_tot     <- matrix(0, nrow = n_t, ncol = n_rep_net)
+  S_control_tot <- matrix(0, nrow = n_t, ncol = n_rep_net)
+  for (k in vac)
+    S_vac_tot <- S_vac_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
+  for (k in control_subset)
+    S_control_tot <- S_control_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
+}
+
 ar_vac_rep     <- (S0_vac     - S_vac_tot)     / S0_vac
 ar_control_rep <- (S0_control - S_control_tot) / S0_control
 

@@ -96,6 +96,91 @@ get_conact_matrix_pl <- function(N, alpha, mean_k=6){
   return(contacts)
 }
 
+
+# Sparse directed Pareto (Chung-Lu style) network sampler. Draws exactly
+# the same Bernoulli edges as get_conact_matrix_pl but never materialises
+# the dense N x N matrix — instead uses a Miller-Hagberg-style geometric-
+# skip envelope so total work is O(N + m) with m ~ mean_k * N edges.
+#
+# Returns the same list shape as contact_matrix_to_adj:
+#   neighbors [max_degree, N] integer, mask [max_degree, N] integer,
+#   max_degree scalar, plus propensities (length N) and degree (length N)
+#   for downstream diagnostics.
+#
+# The envelope is refreshed at each landed position, so both the
+# tight-envelope regime (moderate pl_alpha, mean_k) and the saturated
+# top-row regime (heavy tails) stay efficient.
+sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
+                              allow_self_loops = TRUE) {
+  if (!is.null(seed)) {
+    old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
+      get(".Random.seed", envir = .GlobalEnv) else NULL
+    set.seed(seed)
+  }
+  s   <- Pareto::rPareto(N, alpha = alpha, t = 1)
+  s   <- s / mean(s)
+  c_const <- mean_k / N
+
+  # Column-scan order: nodes sorted by propensity descending so the
+  # envelope p_cur = c * s_i * s_sorted[pos] is non-increasing in pos.
+  ord     <- order(s, decreasing = TRUE)
+  s_sort  <- s[ord]
+  # For each position -> original node id lookup
+  pos_of  <- integer(N); pos_of[ord] <- seq_len(N)
+
+  neigh <- vector("list", N)
+  for (i in seq_len(N)) {
+    si  <- s[i]
+    out <- integer(0L)
+    pos <- 1L
+    while (pos <= N) {
+      p_cur <- c_const * si * s_sort[pos]
+      if (p_cur >= 1) {
+        # Saturated region: enumerate directly. Advance while p >= 1.
+        while (pos <= N && c_const * si * s_sort[pos] >= 1) {
+          j_id <- ord[pos]
+          if (allow_self_loops || j_id != i) out <- c(out, j_id)
+          pos <- pos + 1L
+        }
+        next
+      }
+      # Geometric skip using the LOCAL envelope value.
+      gap <- rgeom(1L, p_cur)
+      pos <- pos + gap
+      if (pos > N) break
+      p_ij   <- c_const * si * s_sort[pos]
+      accept <- runif(1L) < p_ij / p_cur
+      if (accept) {
+        j_id <- ord[pos]
+        if (allow_self_loops || j_id != i) out <- c(out, j_id)
+      }
+      pos <- pos + 1L
+    }
+    neigh[[i]] <- out
+  }
+
+  if (!is.null(seed)) {
+    if (is.null(old_seed)) rm(".Random.seed", envir = .GlobalEnv)
+    else assign(".Random.seed", old_seed, envir = .GlobalEnv)
+  }
+
+  degree     <- lengths(neigh)
+  max_degree <- max(degree, 1L)
+  neighbors  <- matrix(1L, nrow = max_degree, ncol = N)
+  mask       <- matrix(0L, nrow = max_degree, ncol = N)
+  for (i in seq_len(N)) {
+    if (degree[i] > 0L) {
+      neighbors[seq_len(degree[i]), i] <- neigh[[i]]
+      mask[     seq_len(degree[i]), i] <- 1L
+    }
+  }
+  list(neighbors    = neighbors,
+       mask         = mask,
+       max_degree   = as.integer(max_degree),
+       propensities = s,
+       degree       = degree)
+}
+
 # ---------------------------------------------------------------------------
 # Adjacency list from binary contact matrix (for sparse odin2 model)
 # ---------------------------------------------------------------------------

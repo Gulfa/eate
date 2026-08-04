@@ -2,7 +2,8 @@ library(adaptivetau)
 library(data.table)
 
 stoch_model_cd     <- odin2::odin("stoch_sir.R")
-stoch_model_adj    <- odin2::odin("stoch_mod_adj.R")
+stoch_model_adj        <- odin2::odin("stoch_mod_adj.R")
+stoch_model_adj_sparse <- odin2::odin("stoch_mod_adj_sparse.R")
 stoch_model_linear <- odin2::odin("stoch_linear.R")
 stoch_model_ind    <- odin2::odin("stoch_ind.R")
 
@@ -222,6 +223,96 @@ run_stoch_adj <- function(contact_matrix, beta, t, I_ini,
   for (comp in names(offsets)) {
     for (k in seq_len(n)) {
       out[[paste0(comp, k)]] <- as.vector(raw[offsets[[comp]] + k, , ])
+    }
+  }
+  out[]
+}
+
+
+# Group-aggregate-output variant of run_stoch_adj. Same dynamics as the
+# dense version but backed by stoch_mod_adj_sparse.R; only n_groups scalar
+# S_g / I_g / R_g / C_g summaries are returned per (time, sim), so memory
+# scales with n_groups instead of N. Use when N is large enough that the
+# per-node output would be prohibitive.
+#
+#   adj                 : list(neighbors, mask, max_degree) from either
+#                         contact_matrix_to_adj() or sample_pareto_adj().
+#                         The full contact matrix is never needed.
+#   groups              : named list of integer node-index vectors, one
+#                         per group of interest (e.g. list(vac = vac_idx,
+#                         control = ctrl_idx)). Groups can overlap.
+#
+# Returns a data.table with columns
+#     time, sim, S_<group>, I_<group>, R_<group>, C_<group>
+# for every named group.
+run_stoch_adj_sparse <- function(adj, beta, t, I_ini, groups,
+                                 N = NULL, susceptibility = NULL,
+                                 transmissibility = NULL,
+                                 gamma = 1 / 3, dt = 0.1,
+                                 timepoints = seq(0, t, 1),
+                                 n_sim = 100, cores = 10, seed = NULL) {
+  n <- ncol(adj$neighbors)
+  if (is.null(N))                N                <- rep(1L, n)
+  if (is.null(susceptibility))   susceptibility   <- rep(1, n)
+  if (is.null(transmissibility)) transmissibility <- rep(1, n)
+
+  group_names <- names(groups)
+  if (is.null(group_names) || any(!nzchar(group_names)))
+    stop("`groups` must be a named list.")
+  n_groups <- length(groups)
+  G <- matrix(0L, nrow = n_groups, ncol = n)
+  for (g in seq_len(n_groups)) {
+    idx <- groups[[g]]
+    if (any(idx < 1L | idx > n))
+      stop("Node indices in group ", group_names[g], " are out of range.")
+    G[g, idx] <- 1L
+  }
+
+  beta_scalar <- if (length(beta) == 1L) beta else mean(beta)
+
+  params <- list(
+    n               = as.integer(n),
+    n_groups        = as.integer(n_groups),
+    max_degree      = as.integer(adj$max_degree),
+    beta            = beta_scalar,
+    gamma           = gamma,
+    neighbors       = adj$neighbors,
+    mask            = adj$mask,
+    susceptibility  = susceptibility,
+    transmisibility = transmissibility,
+    S_ini           = N - I_ini,
+    I_ini           = I_ini,
+    G               = G
+  )
+
+  sys <- dust2::dust_system_create(stoch_model_adj_sparse, params,
+                                   n_particles = n_sim,
+                                   n_threads   = cores,
+                                   dt          = dt,
+                                   time        = 0,
+                                   seed        = seed)
+  dust2::dust_system_set_state_initial(sys)
+
+  # State layout (declaration order): S[1..n], I[1..n], R[1..n], C[1..n],
+  # S_g[1..n_groups], I_g[..], R_g[..], C_g[..]. Ask dust2 to only return
+  # the aggregate block so the returned array stays O(n_groups) per
+  # particle per timepoint.
+  agg_start   <- 4L * n + 1L
+  agg_indices <- seq(agg_start, agg_start + 4L * n_groups - 1L)
+  raw <- dust2::dust_system_simulate(sys, timepoints, index_state = agg_indices)
+  if (length(dim(raw)) == 2L)
+    raw <- array(raw, dim = c(dim(raw)[1L], 1L, dim(raw)[2L]))
+
+  n_t <- length(timepoints)
+  out <- data.table(
+    time = rep(timepoints,     each  = n_sim),
+    sim  = rep(seq_len(n_sim), times = n_t)
+  )
+  offsets <- c(S = 0L, I = n_groups, R = 2L * n_groups, C = 3L * n_groups)
+  for (comp in names(offsets)) {
+    for (g in seq_len(n_groups)) {
+      col <- paste0(comp, "_", group_names[g])
+      out[[col]] <- as.vector(raw[offsets[[comp]] + g, , ])
     }
   }
   out[]
