@@ -56,11 +56,13 @@ n_t <- length(timepoints)
 N_net        <- 10000
 pl_alpha     <- 3
 mean_k       <- 6
-vac_frac     <- 0.10
+vac_frac     <- 0.20
 beta_net     <- 1.0                   # R0-equivalent scale in homog limit
-init_I       <- 50
+init_I       <- 20
 n_rep_net    <- 100                   # memory ~ 4*N*n_rep*n_t doubles
-control_frac <- 0.10                  # random 10% of pop as control subset
+# Random unvac subset sized to match the vac group for a like-for-like
+# comparison.
+control_size <- round(vac_frac * N_net)
 
 net_seed     <- 1
 alloc_seed   <- 2
@@ -71,7 +73,7 @@ init_seed    <- 4
 # Linear + frailty parameters
 # ---------------------------------------------------------------------------
 
-N_lin_per_group <- 1000
+N_lin_per_group <- 10000
 n_frailty       <- 100
 # Target CV^2 of the frailty distribution. Uses Gamma(shape = 1/cv^2,
 # rate = 1/cv^2) quantiles renormalised to mean = 1 (see build_frailty).
@@ -140,7 +142,7 @@ set.seed(NULL)
 non_vac_all <- setdiff(seq_len(N_net), vac)
 
 set.seed(ctrl_seed)
-control_subset <- sample(non_vac_all, round(control_frac * N_net))
+control_subset <- sample(non_vac_all, control_size)
 set.seed(NULL)
 
 # Random seed (independent of vac allocation) — avoids the seed-reach bias
