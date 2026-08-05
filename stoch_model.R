@@ -294,11 +294,12 @@ run_stoch_adj_sparse <- function(adj, beta, t, I_ini, groups,
   dust2::dust_system_set_state_initial(sys)
 
   # State layout (declaration order): S[1..n], I[1..n], R[1..n], C[1..n],
-  # S_g[1..n_groups], I_g[..], R_g[..], C_g[..]. Ask dust2 to only return
-  # the aggregate block so the returned array stays O(n_groups) per
-  # particle per timepoint.
-  agg_start   <- 4L * n + 1L
-  agg_indices <- seq(agg_start, agg_start + 4L * n_groups - 1L)
+  # cumFOI[1..n], S_g[1..n_groups], I_g[..], R_g[..], C_g[..],
+  # cumFOI_sum[1..n_groups], cumFOI_sumsq[1..n_groups]. Ask dust2 to
+  # only return the aggregate block so the returned array stays
+  # O(n_groups) per particle per timepoint.
+  agg_start   <- 5L * n + 1L
+  agg_indices <- seq(agg_start, agg_start + 6L * n_groups - 1L)
   raw <- dust2::dust_system_simulate(sys, timepoints, index_state = agg_indices)
   if (length(dim(raw)) == 2L)
     raw <- array(raw, dim = c(dim(raw)[1L], 1L, dim(raw)[2L]))
@@ -308,13 +309,18 @@ run_stoch_adj_sparse <- function(adj, beta, t, I_ini, groups,
     time = rep(timepoints,     each  = n_sim),
     sim  = rep(seq_len(n_sim), times = n_t)
   )
-  offsets <- c(S = 0L, I = n_groups, R = 2L * n_groups, C = 3L * n_groups)
+  offsets <- c(S = 0L, I = n_groups, R = 2L * n_groups, C = 3L * n_groups,
+               cumFOI_sum = 4L * n_groups, cumFOI_sumsq = 5L * n_groups)
   for (comp in names(offsets)) {
     for (g in seq_len(n_groups)) {
       col <- paste0(comp, "_", group_names[g])
       out[[col]] <- as.vector(raw[offsets[[comp]] + g, , ])
     }
   }
+  # Attach the per-group population sizes so callers can compute
+  # per-group means and CV^2 directly (mean = sum / N_group; CV^2 =
+  # sumsq * N_group / sum^2 - 1).
+  attr(out, "N_group") <- setNames(lengths(groups), group_names)
   out[]
 }
 

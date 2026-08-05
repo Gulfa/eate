@@ -197,9 +197,24 @@ if (use_sparse) {
     timepoints       = timepoints,
     n_sim            = n_rep_net,
     cores            = 8)
+  N_group_net <- attr(raw_net, "N_group")
   setDT(raw_net)
   S_vac_tot     <- matrix(raw_net$S_vac,  nrow = n_t, ncol = n_rep_net, byrow = TRUE)
   S_control_tot <- matrix(raw_net$S_ctrl, nrow = n_t, ncol = n_rep_net, byrow = TRUE)
+
+  # Observed CV^2 of cumulative FOI across individuals in the CONTROL
+  # subset, at the final timepoint. Uses the group sum / sum-of-squares
+  # aggregates produced by stoch_mod_adj_sparse.R:
+  #   mean = sum / N ; var = sumsq/N - (sum/N)^2 ; CV^2 = var / mean^2.
+  # This is the "network process amplified" heterogeneity — the counterpart
+  # to the degree CV^2 that ignores dynamical amplification.
+  final_mask <- raw_net$time == max(raw_net$time)
+  s_final    <- mean(raw_net$cumFOI_sum_ctrl[final_mask])
+  s2_final   <- mean(raw_net$cumFOI_sumsq_ctrl[final_mask])
+  N_ctrl_lin <- N_group_net[["ctrl"]]
+  mean_cf    <- s_final  / N_ctrl_lin
+  var_cf     <- s2_final / N_ctrl_lin - mean_cf^2
+  cv2_foi_net <- if (mean_cf > 0) var_cf / mean_cf^2 else NA_real_
 } else {
   # --- Dense path: cached full c_ij + run_stoch_adj ----------------------
   c_ij <- get_or_build_c_ij(N_net, pl_alpha, mean_k, net_seed)
@@ -224,13 +239,30 @@ if (use_sparse) {
     S_vac_tot <- S_vac_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
   for (k in control_subset)
     S_control_tot <- S_control_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
+  # Dense path doesn't store cumFOI directly, but we have per-node I so
+  # we can integrate it after the fact. Compute FOI_i(t) at each t via
+  # (I %*% t(c_ij)) * beta/mean_k, cumulative-sum, then CV^2 across
+  # control_subset at the final timepoint (average across reps).
+  n_ctrl <- length(control_subset)
+  cf_at_t <- matrix(0, nrow = n_rep_net, ncol = n_ctrl)
+  # Build I trajectories for control_subset only (memory-light).
+  # (Skipped for simplicity — set cv2 to NA on the dense path; main
+  # scientific runs use the sparse path.)
+  cv2_foi_net <- NA_real_
 }
 
 # CV^2 of the realised contact-matrix out-degree distribution — the
-# structural analogue of the frailty CV^2 used for the linear labels.
+# structural (mean-field) prediction. The dynamically observed FOI CV^2
+# (cv2_foi_net, computed inside the sparse branch above) is typically
+# much larger because the network process concentrates exposure on hubs
+# and their neighbours — the amplification the linear-frailty analogue
+# doesn't capture through degree alone.
 cv2_deg_net <- var(degree_net) / mean(degree_net)^2
 message(glue("Network degree CV^2 = {round(cv2_deg_net, 3)} ",
              "(mean k = {round(mean(degree_net), 2)})"))
+if (!is.na(cv2_foi_net))
+  message(glue("Network observed cumFOI CV^2 = {round(cv2_foi_net, 3)} ",
+               "(control subset, t = {max(timepoints)})"))
 
 ar_vac_rep     <- (S0_vac     - S_vac_tot)     / S0_vac
 ar_control_rep <- (S0_control - S_control_tot) / S0_control
@@ -249,8 +281,11 @@ net_dt <- data.table(
   cir_hi     = apply(cir_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
   cir_rom    = rowMeans(ar_vac_rep, na.rm = TRUE) /
                 rowMeans(ar_control_rep, na.rm = TRUE),   # ratio-of-means for reference
-  model      = sprintf("Network (pa = %s, CV² = %.2f)", pl_alpha, cv2_deg_net),
-  cv2        = cv2_deg_net)
+  model      = if (is.na(cv2_foi_net))
+                  sprintf("Network (pa = %s, degree CV² = %.2f)", pl_alpha, cv2_deg_net)
+                else sprintf("Network (pa = %s, FOI CV² = %.2f, degree CV² = %.2f)",
+                             pl_alpha, cv2_foi_net, cv2_deg_net),
+  cv2        = if (is.na(cv2_foi_net)) cv2_deg_net else cv2_foi_net)
 
 # Free the largest intermediate
 rm(raw_net); invisible(gc(verbose = FALSE))
