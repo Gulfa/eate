@@ -53,7 +53,7 @@ n_t <- length(timepoints)
 # Network parameters
 # ---------------------------------------------------------------------------
 
-N_net        <- 10000
+N_net        <- 50000
 pl_alpha     <- 3
 mean_k       <- 6
 vac_frac     <- 0.20
@@ -183,6 +183,7 @@ if (use_sparse) {
   # Contact structure and dust output both stay O(N * mean_k) instead of
   # O(N^2). Only aggregate S_vac, S_control totals per (t, rep) come back.
   adj <- get_or_build_adj(N_net, pl_alpha, mean_k, net_seed)
+  degree_net <- adj$degree
   message(glue("Running network SIR — SPARSE (n_rep = {n_rep_net}, dt = {dt}) ..."))
   raw_net <- run_stoch_adj_sparse(
     adj,
@@ -202,6 +203,7 @@ if (use_sparse) {
 } else {
   # --- Dense path: cached full c_ij + run_stoch_adj ----------------------
   c_ij <- get_or_build_c_ij(N_net, pl_alpha, mean_k, net_seed)
+  degree_net <- rowSums(c_ij)
   message(glue("Running network SIR — DENSE (n_rep = {n_rep_net}, dt = {dt}) ..."))
   raw_net <- run_stoch_adj(
     c_ij,
@@ -224,6 +226,12 @@ if (use_sparse) {
     S_control_tot <- S_control_tot + .dt_col_to_t_rep_matrix(raw_net[[paste0("S", k)]], n_t, n_rep_net)
 }
 
+# CV^2 of the realised contact-matrix out-degree distribution — the
+# structural analogue of the frailty CV^2 used for the linear labels.
+cv2_deg_net <- var(degree_net) / mean(degree_net)^2
+message(glue("Network degree CV^2 = {round(cv2_deg_net, 3)} ",
+             "(mean k = {round(mean(degree_net), 2)})"))
+
 ar_vac_rep     <- (S0_vac     - S_vac_tot)     / S0_vac
 ar_control_rep <- (S0_control - S_control_tot) / S0_control
 
@@ -241,8 +249,8 @@ net_dt <- data.table(
   cir_hi     = apply(cir_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
   cir_rom    = rowMeans(ar_vac_rep, na.rm = TRUE) /
                 rowMeans(ar_control_rep, na.rm = TRUE),   # ratio-of-means for reference
-  model      = sprintf("Network (pa = %s)", pl_alpha),
-  cv2        = NA_real_)
+  model      = sprintf("Network (pa = %s, CV² = %.2f)", pl_alpha, cv2_deg_net),
+  cv2        = cv2_deg_net)
 
 # Free the largest intermediate
 rm(raw_net); invisible(gc(verbose = FALSE))
