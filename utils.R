@@ -99,21 +99,35 @@ get_conact_matrix_pl <- function(N, alpha, mean_k=6){
 
 # Sparse directed Pareto (Chung-Lu style) network sampler. Draws exactly
 # the same Bernoulli edges as get_conact_matrix_pl but never materialises
-# the dense N x N matrix. Uses row-wise vectorised rbinom so per-row cost
-# is O(N) but avoids the O(N^2) memory of a full matrix.
+# the dense N x N matrix.
+#
+# Uses Miller-Hagberg-style rejection sampling with a *row-fixed*
+# envelope: for source i, sort target propensities descending and use
+#     p_max = min(c * s[i] * s_sort[1], 1)
+# as the acceptance rate of the outer Bernoulli process, then accept
+# each candidate position pos with probability p_true(pos) / p_max
+# where p_true(pos) = c * s[i] * s_sort[pos]. Because s_sort[pos] is
+# monotonically decreasing, p_true <= p_max is guaranteed and every
+# candidate integrates to the right marginal Bernoulli probability.
+#
+# Vectorised across positions: for row i we pre-sample enough Geom(p_max)
+# gaps at once (with a safety multiplier), take a cumsum to get all
+# candidate positions in one shot, then vectorised runif() gives all
+# accept/reject decisions. Row work is O(p_max * N + #accepts), and
+# summed over rows the total work is O(mean_k * max(s) * N) — well
+# below O(N^2) for moderate pl_alpha.
 #
 # Returns the same list shape as contact_matrix_to_adj:
 #   neighbors [max_degree, N] integer, mask [max_degree, N] integer,
 #   max_degree scalar, plus propensities (length N) and degree (length N).
 #
-# NOTE: an earlier Miller-Hagberg-style geometric-skip implementation
-# lived here — removed because the mid-row envelope refresh introduced a
-# subtle bias in the accept-ratio derivation for the directed variant.
-# The row-wise rbinom below is O(N^2) but bit-for-bit equivalent to the
-# dense sampler; fine at N up to ~30k, slow at N ~ 10^5. If we later need
-# real O(N + m), do it right in Rcpp or via the exact MH paper algorithm.
+# NOTE: an earlier attempt at MH with mid-row envelope refresh had a
+# subtle bias in the directed accept ratio and gave systematically wrong
+# CIR curves — see the fix commit. This version uses the row-fixed p_max
+# variant from the MH 2011 paper, which is provably unbiased.
 sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
-                              allow_self_loops = TRUE) {
+                              allow_self_loops = TRUE,
+                              oversample = 1.5) {
   if (!is.null(seed)) {
     old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
       get(".Random.seed", envir = .GlobalEnv) else NULL
@@ -123,11 +137,49 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
   s   <- s / mean(s)
   c_const <- mean_k / N
 
+  # Sort target propensities descending so envelope is non-increasing.
+  ord    <- order(s, decreasing = TRUE)
+  s_sort <- s[ord]
+  max_s  <- s_sort[1]
+
   neigh <- vector("list", N)
   for (i in seq_len(N)) {
-    p_vec <- pmin(c_const * s[i] * s, 1)
-    hits  <- rbinom(N, 1L, p_vec)
-    out   <- which(hits == 1L)
+    si    <- s[i]
+    p_max <- min(c_const * si * max_s, 1)
+
+    if (p_max <= 0) { neigh[[i]] <- integer(0L); next }
+
+    if (p_max >= 1) {
+      # Envelope saturated — no advantage to skipping. Fall back to
+      # direct Bernoulli. Only affects the top few rows for heavy tails.
+      p_vec <- pmin(c_const * si * s, 1)
+      out   <- which(rbinom(N, 1L, p_vec) == 1L)
+    } else {
+      # Vectorised Geom(p_max) skip + cumsum to enumerate candidate
+      # positions in sorted order. Pre-allocate `oversample * expected`
+      # gaps; refill loop kicks in the rare cases we underestimate.
+      pos_out <- integer(0L)
+      last_pos <- 0L
+      repeat {
+        n_batch <- max(64L, ceiling(oversample * p_max * (N - last_pos)))
+        gaps    <- rgeom(n_batch, p_max)
+        pos_vec <- last_pos + cumsum(gaps + 1L)
+        keep    <- pos_vec <= N
+        pos_out <- c(pos_out, pos_vec[keep])
+        # If any candidate exceeded N, we've walked past — done.
+        if (!all(keep)) break
+        last_pos <- pos_vec[length(pos_vec)]
+      }
+      # Rejection step at the true (smaller) probability.
+      if (length(pos_out) > 0L) {
+        p_true <- c_const * si * s_sort[pos_out]
+        accept <- runif(length(pos_out)) < p_true / p_max
+        out    <- ord[pos_out[accept]]
+      } else {
+        out <- integer(0L)
+      }
+    }
+
     if (!allow_self_loops) out <- out[out != i]
     neigh[[i]] <- out
   }
