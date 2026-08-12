@@ -272,6 +272,16 @@ ar_control_rep <- (S0_control - S_control_tot) / S0_control
 cir_rep <- ar_vac_rep / ar_control_rep
 cir_rep[!is.finite(cir_rep)] <- NA_real_
 
+# Per-replicate cumulative-hazard ratio (a.k.a. overall HR):
+#   Lambda_g(t) = -log(1 - AR_g(t)) = -log(S_g(t) / S_g(0))
+#   HR(t)       = Lambda_vac(t) / Lambda_ctrl(t)
+# For a leaky vaccine on a homogeneous mixing pool this stays at
+# alpha_vac at every t; the drift under heterogeneous exposure /
+# depletion is the point of comparison against CIR.
+hr_rep <- -log1p(-pmin(pmax(ar_vac_rep,     0), 1 - 1e-12)) /
+          -log1p(-pmin(pmax(ar_control_rep, 0), 1 - 1e-12))
+hr_rep[!is.finite(hr_rep)] <- NA_real_
+
 net_dt <- data.table(
   t          = timepoints,
   ar_control = rowMeans(ar_control_rep, na.rm = TRUE),
@@ -281,6 +291,9 @@ net_dt <- data.table(
   cir_hi     = apply(cir_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
   cir_rom    = rowMeans(ar_vac_rep, na.rm = TRUE) /
                 rowMeans(ar_control_rep, na.rm = TRUE),   # ratio-of-means for reference
+  hr_med     = apply(hr_rep, 1L, median,   na.rm = TRUE),
+  hr_lo      = apply(hr_rep, 1L, quantile, probs = 0.25, na.rm = TRUE),
+  hr_hi      = apply(hr_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
   model      = if (is.na(cv2_foi_net))
                   sprintf("Network (pa = %s, degree CV² = %.2f)", pl_alpha, cv2_deg_net)
                 else sprintf("Network (pa = %s, FOI CV² = %.2f, degree CV² = %.2f)",
@@ -324,9 +337,12 @@ for (cv2_target in frailty_cv2s) {
   ar_vac_r   <- matrix(raw$vac,   nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_vac_lin
   ar_unvac_r <- matrix(raw$unvac, nrow = n_t, ncol = n_rep_lin, byrow = TRUE) / N_unvac_lin
 
-  # Per-replicate CIR — what one study of this size would observe.
+  # Per-replicate CIR + cumulative-hazard ratio.
   cir_r <- ar_vac_r / ar_unvac_r
   cir_r[!is.finite(cir_r)] <- NA_real_
+  hr_r  <- -log1p(-pmin(pmax(ar_vac_r,   0), 1 - 1e-12)) /
+           -log1p(-pmin(pmax(ar_unvac_r, 0), 1 - 1e-12))
+  hr_r[!is.finite(hr_r)] <- NA_real_
 
   lin_rows[[length(lin_rows) + 1L]] <- data.table(
     t          = timepoints,
@@ -337,6 +353,9 @@ for (cv2_target in frailty_cv2s) {
     cir_hi     = apply(cir_r, 1L, quantile, probs = 0.75, na.rm = TRUE),
     cir_rom    = rowMeans(ar_vac_r, na.rm = TRUE) /
                   rowMeans(ar_unvac_r, na.rm = TRUE),
+    hr_med     = apply(hr_r, 1L, median,   na.rm = TRUE),
+    hr_lo      = apply(hr_r, 1L, quantile, probs = 0.25, na.rm = TRUE),
+    hr_hi      = apply(hr_r, 1L, quantile, probs = 0.75, na.rm = TRUE),
     model      = sprintf("Linear (CV² = %.2f)", cv2v),
     cv2        = cv2v)
 }
@@ -380,6 +399,35 @@ p <- ggplot(plot_dt, aes(x = ar_control, y = cir_med,
        y = expression("CIR (per-study, median with 25–75% band)"))
 
 ggsave(file.path(out_dir, "cir_vs_ar_control.png"), p,
+       width = 10, height = 7, dpi = 130)
+
+# ---------------------------------------------------------------------------
+# HR (cumulative hazard ratio) — separate plot, same axis conventions
+# ---------------------------------------------------------------------------
+# HR = -log(1 - AR_vac) / -log(1 - AR_control). For a leaky vaccine with
+# constant per-contact protection alpha_vac, HR stays at alpha_vac at
+# every t regardless of AR (contrast with CIR which drifts toward 1 as
+# the epidemic saturates). Drift under network/frailty heterogeneity is
+# the informative part of this panel.
+
+p_hr <- ggplot(plot_dt, aes(x = ar_control, y = hr_med,
+                             colour = model, fill = model, group = model)) +
+  geom_ribbon(aes(ymin = hr_lo, ymax = hr_hi),
+              alpha = 0.18, colour = NA) +
+  geom_path(size = 1) +
+  geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
+  scale_colour_manual(name = NULL, values = pal) +
+  scale_fill_manual(name   = NULL, values = pal) +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "bottom",
+        panel.grid.minor = element_blank()) +
+  guides(colour = guide_legend(nrow = 2),
+         fill   = guide_legend(nrow = 2)) +
+  labs(x = "Attack rate in control group",
+       y = expression("HR = " * -log(1 - AR[vac]) / -log(1 - AR[control]) *
+                      " (per-study, median with 25–75% band)"))
+
+ggsave(file.path(out_dir, "hr_vs_ar_control.png"), p_hr,
        width = 10, height = 7, dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
