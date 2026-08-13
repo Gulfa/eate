@@ -382,52 +382,34 @@ pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)] el
 # ribbon is wildly wide and not informative about the systematic drift.
 plot_dt <- all_dt[ar_control >= 0.005]
 
-p <- ggplot(plot_dt, aes(x = ar_control, y = cir_med,
-                        colour = model, fill = model, group = model)) +
-  geom_ribbon(aes(ymin = cir_lo, ymax = cir_hi),
+# CIR and HR share the same aesthetics + x-axis; melt into a long
+# `metric` column so they can be facet-panelled in one plot.
+long_dt <- rbind(
+  plot_dt[, .(ar_control, model, metric = "CIR",
+              y_med = cir_med, y_lo = cir_lo, y_hi = cir_hi)],
+  plot_dt[, .(ar_control, model, metric = "cumulative HR",
+              y_med = hr_med,  y_lo = hr_lo,  y_hi = hr_hi)]
+)
+long_dt[, metric := factor(metric, levels = c("CIR", "cumulative HR"))]
+
+p_combined <- ggplot(long_dt, aes(x = ar_control, y = y_med,
+                                   colour = model, fill = model, group = model)) +
+  geom_ribbon(aes(ymin = y_lo, ymax = y_hi),
               alpha = 0.18, colour = NA) +
   geom_path(size = 1) +
   geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
+  facet_wrap(~ metric, scales = "free_y") +
   scale_colour_manual(name = NULL, values = pal) +
   scale_fill_manual(name   = NULL, values = pal) +
   theme_bw(base_size = 14) +
   theme(legend.position = "bottom",
-        panel.grid.minor = element_blank()) +
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA)) +
   guides(colour = guide_legend(nrow = 2),
          fill   = guide_legend(nrow = 2)) +
-  labs(x = "Attack rate in control group",
-       y = expression("CIR (per-study, median with 25–75% band)"))
+  labs(x = "Attack rate in control group", y = NULL)
 
-ggsave(file.path(out_dir, "cir_vs_ar_control.png"), p,
-       width = 10, height = 7, dpi = 130)
-
-# ---------------------------------------------------------------------------
-# HR (cumulative hazard ratio) — separate plot, same axis conventions
-# ---------------------------------------------------------------------------
-# HR = -log(1 - AR_vac) / -log(1 - AR_control). For a leaky vaccine with
-# constant per-contact protection alpha_vac, HR stays at alpha_vac at
-# every t regardless of AR (contrast with CIR which drifts toward 1 as
-# the epidemic saturates). Drift under network/frailty heterogeneity is
-# the informative part of this panel.
-
-p_hr <- ggplot(plot_dt, aes(x = ar_control, y = hr_med,
-                             colour = model, fill = model, group = model)) +
-  geom_ribbon(aes(ymin = hr_lo, ymax = hr_hi),
-              alpha = 0.18, colour = NA) +
-  geom_path(size = 1) +
-  geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
-  scale_colour_manual(name = NULL, values = pal) +
-  scale_fill_manual(name   = NULL, values = pal) +
-  theme_bw(base_size = 14) +
-  theme(legend.position = "bottom",
-        panel.grid.minor = element_blank()) +
-  guides(colour = guide_legend(nrow = 2),
-         fill   = guide_legend(nrow = 2)) +
-  labs(x = "Attack rate in control group",
-       y = expression("HR = " * -log(1 - AR[vac]) / -log(1 - AR[control]) *
-                      " (per-study, median with 25–75% band)"))
-
-ggsave(file.path(out_dir, "hr_vs_ar_control.png"), p_hr,
-       width = 10, height = 7, dpi = 130)
+ggsave(file.path(out_dir, "cir_hr_vs_ar_control.png"), p_combined,
+       width = 14, height = 7, dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
