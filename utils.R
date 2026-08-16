@@ -304,7 +304,15 @@ estimate_posterior_cov <- function(simulator, beta, alpha,
     dimnames = list(c("C1", "C2"), c("beta", "alpha"))
   )
 
-  Sigma <- cov(cbind(base$C1, base$C2)) / n_sim
+  # Variance of a SINGLE realisation of (C1, C2) — the residual variance
+  # that appears in the sandwich estimator for a moment-matching MLE.
+  # The n_sim replicates are used to *estimate* this variance from an
+  # ensemble; each row of `base` is one realisation, so cov() already
+  # gives Sigma_1. Do NOT divide by n_sim — that would give Var(mean of
+  # n_sim draws) instead, understating posterior SDs by sqrt(n_sim) ~ 30x
+  # for the defaults (n_sim = 1000). The fit is against ONE observed
+  # (data_C1, data_C2), so Sigma_1 is what the sandwich wants.
+  Sigma <- cov(cbind(base$C1, base$C2))
   dimnames(Sigma) <- list(c("C1", "C2"), c("C1", "C2"))
 
   Jinv <- tryCatch(solve(J),
