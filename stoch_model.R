@@ -1158,9 +1158,12 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     }
 
     # Hybrid EATE: matching side uses P_factual, flipped side uses the
-    # frozen counterfactual averaged over replicates.
-    eate_t <- numeric(n_t)
-    crr_t  <- numeric(n_t)
+    # frozen counterfactual averaged over replicates. num / denom are
+    # the counterfactual "sum Y_i(vac)" and "sum Y_i(unvac)" totals; VE
+    # = 1 - num/denom on the ratio scale, AVE = (denom - num) / N on the
+    # per-person absolute scale.
+    eate_t <- numeric(n_t); num_t <- numeric(n_t); denom_t <- numeric(n_t)
+    ave_t  <- numeric(n_t); crr_t <- numeric(n_t); crr_ave_t <- numeric(n_t)
     for (it in seq_len(n_t)) {
       cfi        <- cum_foi_traj[it, , ]                       # [n_rep, N]
       P_vac_cf   <- 1 - colMeans(exp(-alpha * cfi))            # length N
@@ -1168,16 +1171,21 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
       P_fac      <- P_factual[it, ]                            # length N
       num   <- sum(P_fac[vac])     + sum(P_vac_cf[non_vac])
       denom <- sum(P_fac[non_vac]) + sum(P_unvac_cf[vac])
-      eate_t[it] <- num / denom
-      crr_t[it]  <- (sum(P_fac[vac])     / length(vac)) /
-                    (sum(P_fac[non_vac]) / length(non_vac))
+      num_t[it]   <- num
+      denom_t[it] <- denom
+      eate_t[it]  <- num / denom
+      ave_t[it]   <- (denom - num) / N
+      ar_fac_vac   <- sum(P_fac[vac])     / length(vac)
+      ar_fac_unvac <- sum(P_fac[non_vac]) / length(non_vac)
+      crr_t[it]     <- ar_fac_vac / ar_fac_unvac
+      crr_ave_t[it] <- ar_fac_unvac - ar_fac_vac
     }
 
     rbindlist(list(
-      data.frame(t = timepoints, eate = eate_t,
-                 num = NA_real_, denom = NA_real_,
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
                  method = "full_stoch", sim = sim_id),
-      data.frame(t = timepoints, eate = crr_t,
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
@@ -1359,7 +1367,9 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
 
     # Hybrid EATE per timepoint: matching side uses factual cases, flipped
     # side uses the per-bin frozen counterfactual scaled by bin population.
-    eate_t <- numeric(n_t)
+    # Also compute AVE = (denom - num) / N_total (per-person absolute effect).
+    eate_t <- numeric(n_t); num_t <- numeric(n_t); denom_t <- numeric(n_t)
+    ave_t  <- numeric(n_t)
     for (it in seq_len(n_t)) {
       cfi <- cum_foi_rep[it, ]                                    # [n_rep]
       # outer(cfi, sus_bin) -> [n_rep, n_frailty]; colMeans gives [n_frailty].
@@ -1370,16 +1380,21 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
 
       num   <- sum(C_vac_bin[it, ])   + sum(P_vac_k   * N_unvac_grp)
       denom <- sum(C_unvac_bin[it, ]) + sum(P_unvac_k * N_vac_grp)
-      eate_t[it] <- num / denom
+      num_t[it]   <- num
+      denom_t[it] <- denom
+      eate_t[it]  <- num / denom
+      ave_t[it]   <- (denom - num) / N_total
     }
-    crr_t <- (rowSums(C_vac_bin) / total_vac) /
-             (rowSums(C_unvac_bin) / total_unvac)
+    ar_fac_vac_t   <- rowSums(C_vac_bin)   / total_vac
+    ar_fac_unvac_t <- rowSums(C_unvac_bin) / total_unvac
+    crr_t     <- ar_fac_vac_t / ar_fac_unvac_t
+    crr_ave_t <- ar_fac_unvac_t - ar_fac_vac_t
 
     rbindlist(list(
-      data.frame(t = timepoints, eate = eate_t,
-                 num = NA_real_, denom = NA_real_,
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
                  method = "full_stoch", sim = sim_id),
-      data.frame(t = timepoints, eate = crr_t,
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
@@ -1435,15 +1450,18 @@ get_stoch_eate_linear <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     P_fac_unvac <- rowMeans(C1_mat) / N_unvac
     P_fac_vac   <- rowMeans(C2_mat) / N_vac
 
-    eate_t <- (N_vac   * P_fac_vac   + N_unvac * P_vac_cf) /
-              (N_unvac * P_fac_unvac + N_vac   * P_unvac_cf)
-    crr_t  <- P_fac_vac / P_fac_unvac
+    num_t   <- N_vac   * P_fac_vac   + N_unvac * P_vac_cf
+    denom_t <- N_unvac * P_fac_unvac + N_vac   * P_unvac_cf
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N
+    crr_t     <- P_fac_vac / P_fac_unvac
+    crr_ave_t <- P_fac_unvac - P_fac_vac
 
     rbindlist(list(
-      data.frame(t = timepoints, eate = eate_t,
-                 num = NA_real_, denom = NA_real_,
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
                  method = "full_stoch", sim = sim_id),
-      data.frame(t = timepoints, eate = crr_t,
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
@@ -1507,15 +1525,18 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     P_fac_unvac <- rowMeans(C1_mat) / N_unvac
     P_fac_vac   <- rowMeans(C2_mat) / N_vac
 
-    eate_t <- (N_vac   * P_fac_vac   + N_unvac * P_vac_cf) /
-              (N_unvac * P_fac_unvac + N_vac   * P_unvac_cf)
-    crr_t  <- P_fac_vac / P_fac_unvac
+    num_t   <- N_vac   * P_fac_vac   + N_unvac * P_vac_cf
+    denom_t <- N_unvac * P_fac_unvac + N_vac   * P_unvac_cf
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N
+    crr_t     <- P_fac_vac / P_fac_unvac
+    crr_ave_t <- P_fac_unvac - P_fac_vac
 
     rbindlist(list(
-      data.frame(t = timepoints, eate = eate_t,
-                 num = NA_real_, denom = NA_real_,
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
                  method = "full_stoch", sim = sim_id),
-      data.frame(t = timepoints, eate = crr_t,
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
