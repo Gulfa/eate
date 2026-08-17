@@ -46,12 +46,25 @@ dt         <- 0.01
 sir_beta_hat   <- 1.89
 sir_alpha_hat  <- 0.43
 sir_sd_beta    <- 0.18
-sir_sd_alpha   <- 0.11
-sir_cor_ba     <- 0
+sir_sd_alpha   <- 0.05
+sir_cor_ba     <- -0.0048
 sir_gamma      <- 1
 sir_I_ini_2g   <- c(10, 10)
 
-# --- Linear-specific: fit is derived from data below (no user input needed) ---
+# --- Linear-specific: supplied fit (mirrors SIR). Set any of lin_beta_hat /
+#     lin_alpha_hat / lin_sd_beta / lin_sd_alpha / lin_cor_ba to NA to fall
+#     back to defaults derived from the observed (data_C1, data_C2):
+#       - point estimate: closed-form MLE
+#           beta  = -log(1 - data_C1/N_cont) / t_star
+#           alpha =  log(1 - data_C2/N_vac) / log(1 - data_C1/N_cont)
+#       - covariance: sandwich J^-1 Sigma J^-T from the linear simulator
+#         (see estimate_posterior_cov). This is the "matches Wald exactly"
+#         reference — override only when you want to test a specific fit.
+lin_beta_hat   <- 0.064
+lin_alpha_hat  <- 0.44
+lin_sd_beta    <- 0.0045
+lin_sd_alpha   <- 0.052
+lin_cor_ba     <- 0
 
 # --- Diagnostic knobs ---
 K              <- 200      # posterior parameter samples
@@ -100,8 +113,10 @@ ve_naive_hi  <- 1 - rr_lo
 # so given p_c = data_C1/N_c and p_v = data_C2/N_v:
 #   beta  = -log(1 - p_c) / t
 #   alpha = log(1 - p_v) / log(1 - p_c)
-lin_beta_hat  <- -log(1 - ar_c_obs) / t_star
-lin_alpha_hat <-  log(1 - ar_v_obs) /  log(1 - ar_c_obs)
+# Closed-form MLE defaults from the data — used as fallback when
+# lin_beta_hat / lin_alpha_hat above are NA.
+lin_beta_hat_default  <- -log(1 - ar_c_obs) / t_star
+lin_alpha_hat_default <-  log(1 - ar_v_obs) /  log(1 - ar_c_obs)
 
 # Wrap get_stoch_eate_linear behind a (beta, alpha, n_sim, seed) interface
 # so estimate_posterior_cov can drive it.
@@ -149,15 +164,36 @@ run_diagnostic <- function(model_type) {
         dt = dt, timepoints = timepoints, mc.cores = cores)
     }
   } else if (model_type == "linear") {
-    beta_hat  <- lin_beta_hat
-    alpha_hat <- lin_alpha_hat
-    message(glue("  linear closed-form MLE: beta = {round(beta_hat, 5)}, ",
-                 "alpha = {round(alpha_hat, 5)}"))
-    pcov <- estimate_posterior_cov(sim_linear,
-                                   beta = beta_hat, alpha = alpha_hat,
-                                   n_sim = post_cov_n_sim,
-                                   seed  = post_cov_seed)
-    cov_hat <- pcov$cov
+    # Point estimate: use supplied lin_* if given, else closed-form MLE.
+    if (is.na(lin_beta_hat) || is.na(lin_alpha_hat)) {
+      beta_hat  <- lin_beta_hat_default
+      alpha_hat <- lin_alpha_hat_default
+      message(glue("  linear point: closed-form MLE from data — ",
+                   "beta = {round(beta_hat, 5)}, alpha = {round(alpha_hat, 5)}"))
+    } else {
+      beta_hat  <- lin_beta_hat
+      alpha_hat <- lin_alpha_hat
+      message(glue("  linear point: user-supplied — ",
+                   "beta = {round(beta_hat, 5)}, alpha = {round(alpha_hat, 5)}"))
+    }
+
+    # Covariance: use supplied lin_sd_* / lin_cor_ba if given, else
+    # sandwich J^-1 Sigma J^-T from estimate_posterior_cov.
+    if (is.na(lin_sd_beta) || is.na(lin_sd_alpha) || is.na(lin_cor_ba)) {
+      pcov <- estimate_posterior_cov(sim_linear,
+                                     beta = beta_hat, alpha = alpha_hat,
+                                     n_sim = post_cov_n_sim,
+                                     seed  = post_cov_seed)
+      cov_hat <- pcov$cov
+      message("  linear cov: sandwich estimate (default)")
+    } else {
+      cov_hat <- matrix(c(lin_sd_beta^2,
+                          lin_cor_ba * lin_sd_beta * lin_sd_alpha,
+                          lin_cor_ba * lin_sd_beta * lin_sd_alpha,
+                          lin_sd_alpha^2),
+                        nrow = 2L, byrow = TRUE)
+      message("  linear cov: user-supplied")
+    }
     sim_fn  <- sim_linear
     ve_fn <- function(bk, ak) {
       get_stoch_eate_linear(
