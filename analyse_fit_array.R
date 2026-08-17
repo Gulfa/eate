@@ -130,6 +130,9 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
     loss            = r$fit$loss,
     convergence     = r$fit$convergence,
     sd_beta         = r$posterior_cov$sd[["beta"]],
+    cor_ba          = r$posterior_cov$cov[1, 2] /
+                      (r$posterior_cov$sd[["beta"]] *
+                       r$posterior_cov$sd[["alpha"]]),
     sd_alpha        = r$posterior_cov$sd[["alpha"]],
     cov_ba          = r$posterior_cov$cov[1, 2]
   )
