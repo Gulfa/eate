@@ -80,9 +80,26 @@ ve_n_rep <- 200
 K_post_samples   <- 30
 ve_n_rep_uncert  <- 50
 
-# Internal dust threading (per simulator call). Outer parallelism is via
-# slurm array tasks, so keep this modest.
-inner_cores <- 4
+# Parallelism — only two knobs; the code decides how to spend them
+# per phase (see run_one_job below).
+#
+#   cores_per_node : total CPU budget per slurm task (--cpus-per-task).
+#   nodes          : number of slurm array tasks (--array=1-nodes).
+#
+# Per-phase strategy:
+#   Fit + posterior cov + point VE : all dust calls are sequential in R,
+#     so `inner_cores = cores_per_node` gives each dust call the full
+#     thread budget.
+#   VE with uncertainty            : dominant sequential K loop; run K
+#     posterior samples in parallel via mclapply with `K_cores =
+#     cores_per_node`, and inside each K worker use `inner_cores = 1`
+#     (each sim call single-threaded, no over-subscription).
+#
+# Configs within a slurm task run SEQUENTIALLY (no outer mclapply):
+# parallelism happens inside each config; cross-config parallelism is
+# via slurm array tasks (nodes).
+cores_per_node <- 32
+nodes          <- 20
 
 out_dir <- "output/fit_array_results"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -103,7 +120,9 @@ base_common <- list(
   gamma = gamma, dt = dt,
   n_sim_opt = n_sim_opt, optim_maxit = optim_maxit,
   n_restarts = n_restarts, restart_loss_threshold = restart_loss_threshold,
-  grid_n = grid_n, inner_cores = inner_cores,
+  grid_n = grid_n,
+  # inner_cores is set by run_one_job per phase from cores_per_node.
+  inner_cores = 1L,
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
   post_cov_h = post_cov_h,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
@@ -391,17 +410,21 @@ sample_posterior <- function(beta_hat, alpha_hat, cov, K,
 # the corresponding (beta_k, alpha_k) so downstream can decompose
 # variance into "parameter" vs "allocation" components.
 compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
-                                        K, n_rep_override) {
+                                        K, n_rep_override, K_cores = 1L) {
   samples <- sample_posterior(fit$beta, fit$alpha, posterior_cov, K)
-  cfg_u <- cfg
-  cfg_u$ve_n_rep <- n_rep_override
-  rbindlist(lapply(seq_len(nrow(samples)), function(k) {
+  cfg_u              <- cfg
+  cfg_u$ve_n_rep     <- n_rep_override
+  # Inside the K loop each worker owns one core — one dust call at a
+  # time, single-threaded. Prevents nested oversubscription with K_cores
+  # already using the full CPU budget.
+  cfg_u$inner_cores  <- 1L
+  rbindlist(parallel::mclapply(seq_len(nrow(samples)), function(k) {
     ve_k <- compute_ve(cfg_u, samples[k, "beta"], samples[k, "alpha"])
     ve_k[, param_sample := k]
     ve_k[, beta_k       := samples[k, "beta"]]
     ve_k[, alpha_k      := samples[k, "alpha"]]
     ve_k
-  }), fill = TRUE)
+  }, mc.cores = K_cores, mc.preschedule = FALSE), fill = TRUE)
 }
 
 # ---------------------------------------------------------------------------
@@ -410,10 +433,14 @@ compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
 
 run_one_job <- function(cfg) {
   cfg       <- materialise_cfg(cfg)
-  simulator <- build_simulator(cfg)
+
+  # --- Fitting phase: one dust call at a time. Give it all the cores.
+  cfg_fit                <- cfg
+  cfg_fit$inner_cores    <- cores_per_node
+  simulator              <- build_simulator(cfg_fit)
 
   message(glue("[{cfg$name}] fitting..."))
-  fit <- fit_one(simulator, cfg)
+  fit <- fit_one(simulator, cfg_fit)
   message(glue("[{cfg$name}] fit: beta = {round(fit$beta, 4)}  alpha = {round(fit$alpha, 4)}  ",
                "loss = {round(fit$loss, 3)}  conv = {fit$convergence}"))
 
@@ -425,13 +452,20 @@ run_one_job <- function(cfg) {
   message(glue("[{cfg$name}] sd_beta = {signif(pcov$sd['beta'], 3)}  ",
                "sd_alpha = {signif(pcov$sd['alpha'], 3)}"))
 
+  # Point-estimate VE (single call, one lot of n_vac x n_rep dust
+  # replicates). Same phase strategy as fit.
   message(glue("[{cfg$name}] VE..."))
-  ve <- compute_ve(cfg, fit$beta, fit$alpha)
+  ve <- compute_ve(cfg_fit, fit$beta, fit$alpha)
 
-  message(glue("[{cfg$name}] VE with uncertainty (K = {cfg$K_post_samples})..."))
+  # VE with uncertainty: K sequential compute_ve calls dominate the
+  # total time. Run them in parallel across cores_per_node; each K
+  # worker uses inner_cores = 1 (set inside the helper).
+  message(glue("[{cfg$name}] VE with uncertainty (K = {cfg$K_post_samples}, ",
+               "K_cores = {cores_per_node})..."))
   ve_unc <- compute_ve_with_uncertainty(cfg, fit, pcov$cov,
                                         K = cfg$K_post_samples,
-                                        n_rep_override = cfg$ve_n_rep_uncert)
+                                        n_rep_override = cfg$ve_n_rep_uncert,
+                                        K_cores = cores_per_node)
 
   list(
     name            = cfg$name,
@@ -451,11 +485,13 @@ run_one_job <- function(cfg) {
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 # ---------------------------------------------------------------------------
-# Slurm array dispatch — same chunking pattern as run_array.R
+# Slurm array dispatch
 # ---------------------------------------------------------------------------
-
-N_nodes        <- 20
-cores_per_node <- 4   # outer mclapply across jobs in this task's chunk
+# Shuffle configs once, split into `nodes` chunks, this slurm task
+# processes its chunk. Configs inside a chunk run SEQUENTIALLY —
+# parallelism is entirely inside each config (fit dust threading +
+# K-loop parallelism), driven by `cores_per_node`. No outer mclapply
+# to avoid nested-fork thrashing.
 
 id <- Sys.getenv("SLURM_ARRAY_TASK_ID")
 if (id == "") id <- 1
@@ -463,11 +499,12 @@ id <- as.numeric(id)
 
 chunk2  <- function(x, n) split(x, cut(seq_along(x), n, labels = FALSE))
 set.seed(1)
-chunked <- chunk2(sample(seq_along(configs)), N_nodes)
+chunked <- chunk2(sample(seq_along(configs)), nodes)
 set.seed(NULL)
 
 ids <- as.integer(chunked[[id]])
-message(glue("Task {id}: running {length(ids)} configs ({paste(ids, collapse=',')})"))
+message(glue("Task {id}/{nodes}: running {length(ids)} configs ",
+             "({paste(ids, collapse=',')}), cores_per_node = {cores_per_node}"))
 
 run_id <- function(i) {
   message(glue("Start {i}: {configs[[i]]$name}"))
@@ -477,9 +514,7 @@ run_id <- function(i) {
   out
 }
 
-results <- parallel::mclapply(ids, run_id,
-                              mc.cores       = cores_per_node,
-                              mc.preschedule = FALSE)
+results <- lapply(ids, run_id)
 
 saveRDS(results, file.path(out_dir, glue("results_{id}.RDS")))
 message(glue("Wrote {out_dir}/results_{id}.RDS"))
