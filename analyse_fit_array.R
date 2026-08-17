@@ -221,10 +221,13 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
     data.table(group = group_fn(r), VE = 1 - v$eate)
   }))
   if (!nrow(draws)) return(data.table())
-  s <- draws[, .(n = .N,
-                 estimate = median(VE, na.rm = TRUE),
-                 lo       = quantile(VE, 0.025, na.rm = TRUE),
-                 hi       = quantile(VE, 0.975, na.rm = TRUE)),
+  # SD-based CI: mean +/- 1.96 * SD(pooled). Consistent with the Laplace/
+  # MVN posterior and stabler at small K_post_samples than empirical
+  # tail quantiles (noise scales ~ 1/sqrt(2K) instead of ~ 1/sqrt(K)).
+  s <- draws[, .(n        = .N,
+                 estimate = mean(VE, na.rm = TRUE),
+                 lo       = mean(VE, na.rm = TRUE) - 1.96 * sd(VE, na.rm = TRUE),
+                 hi       = mean(VE, na.rm = TRUE) + 1.96 * sd(VE, na.rm = TRUE)),
              by = group]
   s[order(sapply(group, order_key))]
 }
@@ -408,11 +411,16 @@ if (nrow(ve_unc_long) > 0) {
   vu_jps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                   by = .(t, model_type, network_seed, allocation_seed, param_sample)]
 
-  param_per_job <- vu_jps[, .(med = median(VE),
-                              lo  = quantile(VE, 0.025, na.rm = TRUE),
-                              hi  = quantile(VE, 0.975, na.rm = TRUE)),
+  # Parameter-only band: mean +/- 1.96 * SD across param_samples (per job,
+  # per t), then average bounds across jobs. SD-based CI is stabler than
+  # empirical 2.5/97.5% quantiles at small K_post_samples.
+  param_per_job <- vu_jps[, .(med = mean(VE, na.rm = TRUE),
+                              lo  = mean(VE, na.rm = TRUE) -
+                                    1.96 * sd(VE, na.rm = TRUE),
+                              hi  = mean(VE, na.rm = TRUE) +
+                                    1.96 * sd(VE, na.rm = TRUE)),
                           by = .(t, model_type, network_seed, allocation_seed)]
-  param_band <- param_per_job[, .(VE_med = median(med),
+  param_band <- param_per_job[, .(VE_med = mean(med),
                                   lo = mean(lo), hi = mean(hi),
                                   n  = .N),
                               by = .(t, model_type)]
@@ -420,7 +428,9 @@ if (nrow(ve_unc_long) > 0) {
   vu_alloc <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                     by = .(t, model_type, network_seed, allocation_seed, sim)]
   # Per-param allocation-only spread (mirror of the param logic but
-  # collapsing over param_sample first).
+  # collapsing over param_sample first). Kept as quantile-based because
+  # this is spread across ALLOCATIONS — a structural axis, not a Laplace
+  # posterior — and typically not Gaussian.
   vu_aps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                   by = .(t, model_type, network_seed, allocation_seed, sim)]
   alloc_band <- vu_aps[, .(VE_med = median(VE),
@@ -429,9 +439,10 @@ if (nrow(ve_unc_long) > 0) {
                            n  = .N),
                        by = .(t, model_type)]
 
-  total_band <- ve_unc[, .(VE_med = median(VE),
-                           lo = quantile(VE, 0.025, na.rm = TRUE),
-                           hi = quantile(VE, 0.975, na.rm = TRUE),
+  # Total band: SD-based on the pooled param x allocation x sim draws.
+  total_band <- ve_unc[, .(VE_med = mean(VE, na.rm = TRUE),
+                           lo = mean(VE, na.rm = TRUE) - 1.96 * sd(VE, na.rm = TRUE),
+                           hi = mean(VE, na.rm = TRUE) + 1.96 * sd(VE, na.rm = TRUE),
                            n  = .N),
                        by = .(t, model_type)]
 

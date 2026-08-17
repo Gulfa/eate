@@ -39,15 +39,15 @@ N_cont     <- 500
 N_vac      <- 500
 data_C1    <- 200        # observed control cases at t_star
 data_C2    <- 100        # observed vac      cases at t_star
-t_star     <- 8
+t_star     <- 4
 dt         <- 0.01
 
 # --- SIR-specific: supplied fit ---
-sir_beta_hat   <- 1.89
-sir_alpha_hat  <- 0.43
-sir_sd_beta    <- 0.18
-sir_sd_alpha   <- 0.05
-sir_cor_ba     <- -0.0048
+sir_beta_hat   <- 2.2
+sir_alpha_hat  <- 0.49
+sir_sd_beta    <- 0.22
+sir_sd_alpha   <- 0.06
+sir_cor_ba     <- -0.5
 sir_gamma      <- 1
 sir_I_ini_2g   <- c(10, 10)
 
@@ -60,17 +60,17 @@ sir_I_ini_2g   <- c(10, 10)
 #       - covariance: sandwich J^-1 Sigma J^-T from the linear simulator
 #         (see estimate_posterior_cov). This is the "matches Wald exactly"
 #         reference — override only when you want to test a specific fit.
-lin_beta_hat   <- 0.064
+lin_beta_hat   <- 0.13
 lin_alpha_hat  <- 0.44
-lin_sd_beta    <- 0.0045
-lin_sd_alpha   <- 0.052
-lin_cor_ba     <- 0
+lin_sd_beta    <- 0.009
+lin_sd_alpha   <- 0.054
+lin_cor_ba     <- -0.6
 
 # --- Diagnostic knobs ---
 K              <- 200      # posterior parameter samples
 n_vac          <- 5        # inner vac allocations per EATE call
 n_rep          <- 200      # dust replicates per allocation
-cores          <- 10
+cores          <- 1
 seed_grid      <- 1234L
 post_cov_n_sim <- 1000     # simulator draws for estimate_posterior_cov (linear)
 post_cov_seed  <- 4321L
@@ -235,8 +235,17 @@ run_diagnostic <- function(model_type) {
   final[, VE := 1 - eate]
   setnames(final, "ave", "AVE")
 
-  ve_q  <- quantile(final$VE,  probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
-  ave_q <- quantile(final$AVE, probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
+  # SD-based CI: mean ± 1.96 * SD(pooled). Half the finite-K noise of an
+  # empirical 2.5/97.5% quantile at the same K, and consistent with the
+  # Laplace / MVN posterior assumption we're using anyway. Named lo/med/hi
+  # so downstream ref_post code doesn't need to change.
+  ve_ci <- function(x) {
+    m <- mean(x, na.rm = TRUE)
+    s <- sd(x,   na.rm = TRUE)
+    c(m - 1.96 * s, m, m + 1.96 * s)
+  }
+  ve_q  <- ve_ci(final$VE)
+  ave_q <- ve_ci(final$AVE)
 
   final[, model_type := model_type]
   list(final = final, ve_q = ve_q, ave_q = ave_q,
