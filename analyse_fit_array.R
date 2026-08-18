@@ -317,48 +317,85 @@ for (lvl in names(levels_def)) {
 }
 
 # ---------------------------------------------------------------------------
-# Histograms of fitted VE / alpha / beta, filled by allocation. Shows how
-# the individual allocations contribute to the pooled VE / alpha / beta.
-# One value per job; panels are per (model, metric) so each parameter keeps
-# its own scale.
+# Histograms of the K posterior draws of VE / alpha / beta, filled by
+# allocation. For each job, ve_uncertainty holds K posterior samples
+# (param_sample), each tagged with its drawn beta_k / alpha_k; VE is the
+# mean of 1 - eate over that draw's inner sims. Stacking the K draws by
+# allocation shows how each allocation contributes to the pooled VE /
+# alpha / beta distribution. Panels are per (model, metric) so each
+# parameter keeps its own scale.
 # ---------------------------------------------------------------------------
 
-# Per-job VE at t* (mean over full_stoch draws), tagged with allocation.
-ve_job <- rbindlist(lapply(ok, function(r) {
+draws_dt <- rbindlist(lapply(ok, function(r) {
   if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
   v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
   if (!nrow(v)) return(NULL)
+  has_bk <- all(c("beta_k", "alpha_k") %in% names(v))
+  # One row per posterior draw: beta_k / alpha_k are constant within a
+  # param_sample; VE averaged over the draw's inner sims -> K per job.
+  agg <- v[, .(VE    = mean(1 - eate, na.rm = TRUE),
+               beta  = if (has_bk) beta_k[1]  else r$fit$beta,
+               alpha = if (has_bk) alpha_k[1] else r$fit$alpha),
+           by = param_sample]
   data.table(model_type      = as.character(r$model_type),
              allocation_seed = r$allocation_seed %||% NA_integer_,
-             value           = mean(1 - v$eate, na.rm = TRUE))
+             network_seed    = r$network_seed    %||% NA_integer_,
+             pl_alpha        = r$pl_alpha        %||% NA_real_,
+             VE = agg$VE, alpha = agg$alpha, beta = agg$beta)
 }))
 
-hist_dt <- rbindlist(list(
-  fit_dt[, .(model_type, allocation_seed, value = beta,  metric = "beta")],
-  fit_dt[, .(model_type, allocation_seed, value = alpha, metric = "alpha")],
-  if (nrow(ve_job)) ve_job[, .(model_type, allocation_seed, value, metric = "VE")]
-), fill = TRUE)
-hist_dt[, metric     := factor(metric, levels = c("VE", "alpha", "beta"))]
-hist_dt[, allocation := factor(allocation_seed)]
+if (!nrow(draws_dt)) {
+  message("No ve_uncertainty draws available; skipping allocation histograms.")
+} else {
+  hist_dt <- melt(draws_dt,
+                  id.vars       = c("model_type", "allocation_seed",
+                                    "network_seed", "pl_alpha"),
+                  measure.vars  = c("VE", "alpha", "beta"),
+                  variable.name = "metric", value.name = "value")
+  hist_dt[, metric := factor(metric, levels = c("VE", "alpha", "beta"))]
 
-n_alloc  <- length(unique(hist_dt$allocation))
-pal_alloc <- if (n_alloc <= 8L) brewer.pal(max(n_alloc, 3L), "Dark2")[seq_len(n_alloc)]
-             else colorRampPalette(brewer.pal(8L, "Dark2"))(n_alloc)
+  dark2_pal <- function(n) if (n <= 8L) brewer.pal(max(n, 3L), "Dark2")[seq_len(n)]
+                           else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
 
-n_models <- length(unique(hist_dt$model_type))
-p_hist <- ggplot(hist_dt, aes(x = value, fill = allocation)) +
-  geom_histogram(bins = 30, position = "stack", colour = "white", linewidth = 0.1) +
-  facet_wrap(vars(model_type, metric), scales = "free", ncol = 3) +
-  scale_fill_manual(name = "allocation", values = pal_alloc, na.value = "grey60") +
-  theme_bw(base_size = 13) +
-  theme(panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA)) +
-  labs(x = NULL, y = "count",
-       title = "Fitted VE / alpha / beta by allocation")
-ggsave(file.path(out_dir, "hist_VE_alpha_beta_by_allocation.png"),
-       p_hist, width = 11, height = max(4, 2.6 * n_models), dpi = 130,
-       limitsize = FALSE)
-fwrite(hist_dt, file.path(out_dir, "hist_VE_alpha_beta_by_allocation.csv"))
+  # Stacked histogram of the K posterior draws, faceted by `rowvar` x metric
+  # (free scales) and filled by `fill_col`. Shows how each configuration
+  # contributes to the pooled VE / alpha / beta distribution.
+  save_hist <- function(dt, rowvar, fill_col, fill_name, title, file) {
+    if (!nrow(dt)) return(invisible(NULL))
+    d <- copy(dt)
+    d[, rowf  := factor(get(rowvar))]
+    d[, fillf := factor(get(fill_col))]
+    pal <- dark2_pal(length(levels(d$fillf)))
+    p <- ggplot(d, aes(x = value, fill = fillf)) +
+      geom_histogram(bins = 40, position = "stack", colour = "white", linewidth = 0.1) +
+      facet_wrap(vars(rowf, metric), scales = "free", ncol = 3) +
+      scale_fill_manual(name = fill_name, values = pal, na.value = "grey60") +
+      theme_bw(base_size = 13) +
+      theme(panel.grid.minor = element_blank(),
+            strip.background = element_rect(fill = "grey95", colour = NA)) +
+      labs(x = NULL, y = "count", title = title)
+    ggsave(file, p, width = 11,
+           height = max(4, 2.6 * length(levels(d$rowf))), dpi = 130,
+           limitsize = FALSE)
+  }
+
+  # Non-network models: contribution of each allocation.
+  save_hist(hist_dt[model_type != "network"],
+            rowvar = "model_type", fill_col = "allocation_seed",
+            fill_name = "allocation",
+            title = "Posterior draws (K per allocation) of VE / alpha / beta",
+            file = file.path(out_dir, "hist_VE_alpha_beta_by_allocation.png"))
+
+  # Network: contribution of each network configuration (contact matrix),
+  # faceted by Pareto exponent since pl_alpha is a separate structural axis.
+  save_hist(hist_dt[model_type == "network"],
+            rowvar = "pl_alpha", fill_col = "network_seed",
+            fill_name = "network_seed",
+            title = "Network: posterior draws of VE / alpha / beta by network config (row = Pareto exp.)",
+            file = file.path(out_dir, "hist_VE_alpha_beta_network_by_config.png"))
+
+  fwrite(hist_dt, file.path(out_dir, "hist_VE_alpha_beta_draws.csv"))
+}
 
 # ---------------------------------------------------------------------------
 # VE trajectories
