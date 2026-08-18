@@ -1,6 +1,7 @@
 # Read all run_fit_array.R outputs and produce:
 #   - Forest plots of fitted beta and alpha per model, with the Gaussian
-#     posterior 95% CI (mean +/- 1.96 * sd from J^-1 Sigma J^-T).
+#     posterior central interval (mean +/- z * sd from J^-1 Sigma J^-T);
+#     interval level set by `ci_level` below (default 80%).
 #   - VE(t) trajectory plots, per model, method = "full_stoch", with
 #     median + min/max ribbon across allocations / replicates.
 #   - Network configs in two flavours: "separate" (per network_seed,
@@ -21,6 +22,16 @@ out_dir     <- if (length(args) >= 2) args[2] else file.path(results_dir, "figs"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
+
+# Central-interval level for all posterior/uncertainty bands. 0.80 gives
+# narrower, less jittery bands than 0.95: absolute wobble scales with z,
+# so 80% cuts it ~35% (z 1.28 vs 1.96), and the endpoints sit in the bulk
+# where the mean +/- z*SD Gaussian approximation holds best.
+ci_level  <- 0.80
+z_ci      <- qnorm(0.5 + ci_level / 2)     # 1.2816 at 80%, 1.96 at 95%
+q_lo      <- (1 - ci_level) / 2            # 0.10 at 80%
+q_hi      <- 1 - q_lo                      # 0.90 at 80%
+ci_pct    <- round(100 * ci_level)         # for titles/labels
 
 # ---------------------------------------------------------------------------
 # Load + flatten
@@ -137,10 +148,10 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
     cov_ba          = r$posterior_cov$cov[1, 2]
   )
 }))
-fit_dt[, beta_lo  := beta  - 1.96 * sd_beta]
-fit_dt[, beta_hi  := beta  + 1.96 * sd_beta]
-fit_dt[, alpha_lo := alpha - 1.96 * sd_alpha]
-fit_dt[, alpha_hi := alpha + 1.96 * sd_alpha]
+fit_dt[, beta_lo  := beta  - z_ci * sd_beta]
+fit_dt[, beta_hi  := beta  + z_ci * sd_beta]
+fit_dt[, alpha_lo := alpha - z_ci * sd_alpha]
+fit_dt[, alpha_hi := alpha + z_ci * sd_alpha]
 
 fwrite(fit_dt, file.path(out_dir, "fit_summary.csv"))
 message("\n=== Fit diagnostics ===")
@@ -182,8 +193,8 @@ summarise_param <- function(ok, group_fn, param) {
     p <- pool_param(groups[[g]]$value, groups[[g]]$sd)
     data.table(group = g, n = p$n,
                estimate = p$mean,
-               lo = p$mean - 1.96 * p$sd,
-               hi = p$mean + 1.96 * p$sd)
+               lo = p$mean - z_ci * p$sd,
+               hi = p$mean + z_ci * p$sd)
   }))[order(sapply(group, order_key))]
 }
 
@@ -221,13 +232,13 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
     data.table(group = group_fn(r), VE = 1 - v$eate)
   }))
   if (!nrow(draws)) return(data.table())
-  # SD-based CI: mean +/- 1.96 * SD(pooled). Consistent with the Laplace/
+  # SD-based CI: mean +/- z_ci * SD(pooled). Consistent with the Laplace/
   # MVN posterior and stabler at small K_post_samples than empirical
   # tail quantiles (noise scales ~ 1/sqrt(2K) instead of ~ 1/sqrt(K)).
   s <- draws[, .(n        = .N,
                  estimate = mean(VE, na.rm = TRUE),
-                 lo       = mean(VE, na.rm = TRUE) - 1.96 * sd(VE, na.rm = TRUE),
-                 hi       = mean(VE, na.rm = TRUE) + 1.96 * sd(VE, na.rm = TRUE)),
+                 lo       = mean(VE, na.rm = TRUE) - z_ci * sd(VE, na.rm = TRUE),
+                 hi       = mean(VE, na.rm = TRUE) + z_ci * sd(VE, na.rm = TRUE)),
              by = group]
   s[order(sapply(group, order_key))]
 }
@@ -259,14 +270,14 @@ for (lvl in names(levels_def)) {
   small <- if (lvl == "all_splits") theme(axis.text.y = element_text(size = 7)) else NULL
 
   ggsave(file.path(out_dir, glue("forest_beta_{lvl}.png")),
-         forest_plot(df_beta, glue("beta — {level_titles[[lvl]]}"), "beta") + small,
+         forest_plot(df_beta, glue("beta — {level_titles[[lvl]]} ({ci_pct}% CI)"), "beta") + small,
          width = 8, height = h, dpi = 130, limitsize = FALSE)
   ggsave(file.path(out_dir, glue("forest_alpha_{lvl}.png")),
-         forest_plot(df_alpha, glue("alpha — {level_titles[[lvl]]}"), "alpha") + small,
+         forest_plot(df_alpha, glue("alpha — {level_titles[[lvl]]} ({ci_pct}% CI)"), "alpha") + small,
          width = 8, height = h, dpi = 130, limitsize = FALSE)
   if (nrow(df_ve)) {
     ggsave(file.path(out_dir, glue("forest_VE_t{t_star_ve}_{lvl}.png")),
-           forest_plot(df_ve, glue("VE at t = {t_star_ve} — {level_titles[[lvl]]}"),
+           forest_plot(df_ve, glue("VE at t = {t_star_ve} — {level_titles[[lvl]]} ({ci_pct}% CI)"),
                        "VE = 1 - EATE") + small,
            width = 8, height = h, dpi = 130, limitsize = FALSE)
   }
@@ -304,6 +315,50 @@ for (lvl in names(levels_def)) {
            p_side, width = 11, height = h, dpi = 130, limitsize = FALSE)
   }
 }
+
+# ---------------------------------------------------------------------------
+# Histograms of fitted VE / alpha / beta, filled by allocation. Shows how
+# the individual allocations contribute to the pooled VE / alpha / beta.
+# One value per job; panels are per (model, metric) so each parameter keeps
+# its own scale.
+# ---------------------------------------------------------------------------
+
+# Per-job VE at t* (mean over full_stoch draws), tagged with allocation.
+ve_job <- rbindlist(lapply(ok, function(r) {
+  if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+  v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
+  if (!nrow(v)) return(NULL)
+  data.table(model_type      = as.character(r$model_type),
+             allocation_seed = r$allocation_seed %||% NA_integer_,
+             value           = mean(1 - v$eate, na.rm = TRUE))
+}))
+
+hist_dt <- rbindlist(list(
+  fit_dt[, .(model_type, allocation_seed, value = beta,  metric = "beta")],
+  fit_dt[, .(model_type, allocation_seed, value = alpha, metric = "alpha")],
+  if (nrow(ve_job)) ve_job[, .(model_type, allocation_seed, value, metric = "VE")]
+), fill = TRUE)
+hist_dt[, metric     := factor(metric, levels = c("VE", "alpha", "beta"))]
+hist_dt[, allocation := factor(allocation_seed)]
+
+n_alloc  <- length(unique(hist_dt$allocation))
+pal_alloc <- if (n_alloc <= 8L) brewer.pal(max(n_alloc, 3L), "Dark2")[seq_len(n_alloc)]
+             else colorRampPalette(brewer.pal(8L, "Dark2"))(n_alloc)
+
+n_models <- length(unique(hist_dt$model_type))
+p_hist <- ggplot(hist_dt, aes(x = value, fill = allocation)) +
+  geom_histogram(bins = 30, position = "stack", colour = "white", linewidth = 0.1) +
+  facet_wrap(vars(model_type, metric), scales = "free", ncol = 3) +
+  scale_fill_manual(name = "allocation", values = pal_alloc, na.value = "grey60") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  labs(x = NULL, y = "count",
+       title = "Fitted VE / alpha / beta by allocation")
+ggsave(file.path(out_dir, "hist_VE_alpha_beta_by_allocation.png"),
+       p_hist, width = 11, height = max(4, 2.6 * n_models), dpi = 130,
+       limitsize = FALSE)
+fwrite(hist_dt, file.path(out_dir, "hist_VE_alpha_beta_by_allocation.csv"))
 
 # ---------------------------------------------------------------------------
 # VE trajectories
@@ -368,11 +423,11 @@ p_comb <- ggplot(ve_comb, aes(x = t, y = VE_med, group = model_type,
 ggsave(file.path(out_dir, "ve_trajectory_combined.png"),
        p_comb, width = 9, height = 5, dpi = 130)
 
-# Per-model VE summary at the final time, with 95% interval across allocations
+# Per-model VE summary at the final time, with ci_pct% interval across allocations
 ve_final <- ve_alloc[t == max(t),
                      .(VE_med   = median(VE),
-                       VE_q025  = quantile(VE, 0.025),
-                       VE_q975  = quantile(VE, 0.975),
+                       VE_lo    = quantile(VE, q_lo),
+                       VE_hi    = quantile(VE, q_hi),
                        n        = .N),
                      by = .(model_type)]
 fwrite(ve_final, file.path(out_dir, "ve_final.csv"))
@@ -401,7 +456,7 @@ if (nrow(ve_unc_long) > 0) {
   # Variance decomposition: we want a clean "parameter-only" band that
   # doesn't accidentally mix in outer-allocation spread.
   #   1. For each (job, param_sample, t): mean VE over inner sims.
-  #   2. For each (job, t): take the 2.5/50/97.5 quantile across
+  #   2. For each (job, t): mean +/- z_ci * SD across
   #      param_samples -> per-job parameter-only spread.
   #   3. Pool across jobs by averaging the within-job bounds (so the
   #      band is "typical per-allocation parameter uncertainty").
@@ -411,14 +466,14 @@ if (nrow(ve_unc_long) > 0) {
   vu_jps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                   by = .(t, model_type, network_seed, allocation_seed, param_sample)]
 
-  # Parameter-only band: mean +/- 1.96 * SD across param_samples (per job,
+  # Parameter-only band: mean +/- z_ci * SD across param_samples (per job,
   # per t), then average bounds across jobs. SD-based CI is stabler than
-  # empirical 2.5/97.5% quantiles at small K_post_samples.
+  # empirical tail quantiles at small K_post_samples.
   param_per_job <- vu_jps[, .(med = mean(VE, na.rm = TRUE),
                               lo  = mean(VE, na.rm = TRUE) -
-                                    1.96 * sd(VE, na.rm = TRUE),
+                                    z_ci * sd(VE, na.rm = TRUE),
                               hi  = mean(VE, na.rm = TRUE) +
-                                    1.96 * sd(VE, na.rm = TRUE)),
+                                    z_ci * sd(VE, na.rm = TRUE)),
                           by = .(t, model_type, network_seed, allocation_seed)]
   param_band <- param_per_job[, .(VE_med = mean(med),
                                   lo = mean(lo), hi = mean(hi),
@@ -434,15 +489,15 @@ if (nrow(ve_unc_long) > 0) {
   vu_aps <- ve_unc[, .(VE = mean(VE, na.rm = TRUE)),
                   by = .(t, model_type, network_seed, allocation_seed, sim)]
   alloc_band <- vu_aps[, .(VE_med = median(VE),
-                           lo = quantile(VE, 0.025, na.rm = TRUE),
-                           hi = quantile(VE, 0.975, na.rm = TRUE),
+                           lo = quantile(VE, q_lo, na.rm = TRUE),
+                           hi = quantile(VE, q_hi, na.rm = TRUE),
                            n  = .N),
                        by = .(t, model_type)]
 
   # Total band: SD-based on the pooled param x allocation x sim draws.
   total_band <- ve_unc[, .(VE_med = mean(VE, na.rm = TRUE),
-                           lo = mean(VE, na.rm = TRUE) - 1.96 * sd(VE, na.rm = TRUE),
-                           hi = mean(VE, na.rm = TRUE) + 1.96 * sd(VE, na.rm = TRUE),
+                           lo = mean(VE, na.rm = TRUE) - z_ci * sd(VE, na.rm = TRUE),
+                           hi = mean(VE, na.rm = TRUE) + z_ci * sd(VE, na.rm = TRUE),
                            n  = .N),
                        by = .(t, model_type)]
 
@@ -466,7 +521,7 @@ if (nrow(ve_unc_long) > 0) {
     facet_wrap(~ model_type, scales = "free_y") +
     theme_minimal(base_size = 13) +
     labs(x = "t", y = "VE = 1 - EATE",
-         title = "VE(t) with posterior uncertainty",
+         title = glue("VE(t) with posterior uncertainty ({ci_pct}% intervals)"),
          subtitle = "blue band = parameter uncertainty only; grey band = total (params + allocations)")
   ggsave(file.path(out_dir, "ve_trajectory_with_uncertainty.png"),
          p_unc, width = 11, height = 7, dpi = 130)
@@ -577,15 +632,15 @@ combined_forest <- function(df, xlab, title, vline = NULL, out_file) {
 
 combined_forest(beta_combined,
                 xlab = "beta",
-                title = "beta (pool_nets) across experiments",
+                title = glue("beta (pool_nets) across experiments ({ci_pct}% CI)"),
                 out_file = file.path(combined_dir, "combined_forest_beta.png"))
 combined_forest(alpha_combined,
                 xlab = "alpha",
-                title = "alpha (pool_nets) across experiments",
+                title = glue("alpha (pool_nets) across experiments ({ci_pct}% CI)"),
                 out_file = file.path(combined_dir, "combined_forest_alpha.png"))
 combined_forest(ve_combined,
                 xlab = "VE = 1 - EATE",
-                title = "VE at t* (pool_nets) across experiments",
+                title = glue("VE at t* (pool_nets) across experiments ({ci_pct}% CI)"),
                 out_file = file.path(combined_dir, "combined_forest_VE.png"))
 
 fwrite(beta_combined,  file.path(combined_dir, "combined_beta.csv"))
@@ -626,7 +681,7 @@ if (nrow(ve_combined) && nrow(alpha_combined)) {
           panel.grid.minor = element_blank(),
           strip.background = element_rect(fill = "grey95", colour = NA)) +
     labs(x = NULL, y = NULL,
-         title = "VE (t*) and alpha across experiments (pool_nets)")
+         title = glue("VE (t*) and alpha across experiments (pool_nets, {ci_pct}% CI)"))
 
   h <- max(4, 0.55 * length(lvl))
   ggsave(file.path(combined_dir, "combined_forest_VE_alpha.png"),
