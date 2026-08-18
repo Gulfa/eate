@@ -61,6 +61,14 @@ optim_maxit <- 250
 n_restarts  <- 3
 restart_loss_threshold <- 5
 grid_n      <- 6
+# Common Random Numbers for the fit loss: every loss evaluation uses the
+# SAME fixed set of seeds, so the loss is a deterministic, smooth function
+# of (beta, alpha) rather than being re-randomised at each optim probe.
+# This is what makes Nelder-Mead converge reproducibly (mirrors the CRN
+# already used in estimate_posterior_cov). Averaging over n_seed_opt seeds
+# smooths the surface and reduces the seed-specific bias in (beta, alpha).
+opt_seed    <- 20240517L
+n_seed_opt  <- 3
 log_beta_lo  <- log(0.01); log_beta_hi  <- log(5)
 log_alpha_lo <- log(0.01); log_alpha_hi <- log(2)
 
@@ -120,7 +128,7 @@ base_common <- list(
   gamma = gamma, dt = dt,
   n_sim_opt = n_sim_opt, optim_maxit = optim_maxit,
   n_restarts = n_restarts, restart_loss_threshold = restart_loss_threshold,
-  grid_n = grid_n,
+  grid_n = grid_n, opt_seed = opt_seed, n_seed_opt = n_seed_opt,
   # inner_cores is set by run_one_job per phase from cores_per_node.
   inner_cores = 1L,
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
@@ -284,12 +292,20 @@ materialise_cfg <- function(cfg) {
 # ---------------------------------------------------------------------------
 
 make_loss <- function(simulator, cfg) {
+  # Common Random Numbers: the SAME fixed seeds are reused at every probe,
+  # so the loss is deterministic and smooth in (beta, alpha). Averaging
+  # over the seeds reduces the seed-specific bias of the optimum.
+  seeds <- as.integer(cfg$opt_seed) + seq_len(max(1L, cfg$n_seed_opt)) - 1L
   function(log_par) {
     par <- exp(log_par); beta <- par[1]; alpha <- par[2]
-    out <- tryCatch(simulator(beta, alpha, cfg$n_sim_opt),
-                    error = function(e) NULL)
-    if (is.null(out) || nrow(out) == 0) return(1e9)
-    (mean(out$C1) - cfg$data_C1)^2 + (mean(out$C2) - cfg$data_C2)^2
+    vals <- vapply(seeds, function(s) {
+      out <- tryCatch(simulator(beta, alpha, cfg$n_sim_opt, seed = s),
+                      error = function(e) NULL)
+      if (is.null(out) || nrow(out) == 0) return(NA_real_)
+      (mean(out$C1) - cfg$data_C1)^2 + (mean(out$C2) - cfg$data_C2)^2
+    }, numeric(1))
+    if (all(is.na(vals))) return(1e9)
+    mean(vals, na.rm = TRUE)
   }
 }
 
