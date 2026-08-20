@@ -358,7 +358,8 @@ for (lvl in names(levels_def)) {
 # parameter keeps its own scale.
 # ---------------------------------------------------------------------------
 
-draws_dt <- rbindlist(lapply(ok, function(r) {
+draws_dt <- rbindlist(lapply(seq_along(ok), function(i) {
+  r <- ok[[i]]
   if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
   v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
   if (!nrow(v)) return(NULL)
@@ -369,7 +370,8 @@ draws_dt <- rbindlist(lapply(ok, function(r) {
                beta  = if (has_bk) beta_k[1]  else r$fit$beta,
                alpha = if (has_bk) alpha_k[1] else r$fit$alpha),
            by = param_sample]
-  data.table(model_type      = as.character(r$model_type),
+  data.table(job             = i,
+             model_type      = as.character(r$model_type),
              allocation_seed = r$allocation_seed %||% NA_integer_,
              network_seed    = r$network_seed    %||% NA_integer_,
              pl_alpha        = r$pl_alpha        %||% NA_real_,
@@ -440,6 +442,34 @@ if (!nrow(draws_dt)) {
             file = file.path(out_dir, "hist_VE_alpha_beta_network_by_config.png"))
 
   fwrite(hist_dt, file.path(out_dir, "hist_VE_alpha_beta_draws.csv"))
+
+  # -------------------------------------------------------------------------
+  # Between-allocation spread per model: sd of the per-allocation MEAN of
+  # each metric, plus how tightly VE tracks alpha across allocations.
+  # Explains "alpha varies more across allocations than VE": VE is anchored
+  # by the fitted data, alpha is latent, so sd_between(VE) << sd_between(alpha)
+  # with a shallow dVE/dalpha slope. Grouped by (model, pl_alpha) so network
+  # splits by Pareto exponent; for non-network models pl_alpha is NA and the
+  # spread is genuinely across allocations.
+  # -------------------------------------------------------------------------
+  job_means <- draws_dt[, .(VE    = mean(VE,    na.rm = TRUE),
+                            alpha = mean(alpha, na.rm = TRUE),
+                            beta  = mean(beta,  na.rm = TRUE)),
+                        by = .(model_type, pl_alpha, job)]
+  between_tbl <- job_means[, {
+    has_var <- .N > 1
+    fit_ok  <- .N > 2 && sd(alpha) > 0 && sd(VE) > 0
+    list(n_alloc          = .N,
+         sd_between_beta  = if (has_var) sd(beta)  else 0,
+         sd_between_alpha = if (has_var) sd(alpha) else 0,
+         sd_between_VE    = if (has_var) sd(VE)    else 0,
+         cor_alpha_VE     = if (fit_ok) cor(alpha, VE) else NA_real_,
+         dVE_dalpha       = if (fit_ok) unname(coef(lm(VE ~ alpha))[2]) else NA_real_)
+  }, by = .(model_type, pl_alpha)][order(model_type, pl_alpha)]
+  fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
+  message("\n=== Between-allocation spread (sd of per-allocation means) ===")
+  print(between_tbl[, lapply(.SD, function(x)
+                             if (is.numeric(x)) round(x, 4) else x)])
 }
 
 # ---------------------------------------------------------------------------
