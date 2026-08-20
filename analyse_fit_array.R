@@ -185,36 +185,49 @@ if (n_bad > 0) {
 # combined cross-experiment section that runs after the loop.
 
 # ---------------------------------------------------------------------------
-# Posterior-aware pooling: for a group with multiple fits (e.g. network
-# allocations within a seed), report (mean of betas, sd combining across-
-# allocation spread + per-fit posterior sd). When only one fit is in a
-# group, just use that fit's posterior sd directly.
+# Posterior-aware pooling by BUCKETING draws: pool the posterior draws
+# (beta_k / alpha_k) stored in ve_uncertainty and take their marginal SD
+# directly, so the beta/alpha forests use the EXACT same draws as the
+# by-allocation histograms (and the VE forest, which already buckets its
+# draws). This is the empirical law-of-total-variance: sd_total = sd(all
+# draws) = sqrt(var_within + var_between). The two components are still
+# reported for diagnostics (they need not reconcile exactly with sd_total,
+# since the bucket weights by draw count while the decomposition weights
+# jobs equally). Falls back to the point estimate for legacy results that
+# lack stored draws.
 # ---------------------------------------------------------------------------
 
-pool_param <- function(values, sds) {
-  # Pooled mean
-  mu <- mean(values)
-  # Total variance = mean of within-fit variance + between-fit variance
-  var_within  <- mean(sds^2, na.rm = TRUE)
-  var_between <- if (length(values) > 1) var(values) else 0
-  list(mean = mu, sd = sqrt(var_within + var_between), n = length(values))
-}
-
 summarise_param <- function(ok, group_fn, param) {
-  groups <- list()
-  for (r in ok) {
-    g <- group_fn(r)
-    groups[[g]] <- rbindlist(list(groups[[g]],
-                                  data.table(value = r$fit[[param]],
-                                             sd    = r$posterior_cov$sd[[param]])))
-  }
-  rbindlist(lapply(names(groups), function(g) {
-    p <- pool_param(groups[[g]]$value, groups[[g]]$sd)
-    data.table(group = g, n = p$n,
-               estimate = p$mean,
-               lo = p$mean - z_ci * p$sd,
-               hi = p$mean + z_ci * p$sd)
-  }))[order(sapply(group, order_key))]
+  col <- paste0(param, "_k")
+  draws <- rbindlist(lapply(seq_along(ok), function(i) {
+    r   <- ok[[i]]
+    grp <- group_fn(r)
+    vu  <- r$ve_uncertainty
+    if (is.null(vu) || !nrow(vu) || !(col %in% names(vu)))
+      return(data.table(group = grp, job = i, value = r$fit[[param]]))
+    v  <- vu[method == "full_stoch"]
+    if (!nrow(v)) v <- vu
+    dd <- unique(v[, .(param_sample, value = get(col))])
+    data.table(group = grp, job = i, value = dd$value)
+  }))
+
+  # Within/between decomposition (equal weight per job), for diagnostics.
+  per_job <- draws[, .(job_mean = mean(value, na.rm = TRUE),
+                       job_var  = var(value,  na.rm = TRUE)),
+                   by = .(group, job)]
+  decomp <- per_job[, .(sd_within  = sqrt(mean(job_var, na.rm = TRUE)),
+                        sd_between = if (.N > 1) sd(job_mean) else 0,
+                        n_jobs     = .N),
+                    by = group]
+  # Bucketed marginal SD (matches the histogram exactly).
+  s <- draws[, .(n        = .N,
+                 estimate = mean(value, na.rm = TRUE),
+                 sd_total = sd(value,   na.rm = TRUE)),
+             by = group]
+  s <- merge(s, decomp, by = "group")
+  s[, lo := estimate - z_ci * sd_total]
+  s[, hi := estimate + z_ci * sd_total]
+  s[order(sapply(group, order_key))]
 }
 
 forest_plot <- function(df, title, xlab, vline = NULL) {
