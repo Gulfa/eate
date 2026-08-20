@@ -1547,3 +1547,85 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                             mc.cores = mc.cores)
   rbindlist(res, fill = TRUE)
 }
+
+# Separate-populations SIR EATE. Two INDEPENDENT copies of the standard
+# 2-group trial population (block-diagonal contact matrix, no cross-block
+# mixing): the unvaccinated arm is observed in block A, the vaccinated arm
+# in block B, so the two arms experience independent epidemic realisations.
+# Losing the shared force-of-infection removes the final-size cancellation,
+# giving larger alpha / VE uncertainty than get_stoch_eate_sir. Structure
+# otherwise mirrors get_stoch_eate_sir for a clean A/B comparison.
+#
+# Within-block mixing entry = sum(N)/N_block = 2, so each block reproduces
+# the standard model's R0 = beta/gamma (FOI ~ mixing * I / sum(N), see
+# stoch_sir.R). Groups: [unvac_A, vac_A | unvac_B, vac_B].
+get_stoch_eate_sir_separate <- function(beta = 1, susceptibility = c(1, 1),
+                                        f = 0.5, N = 200, t = 30, gamma = 1,
+                                        I_ini = c(2, 2), n_vac = 10, n_rep = 20,
+                                        dt = 0.1, timepoints = NULL,
+                                        mc.cores = 10, inner_cores = 1,
+                                        seed = NULL) {
+  alpha <- susceptibility[2]
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t     <- length(timepoints)
+  N_unvac <- round(N * (1 - f))
+  N_vac   <- N - N_unvac
+  N_tot   <- N_unvac + N_vac
+
+  w      <- 2                              # sum(N)/N_block for two equal blocks
+  mixing <- matrix(c(w, w, 0, 0,
+                     w, w, 0, 0,
+                     0, 0, w, w,
+                     0, 0, w, w), nrow = 4, byrow = TRUE)
+  N_grp   <- c(N_unvac, N_vac, N_unvac, N_vac)
+  sus_grp <- c(1, alpha, 1, alpha)
+  I_grp   <- c(I_ini, I_ini)
+
+  run_one_allocation <- function() {
+    sim_id <- runif(1)
+    raw <- run_stoch_cd_dust(
+      mixing, beta = beta, N = N_grp, t = t, I_ini = I_grp,
+      susceptibility = sus_grp, gamma = gamma, dt = dt,
+      timepoints = timepoints, n_sim = n_rep, cores = inner_cores, seed = seed)
+    setDT(raw)
+
+    # Block A drives the unvaccinated-arm FOI; block B the vaccinated-arm.
+    # Each uses only its own block's infecteds -> independent realisations.
+    IA <- .dt_col_to_t_rep_matrix(raw$I1, n_t, n_rep) +
+          .dt_col_to_t_rep_matrix(raw$I2, n_t, n_rep)
+    IB <- .dt_col_to_t_rep_matrix(raw$I3, n_t, n_rep) +
+          .dt_col_to_t_rep_matrix(raw$I4, n_t, n_rep)
+    cum_foi_A <- .cum_trapz(beta * IA / N_tot, timepoints)
+    cum_foi_B <- .cum_trapz(beta * IB / N_tot, timepoints)
+
+    # Counterfactuals use each arm's OWN (independent) block FOI.
+    P_vac_cf   <- 1 - rowMeans(exp(-alpha * cum_foi_A))  # unvac arm if vaccinated
+    P_unvac_cf <- 1 - rowMeans(exp(-1     * cum_foi_B))  # vac arm if unvaccinated
+
+    C1_mat <- .dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)  # unvac arm (block A)
+    C4_mat <- .dt_col_to_t_rep_matrix(raw$C4, n_t, n_rep)  # vac arm   (block B)
+    P_fac_unvac <- rowMeans(C1_mat) / N_unvac
+    P_fac_vac   <- rowMeans(C4_mat) / N_vac
+
+    num_t   <- N_vac   * P_fac_vac   + N_unvac * P_vac_cf
+    denom_t <- N_unvac * P_fac_unvac + N_vac   * P_unvac_cf
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N_tot
+    crr_t     <- P_fac_vac / P_fac_unvac
+    crr_ave_t <- P_fac_unvac - P_fac_vac
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}

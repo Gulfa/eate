@@ -155,6 +155,12 @@ build_configs_for_experiment <- function(exp) {
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__sir"),
     model_type = "sir", ve_n_vac = 1))
+  # Separate-populations SIR: same sizes/data as `sir` but the two arms are
+  # observed in independent epidemics (block-diagonal contacts), so the
+  # final-size cancellation is lost -> larger alpha / VE uncertainty.
+  cs[[length(cs)+1]] <- modifyList(base, list(
+    name = glue("{exp$id}__sir_separate"),
+    model_type = "sir_separate", ve_n_vac = 1))
 
   # Frailty models: allocation matters (which bins get vaccinated).
   for (alloc_seed in seq_len(n_allocations_frailty)) {
@@ -221,6 +227,28 @@ build_simulator <- function(cfg) {
         gamma = cfg$gamma, dt = cfg$dt,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores, seed = seed), cfg$t_star)
+    },
+    sir_separate = function(beta, alpha, n_sim, seed = NULL) {
+      # Two independent copies of the 2-group trial population, block-
+      # diagonal contact matrix (within-block = 2 = sum(N)/N_block so each
+      # block keeps R0 = beta/gamma). Observe the unvaccinated arm from
+      # block A (C1) and the vaccinated arm from block B (C4): independent
+      # epidemics, so no final-size cancellation -> larger alpha / VE CI.
+      w      <- 2
+      mixing <- matrix(c(w, w, 0, 0,
+                         w, w, 0, 0,
+                         0, 0, w, w,
+                         0, 0, w, w), nrow = 4, byrow = TRUE)
+      out <- run_stoch_cd_dust(
+        mixing, beta = beta,
+        N = c(cfg$N_cont, cfg$N_vac, cfg$N_cont, cfg$N_vac),
+        t = cfg$t_star, I_ini = c(cfg$I_ini_2g, cfg$I_ini_2g),
+        susceptibility = c(1, alpha, 1, alpha),
+        gamma = cfg$gamma, dt = cfg$dt,
+        timepoints = seq(1, cfg$t_star, 1),
+        n_sim = n_sim, cores = cfg$inner_cores, seed = seed)
+      setDT(out)
+      out[time == cfg$t_star, .(sim, C1 = C1, C2 = C4)]
     },
     sir_sus_frailty = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_frailty_cd(
@@ -361,6 +389,11 @@ compute_ve <- function(cfg, beta, alpha) {
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
+    sir_separate = get_stoch_eate_sir_separate(
+      beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
+      t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
+      n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
+      dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
     sir_sus_frailty = ,
     sir_trans_frailty = get_stoch_eate_frailty(
       alpha = alpha, sd = cfg$sd, sd_trans = cfg$sd_trans, beta = beta,
@@ -468,6 +501,27 @@ run_one_job <- function(cfg) {
   message(glue("[{cfg$name}] sd_beta = {signif(pcov$sd['beta'], 3)}  ",
                "sd_alpha = {signif(pcov$sd['alpha'], 3)}"))
 
+  # Fit-quality diagnostics: compare the fit residuals to the Monte-Carlo
+  # noise floor. Sigma is the per-realisation Var(C); residuals are the
+  # model-vs-data gap at the optimum (pcov$base, post_cov_n_sim reps).
+  #   loss_floor = E[fit$loss] at a perfect fit = tr(Sigma) / n_sim_opt.
+  #   loss_chisq = residuals normalised by their SE^2 (~chi-square with 2
+  #                df); ~2 is a perfect fit, > ~6 (95th pct) signals a
+  #                genuine misfit the model cannot reach, not just noise.
+  Sig        <- pcov$Sigma
+  n_bp       <- cfg$post_cov_n_sim
+  resid_C1   <- mean(pcov$base$C1) - cfg$data_C1
+  resid_C2   <- mean(pcov$base$C2) - cfg$data_C2
+  loss_floor <- (Sig[1, 1] + Sig[2, 2]) / cfg$n_sim_opt
+  loss_chisq <- if (Sig[1, 1] > 0 && Sig[2, 2] > 0)
+                  resid_C1^2 / (Sig[1, 1] / n_bp) +
+                  resid_C2^2 / (Sig[2, 2] / n_bp)
+                else NA_real_
+  message(glue("[{cfg$name}] loss = {round(fit$loss, 3)}  ",
+               "floor = {signif(loss_floor, 3)}  ",
+               "chisq = {signif(loss_chisq, 3)}",
+               "{if (is.finite(loss_chisq) && loss_chisq > 6) '  [MISFIT]' else ''}"))
+
   # Point-estimate VE (single call, one lot of n_vac x n_rep dust
   # replicates). Same phase strategy as fit.
   message(glue("[{cfg$name}] VE..."))
@@ -493,6 +547,10 @@ run_one_job <- function(cfg) {
     fit             = fit,
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),
+    loss_floor      = loss_floor,
+    loss_chisq      = loss_chisq,
+    resid_C1        = resid_C1,
+    resid_C2        = resid_C2,
     ve              = ve,
     ve_uncertainty  = ve_unc
   )

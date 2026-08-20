@@ -85,7 +85,7 @@ labels_L3_pool_nets <- function(r) {
 }
 
 order_key <- function(label) {
-  if (label %in% c("linear", "sir")) return(paste0("0_", label))
+  if (label %in% c("linear", "sir", "sir_separate")) return(paste0("0_", label))
   if (grepl("frailty", label))       return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
   paste0("3_", label)
@@ -96,8 +96,9 @@ order_key <- function(label) {
 # variants. Anything unrecognised falls through unchanged.
 display_name <- function(x) {
   vapply(as.character(x), function(g) {
-    if (g == "linear") return("Linear")
-    if (g == "sir")    return("SIR (homogeneous)")
+    if (g == "linear")       return("Linear")
+    if (g == "sir")          return("SIR (homogeneous)")
+    if (g == "sir_separate") return("SIR (separate pops)")
     if (grepl("^sus_frailty(_a[0-9]+)?$", g)) {
       s <- sub("^sus_frailty",  "SIR + sus. frailty",  g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))
@@ -139,6 +140,8 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
     beta            = r$fit$beta,
     alpha           = r$fit$alpha,
     loss            = r$fit$loss,
+    loss_floor      = r$loss_floor %||% NA_real_,
+    loss_chisq      = r$loss_chisq %||% NA_real_,
     convergence     = r$fit$convergence,
     sd_beta         = r$posterior_cov$sd[["beta"]],
     cor_ba          = r$posterior_cov$cov[1, 2] /
@@ -152,14 +155,30 @@ fit_dt[, beta_lo  := beta  - z_ci * sd_beta]
 fit_dt[, beta_hi  := beta  + z_ci * sd_beta]
 fit_dt[, alpha_lo := alpha - z_ci * sd_alpha]
 fit_dt[, alpha_hi := alpha + z_ci * sd_alpha]
+# Fit-quality flags: loss relative to the MC noise floor, and a
+# chi-square-scaled misfit test (~2 = perfect fit, > 6 = genuine misfit).
+fit_dt[, loss_ratio := loss / loss_floor]
+# NA (not FALSE) when chisq is unavailable (e.g. legacy results), so old
+# fits aren't miscounted as misfits.
+fit_dt[, acceptable := fifelse(is.finite(loss_chisq), loss_chisq <= 6, NA)]
 
 fwrite(fit_dt, file.path(out_dir, "fit_summary.csv"))
 message("\n=== Fit diagnostics ===")
-print(fit_dt[, .(min_loss = min(loss), med_loss = median(loss),
-                 max_loss = max(loss),
+print(fit_dt[, .(med_loss     = round(median(loss), 3),
+                 med_floor    = round(median(loss_floor), 3),
+                 med_chisq    = round(median(loss_chisq), 2),
+                 max_chisq    = round(max(loss_chisq), 2),
+                 n_misfit     = sum(!acceptable, na.rm = TRUE),
                  conv_nonzero = sum(convergence != 0),
                  n = .N),
              by = model_type])
+n_bad <- sum(!fit_dt$acceptable, na.rm = TRUE)
+if (n_bad > 0) {
+  message(glue("\n{n_bad} fit(s) with loss_chisq > 6 (genuine misfit):"))
+  print(fit_dt[!(acceptable), .(name, loss, loss_floor,
+                                loss_chisq = round(loss_chisq, 2))][
+                                order(-loss_chisq)][seq_len(min(.N, 20))])
+}
 
 # Group labels / order_key are defined at top-level scope (above the
 # function definition) so they're visible both here and in the
