@@ -398,10 +398,23 @@ if (!nrow(draws_dt)) {
     d[, rowf  := factor(get(rowvar))]
     d[, fillf := factor(get(fill_col))]
     pal <- dark2_pal(length(levels(d$fillf)))
+
+    # Central 80% (10/90) and 95% (2.5/97.5) percentile edges of the pooled
+    # draws, per panel (rowf x metric), as vertical lines.
+    qs <- d[, {
+      p <- quantile(value, c(0.025, 0.10, 0.90, 0.975), na.rm = TRUE)
+      list(interval = c("95%", "80%", "80%", "95%"), x = as.numeric(p))
+    }, by = .(rowf, metric)]
+    qs[, interval := factor(interval, levels = c("80%", "95%"))]
+
     p <- ggplot(d, aes(x = value, fill = fillf)) +
       geom_histogram(bins = 40, position = "stack", colour = "white", linewidth = 0.1) +
+      geom_vline(data = qs, aes(xintercept = x, linetype = interval),
+                 inherit.aes = FALSE, colour = "grey20", linewidth = 0.4) +
       facet_wrap(vars(rowf, metric), scales = "free", ncol = 3) +
       scale_fill_manual(name = fill_name, values = pal, na.value = "grey60") +
+      scale_linetype_manual(name = "central interval",
+                            values = c("80%" = "dashed", "95%" = "dotted")) +
       theme_bw(base_size = 13) +
       theme(panel.grid.minor = element_blank(),
             strip.background = element_rect(fill = "grey95", colour = NA)) +
