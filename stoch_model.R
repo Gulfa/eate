@@ -813,7 +813,7 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
                                   n_frailty=100, gamma=1/2, vac_counts=NULL,
                                   I_ini_total=1, timepoints=seq(0, t, 1), n_sim=100, cores=10,
                                   method=c("ctmc", "dust"), dt=0.1, susceptibility=c(1,0.5),
-                                  seed=NULL) {
+                                  frailty_amp=2.5, seed=NULL) {
   method <- match.arg(method)
   alpha <- susceptibility[2] 
   if (!is.null(R)) beta <- get_beta(R, alpha, sd, sd_trans=sd_trans, f=f, N=N, n_frailty=n_frailty, gamma=gamma)
@@ -832,7 +832,7 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
   # the mean transmission rate — beta therefore retains the R0 = beta/gamma
   # interpretation in the homogeneous limit.
   frailty <- if (sd > 0) {
-    raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+    raw <- exp(frailty_amp * fr$x); raw / sum(fr$p * raw)
   } else rep(1, n_frailty)
 
   # Per-bin transmissibility frailty, rank-correlated with sus. If sd_trans
@@ -840,12 +840,12 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
   # otherwise map ranks through the matching Beta inverse CDF.
   trans_frailty <- if (sd_trans > 0) {
     raw <- if (sd_trans == sd_pop) {
-      exp(2.5 * fr$x)
+      exp(frailty_amp * fr$x)
     } else {
       cf_pop        <- (0.25 / sd_pop^2)   - 1
       cf_t          <- (0.25 / sd_trans^2) - 1
       ranks         <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
-      exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
+      exp(frailty_amp * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
     }
     raw / sum(fr$p * raw)
   } else {
@@ -1226,7 +1226,7 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
                                    n_vac = 10, n_rep = 20,
                                    gamma = 1, dt = 0.1, timepoints = NULL,
                                    I_ini_total = 1, mc.cores = 10,
-                                   inner_cores = 1) {
+                                   inner_cores = 1, frailty_amp = 2.5) {
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
 
@@ -1246,16 +1246,16 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
     fr_p    <- fr$p
     # Frailty arrays normalised to population-mean 1; see run_stoch_frailty_cd.
     frailty <- if (sd > 0) {
-      raw <- exp(2.5 * fr$x); raw / sum(fr$p * raw)
+      raw <- exp(frailty_amp * fr$x); raw / sum(fr$p * raw)
     } else rep(1, n_frailty)
     trans_frailty <- if (sd_trans > 0) {
       raw <- if (sd_trans == sd_pop) {
-        exp(2.5 * fr$x)
+        exp(frailty_amp * fr$x)
       } else {
         cf_pop <- (0.25 / sd_pop^2)   - 1
         cf_t   <- (0.25 / sd_trans^2) - 1
         ranks  <- pbeta(fr$x, 0.5 * cf_pop, 0.5 * cf_pop)
-        exp(2.5 * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
+        exp(frailty_amp * qbeta(ranks, 0.5 * cf_t, 0.5 * cf_t))
       }
       raw / sum(fr$p * raw)
     } else {

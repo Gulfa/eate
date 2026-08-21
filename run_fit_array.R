@@ -163,16 +163,20 @@ build_configs_for_experiment <- function(exp) {
     model_type = "sir_separate", ve_n_vac = 1))
 
   # Frailty models: allocation matters (which bins get vaccinated).
+  # Per-bin susceptibility is exp(frailty_amp * x), x ~ Beta on [0,1]
+  # (mean-1 normalised). The Beta `sd` (capped < 0.5) sets how bimodal x is;
+  # `frailty_amp` sets how strongly that maps into susceptibility, so it is
+  # the unbounded lever for total frailty heterogeneity.
   for (alloc_seed in seq_len(n_allocations_frailty)) {
     cs[[length(cs)+1]] <- modifyList(base, list(
       name            = glue("{exp$id}__sir_sus_frailty_a{alloc_seed}"),
       model_type      = "sir_sus_frailty",
-      sd = 0.3, sd_trans = 0, n_frailty = 10,
+      sd = 0.3, sd_trans = 0, n_frailty = 10, frailty_amp = 2.5,
       allocation_seed = alloc_seed))
     cs[[length(cs)+1]] <- modifyList(base, list(
       name            = glue("{exp$id}__sir_trans_frailty_a{alloc_seed}"),
       model_type      = "sir_trans_frailty",
-      sd = 0, sd_trans = 0.3, n_frailty = 10,
+      sd = 0, sd_trans = 0.3, n_frailty = 10, frailty_amp = 2.5,
       allocation_seed = alloc_seed))
   }
 
@@ -260,7 +264,8 @@ build_simulator <- function(cfg) {
         vac_counts = cfg$.vac_counts,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
-        method = "dust", dt = cfg$dt, f = 0.5, seed = seed), cfg$t_star)
+        method = "dust", dt = cfg$dt, f = 0.5,
+        frailty_amp = cfg$frailty_amp %||% 2.5, seed = seed), cfg$t_star)
     },
     sir_trans_frailty = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_frailty_cd(
@@ -272,7 +277,8 @@ build_simulator <- function(cfg) {
         vac_counts = cfg$.vac_counts,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
-        method = "dust", dt = cfg$dt, f = 0.5, seed = seed), cfg$t_star)
+        method = "dust", dt = cfg$dt, f = 0.5,
+        frailty_amp = cfg$frailty_amp %||% 2.5, seed = seed), cfg$t_star)
     },
     network = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_network(
@@ -401,7 +407,8 @@ compute_ve <- function(cfg, beta, alpha) {
       n_frailty = cfg$n_frailty, gamma = cfg$gamma,
       I_ini_total = sum(cfg$I_ini_2g),
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
-      timepoints = tp, mc.cores = cfg$inner_cores),
+      timepoints = tp, mc.cores = cfg$inner_cores,
+      frailty_amp = cfg$frailty_amp %||% 2.5),
     network = get_stoch_eate_network(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, c_ij = cfg$.c_ij, k_mean = cfg$mean_k,
