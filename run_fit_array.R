@@ -118,11 +118,18 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 #   - n_networks x n_allocations configs for network
 # ---------------------------------------------------------------------------
 
-n_networks            <- 10
-n_allocations         <- 10   # outer allocations per network_seed
-n_allocations_frailty <- 10   # outer allocations per frailty config
-pl_alphas             <- c(2, 3, 5)   # Pareto exponents to sweep (kept separate)
-mean_k                <- 6
+n_networks              <- 10
+n_allocations           <- 10   # outer allocations per network_seed
+n_allocations_frailty   <- 10   # outer allocations per frailty config
+n_allocations_multisite <- 10   # outer allocations per multi-site config
+pl_alphas               <- c(2, 3, 5)   # Pareto exponents to sweep (kept separate)
+mean_k                  <- 6
+
+# Multi-site RCT knobs. n_sites locations; site_icc in [0,1] is the intra-site
+# correlation of vaccine status (0 = individually randomised / max within-site
+# cancellation, 1 = cluster randomised / fully separated arms). Edit to vary.
+multisite_n_sites <- 4
+multisite_icc     <- 0.5
 
 base_common <- list(
   gamma = gamma, dt = dt,
@@ -155,12 +162,18 @@ build_configs_for_experiment <- function(exp) {
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__sir"),
     model_type = "sir", ve_n_vac = 1))
-  # Separate-populations SIR: same sizes/data as `sir` but the two arms are
-  # observed in independent epidemics (block-diagonal contacts), so the
-  # final-size cancellation is lost -> larger alpha / VE uncertainty.
-  cs[[length(cs)+1]] <- modifyList(base, list(
-    name = glue("{exp$id}__sir_separate"),
-    model_type = "sir_separate", ve_n_vac = 1))
+  # Multi-site RCT: n_sites locations, per-site vaccine fraction dispersion
+  # set by site_icc (0 = individually randomised / max within-site
+  # cancellation, 1 = cluster randomised / fully separated). The allocation
+  # (which sites cluster how) varies by seed, so loop it like the frailty
+  # models. ve_n_vac inherits base (draws fresh site allocations for VE).
+  for (alloc_seed in seq_len(n_allocations_multisite)) {
+    cs[[length(cs)+1]] <- modifyList(base, list(
+      name            = glue("{exp$id}__sir_multisite_a{alloc_seed}"),
+      model_type      = "sir_multisite",
+      n_sites = multisite_n_sites, site_icc = multisite_icc,
+      allocation_seed = alloc_seed))
+  }
 
   # Frailty models: allocation matters (which bins get vaccinated).
   # Per-bin susceptibility is exp(frailty_amp * x), x ~ Beta on [0,1]
@@ -232,27 +245,29 @@ build_simulator <- function(cfg) {
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores, seed = seed), cfg$t_star)
     },
-    sir_separate = function(beta, alpha, n_sim, seed = NULL) {
-      # Two independent copies of the 2-group trial population, block-
-      # diagonal contact matrix (within-block = 2 = sum(N)/N_block so each
-      # block keeps R0 = beta/gamma). Observe the unvaccinated arm from
-      # block A (C1) and the vaccinated arm from block B (C4): independent
-      # epidemics, so no final-size cancellation -> larger alpha / VE CI.
-      w      <- 2
-      mixing <- matrix(c(w, w, 0, 0,
-                         w, w, 0, 0,
-                         0, 0, w, w,
-                         0, 0, w, w), nrow = 4, byrow = TRUE)
+    sir_multisite = function(beta, alpha, n_sim, seed = NULL) {
+      # L sites, block-diagonal; per-site vaccine allocation from
+      # cfg$.vac_sites (materialised from site_icc). Pool cases across sites:
+      # C1 = sum unvaccinated cases, C2 = sum vaccinated cases. site_icc
+      # controls within-site cancellation (0 = balanced, 1 = clustered).
+      L          <- cfg$n_sites
+      N_site_vec <- multisite_site_sizes(cfg$N_cont + cfg$N_vac, L)
+      vac_l      <- cfg$.vac_sites
+      N_grp      <- as.integer(rbind(N_site_vec - vac_l, vac_l))
+      sus_grp    <- as.numeric(rbind(rep(1, L), rep(alpha, L)))
+      mm         <- multisite_block_matrix(L, L)
+      I_grp      <- .spread_seeds(sum(cfg$I_ini_2g), N_grp)
       out <- run_stoch_cd_dust(
-        mixing, beta = beta,
-        N = c(cfg$N_cont, cfg$N_vac, cfg$N_cont, cfg$N_vac),
-        t = cfg$t_star, I_ini = c(cfg$I_ini_2g, cfg$I_ini_2g),
-        susceptibility = c(1, alpha, 1, alpha),
-        gamma = cfg$gamma, dt = cfg$dt,
+        mm, beta = beta, N = N_grp, t = cfg$t_star, I_ini = I_grp,
+        susceptibility = sus_grp, gamma = cfg$gamma, dt = cfg$dt,
         timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores, seed = seed)
       setDT(out)
-      out[time == cfg$t_star, .(sim, C1 = C1, C2 = C4)]
+      fin <- out[time == cfg$t_star]
+      uc <- paste0("C", seq(1, 2L * L, 2)); vc <- paste0("C", seq(2, 2L * L, 2))
+      data.table(sim = fin$sim,
+                 C1 = rowSums(as.matrix(fin[, ..uc])),
+                 C2 = rowSums(as.matrix(fin[, ..vc])))
     },
     sir_sus_frailty = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_frailty_cd(
@@ -316,6 +331,15 @@ materialise_cfg <- function(cfg) {
     set.seed(cfg$allocation_seed)
     cfg$.vac_counts <- tabulate(bin[sample(length(bin), cfg$N_vac)],
                                 nbins = length(n_total))
+    set.seed(NULL)
+  } else if (cfg$model_type == "sir_multisite") {
+    # Per-site vaccinated counts from the allocation_seed (fixed for the fit;
+    # the EATE draws fresh site allocations). site_icc sets the dispersion.
+    N_site_vec <- multisite_site_sizes(cfg$N_cont + cfg$N_vac, cfg$n_sites)
+    set.seed(cfg$allocation_seed)
+    cfg$.vac_sites <- multisite_vac_counts(
+      N_site_vec, cfg$N_vac,
+      cfg$N_vac / (cfg$N_cont + cfg$N_vac), cfg$site_icc)
     set.seed(NULL)
   }
   cfg
@@ -395,9 +419,10 @@ compute_ve <- function(cfg, beta, alpha) {
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
-    sir_separate = get_stoch_eate_sir_separate(
+    sir_multisite = get_stoch_eate_sir_multisite(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
+      n_sites = cfg$n_sites, site_icc = cfg$site_icc,
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
     sir_sus_frailty = ,

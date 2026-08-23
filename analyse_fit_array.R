@@ -66,6 +66,7 @@ labels_L1_all_splits <- function(r) {
                                      .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
          sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
          sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
+         sir_multisite     = sprintf("sir_multisite_a%02d", r$allocation_seed),
          r$model_type)
 }
 labels_L2_pool_allocs <- function(r) {
@@ -85,8 +86,9 @@ labels_L3_pool_nets <- function(r) {
 }
 
 order_key <- function(label) {
-  if (label %in% c("linear", "sir", "sir_separate")) return(paste0("0_", label))
+  if (label %in% c("linear", "sir", "sir_multisite")) return(paste0("0_", label))
   if (grepl("frailty", label))       return(paste0("1_", label))
+  if (grepl("multisite", label))     return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
   paste0("3_", label)
 }
@@ -98,7 +100,10 @@ display_name <- function(x) {
   vapply(as.character(x), function(g) {
     if (g == "linear")       return("Linear")
     if (g == "sir")          return("SIR (homogeneous)")
-    if (g == "sir_separate") return("SIR (separate pops)")
+    if (grepl("^sir_multisite(_a[0-9]+)?$", g)) {
+      s <- sub("^sir_multisite", "SIR multi-site", g)
+      return(sub("_a([0-9]+)$", " (alloc \\1)", s))
+    }
     if (grepl("^sus_frailty(_a[0-9]+)?$", g)) {
       s <- sub("^sus_frailty",  "SIR + sus. frailty",  g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))

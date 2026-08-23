@@ -1548,69 +1548,138 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
   rbindlist(res, fill = TRUE)
 }
 
-# Separate-populations SIR EATE. Two INDEPENDENT copies of the standard
-# 2-group trial population (block-diagonal contact matrix, no cross-block
-# mixing): the unvaccinated arm is observed in block A, the vaccinated arm
-# in block B, so the two arms experience independent epidemic realisations.
-# Losing the shared force-of-infection removes the final-size cancellation,
-# giving larger alpha / VE uncertainty than get_stoch_eate_sir. Structure
-# otherwise mirrors get_stoch_eate_sir for a clean A/B comparison.
+# ---------------------------------------------------------------------------
+# Multi-site RCT helpers (shared by the fit simulator in run_fit_array and the
+# EATE below). L sites, each a full randomised 2-group trial population laid
+# out block-diagonally so sites share no force-of-infection. Groups are
+# interleaved [unvac_1, vac_1, unvac_2, vac_2, ...]; the within-site mixing
+# weight = sum(N)/N_site = L so each site keeps R0 = beta/gamma.
 #
-# Within-block mixing entry = sum(N)/N_block = 2, so each block reproduces
-# the standard model's R0 = beta/gamma (FOI ~ mixing * I / sum(N), see
-# stoch_sir.R). Groups: [unvac_A, vac_A | unvac_B, vac_B].
-get_stoch_eate_sir_separate <- function(beta = 1, susceptibility = c(1, 1),
-                                        f = 0.5, N = 200, t = 30, gamma = 1,
-                                        I_ini = c(2, 2), n_vac = 10, n_rep = 20,
-                                        dt = 0.1, timepoints = NULL,
-                                        mc.cores = 10, inner_cores = 1,
-                                        seed = NULL) {
+# site_icc in [0,1] is the intra-site correlation of vaccine status:
+#   0 -> every site has fraction f vaccinated (individually randomised;
+#        maximal within-site cancellation),
+#   1 -> whole sites are single-arm (cluster randomised),
+# with the global vaccinated total held fixed. A Beta(f*kappa,(1-f)*kappa)
+# with concentration kappa = (1-icc)/icc interpolates between the two.
+# ---------------------------------------------------------------------------
+
+# Integer partition of N_tot into L (near-equal) site sizes.
+multisite_site_sizes <- function(N_tot, L) {
+  as.integer(diff(round(seq(0, N_tot, length.out = L + 1L))))
+}
+
+# Per-site vaccinated counts. Uses the current RNG stream, so set the seed in
+# the caller for reproducibility. Returns integers in [0, N_site_vec] summing
+# exactly to N_vac_total.
+multisite_vac_counts <- function(N_site_vec, N_vac_total, f, icc) {
+  L <- length(N_site_vec)
+  p <- if (icc <= 0) {
+    rep(f, L)
+  } else if (icc >= 1) {
+    n_vac_sites <- round(f * L)
+    pv <- rep(0, L)
+    if (n_vac_sites > 0L) pv[sample.int(L, n_vac_sites)] <- 1
+    pv
+  } else {
+    kappa <- (1 - icc) / icc
+    rbeta(L, f * kappa, (1 - f) * kappa)
+  }
+  vac  <- pmin(pmax(round(p * N_site_vec), 0), N_site_vec)
+  # Nudge one unit at a time to hit N_vac_total exactly, respecting caps.
+  step  <- sign(N_vac_total - sum(vac))
+  guard <- 0L
+  while (sum(vac) != N_vac_total && guard < 1000L * L) {
+    elig <- if (step > 0) which(vac < N_site_vec) else which(vac > 0L)
+    if (!length(elig)) break
+    i <- elig[sample.int(length(elig), 1L)]
+    vac[i] <- vac[i] + step
+    guard  <- guard + 1L
+  }
+  as.integer(vac)
+}
+
+# Distribute `total` initial infecteds across groups proportional to size.
+.spread_seeds <- function(total, sizes) {
+  if (total <= 0L || sum(sizes) == 0L) return(integer(length(sizes)))
+  target <- total * sizes / sum(sizes)
+  ini    <- pmin(floor(target), sizes)
+  rem    <- total - sum(ini)
+  if (rem > 0L) for (idx in order(target - ini, decreasing = TRUE)) {
+    if (rem == 0L) break
+    if (ini[idx] < sizes[idx]) { ini[idx] <- ini[idx] + 1L; rem <- rem - 1L }
+  }
+  as.integer(ini)
+}
+
+# 2L x 2L block-diagonal contact matrix, interleaved unvac/vac per site.
+multisite_block_matrix <- function(L, w) {
+  n  <- 2L * L
+  mm <- matrix(0, n, n)
+  for (l in seq_len(L)) {
+    idx <- c(2L * l - 1L, 2L * l)
+    mm[idx, idx] <- w
+  }
+  mm
+}
+
+# Multi-site RCT EATE. L independent sites (block-diagonal), each randomised
+# with per-site vaccine fraction set by site_icc; factual cases pooled across
+# sites, counterfactuals use each site's own FOI. icc=0 is the individually
+# randomised design (within-site cancellation); icc=1 is the cluster /
+# fully-separated extreme. Structure mirrors get_stoch_eate_sir per site.
+get_stoch_eate_sir_multisite <- function(beta = 1, susceptibility = c(1, 1),
+                                         f = 0.5, N = 200, t = 30, gamma = 1,
+                                         I_ini = c(2, 2), n_sites = 2,
+                                         site_icc = 0, n_vac = 10, n_rep = 20,
+                                         dt = 0.1, timepoints = NULL,
+                                         mc.cores = 10, inner_cores = 1,
+                                         seed = NULL) {
   alpha <- susceptibility[2]
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
-  n_t     <- length(timepoints)
-  N_unvac <- round(N * (1 - f))
-  N_vac   <- N - N_unvac
-  N_tot   <- N_unvac + N_vac
-
-  w      <- 2                              # sum(N)/N_block for two equal blocks
-  mixing <- matrix(c(w, w, 0, 0,
-                     w, w, 0, 0,
-                     0, 0, w, w,
-                     0, 0, w, w), nrow = 4, byrow = TRUE)
-  N_grp   <- c(N_unvac, N_vac, N_unvac, N_vac)
-  sus_grp <- c(1, alpha, 1, alpha)
-  I_grp   <- c(I_ini, I_ini)
+  n_t         <- length(timepoints)
+  N_tot       <- round(N)
+  L           <- n_sites
+  N_vac_total <- round(N_tot * f)
+  N_site_vec  <- multisite_site_sizes(N_tot, L)
+  mm          <- multisite_block_matrix(L, L)   # within-site weight = L
+  I_total     <- sum(I_ini)
 
   run_one_allocation <- function() {
-    sim_id <- runif(1)
-    raw <- run_stoch_cd_dust(
-      mixing, beta = beta, N = N_grp, t = t, I_ini = I_grp,
-      susceptibility = sus_grp, gamma = gamma, dt = dt,
-      timepoints = timepoints, n_sim = n_rep, cores = inner_cores, seed = seed)
+    sim_id  <- runif(1)
+    vac_l   <- multisite_vac_counts(N_site_vec, N_vac_total, f, site_icc)
+    unvac_l <- N_site_vec - vac_l
+    N_grp   <- as.integer(rbind(unvac_l, vac_l))          # interleaved
+    sus_grp <- as.numeric(rbind(rep(1, L), rep(alpha, L)))
+    I_grp   <- .spread_seeds(I_total, N_grp)
+
+    raw <- run_stoch_cd_dust(mm, beta = beta, N = N_grp, t = t, I_ini = I_grp,
+                             susceptibility = sus_grp, gamma = gamma, dt = dt,
+                             timepoints = timepoints, n_sim = n_rep,
+                             cores = inner_cores, seed = seed)
     setDT(raw)
 
-    # Block A drives the unvaccinated-arm FOI; block B the vaccinated-arm.
-    # Each uses only its own block's infecteds -> independent realisations.
-    IA <- .dt_col_to_t_rep_matrix(raw$I1, n_t, n_rep) +
-          .dt_col_to_t_rep_matrix(raw$I2, n_t, n_rep)
-    IB <- .dt_col_to_t_rep_matrix(raw$I3, n_t, n_rep) +
-          .dt_col_to_t_rep_matrix(raw$I4, n_t, n_rep)
-    cum_foi_A <- .cum_trapz(beta * IA / N_tot, timepoints)
-    cum_foi_B <- .cum_trapz(beta * IB / N_tot, timepoints)
-
-    # Counterfactuals use each arm's OWN (independent) block FOI.
-    P_vac_cf   <- 1 - rowMeans(exp(-alpha * cum_foi_A))  # unvac arm if vaccinated
-    P_unvac_cf <- 1 - rowMeans(exp(-1     * cum_foi_B))  # vac arm if unvaccinated
-
-    C1_mat <- .dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)  # unvac arm (block A)
-    C4_mat <- .dt_col_to_t_rep_matrix(raw$C4, n_t, n_rep)  # vac arm   (block B)
-    P_fac_unvac <- rowMeans(C1_mat) / N_unvac
-    P_fac_vac   <- rowMeans(C4_mat) / N_vac
-
-    num_t   <- N_vac   * P_fac_vac   + N_unvac * P_vac_cf
-    denom_t <- N_unvac * P_fac_unvac + N_vac   * P_unvac_cf
-    eate_t  <- num_t / denom_t
-    ave_t   <- (denom_t - num_t) / N_tot
+    num_t <- numeric(n_t); denom_t <- numeric(n_t)
+    tot_Cvac <- numeric(n_t); tot_Cunvac <- numeric(n_t)
+    for (l in seq_len(L)) {
+      gu <- 2L * l - 1L; gv <- 2L * l
+      Iu <- .dt_col_to_t_rep_matrix(raw[[paste0("I", gu)]], n_t, n_rep)
+      Iv <- .dt_col_to_t_rep_matrix(raw[[paste0("I", gv)]], n_t, n_rep)
+      # Per-capita FOI in site l (matches dust lambda = beta * L * I / sum(N)).
+      cum_foi    <- .cum_trapz(beta * (Iu + Iv) / N_site_vec[l], timepoints)
+      P_vac_cf   <- 1 - rowMeans(exp(-alpha * cum_foi))
+      P_unvac_cf <- 1 - rowMeans(exp(-1     * cum_foi))
+      Cu <- rowMeans(.dt_col_to_t_rep_matrix(raw[[paste0("C", gu)]], n_t, n_rep))
+      Cv <- rowMeans(.dt_col_to_t_rep_matrix(raw[[paste0("C", gv)]], n_t, n_rep))
+      num_t      <- num_t      + Cv + P_vac_cf   * unvac_l[l]
+      denom_t    <- denom_t    + Cu + P_unvac_cf * vac_l[l]
+      tot_Cvac   <- tot_Cvac   + Cv
+      tot_Cunvac <- tot_Cunvac + Cu
+    }
+    eate_t <- num_t / denom_t
+    ave_t  <- (denom_t - num_t) / N_tot
+    # Pooled factual CIR across sites.
+    P_fac_vac   <- tot_Cvac   / sum(vac_l)
+    P_fac_unvac <- tot_Cunvac / sum(unvac_l)
     crr_t     <- P_fac_vac / P_fac_unvac
     crr_ave_t <- P_fac_unvac - P_fac_vac
 
