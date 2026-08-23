@@ -1555,12 +1555,16 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
 # interleaved [unvac_1, vac_1, unvac_2, vac_2, ...]; the within-site mixing
 # weight = sum(N)/N_site = L so each site keeps R0 = beta/gamma.
 #
-# site_icc in [0,1] is the intra-site correlation of vaccine status:
-#   0 -> every site has fraction f vaccinated (individually randomised;
-#        maximal within-site cancellation),
-#   1 -> whole sites are single-arm (cluster randomised),
-# with the global vaccinated total held fixed. A Beta(f*kappa,(1-f)*kappa)
-# with concentration kappa = (1-icc)/icc interpolates between the two.
+# site_icc in [0,1] is the intra-site correlation of vaccine status. Per-site
+# counts are Beta-binomial: a per-site probability p_l ~ Beta(f*kappa,
+# (1-f)*kappa) with kappa = (1-icc)/icc, then Binomial(N_site, p_l), nudged to
+# the exact global total N_vac.
+#   icc = 0 -> p_l = f, counts ~ Binomial(N_site, f): SIMPLE (individual)
+#             randomisation. Per-site counts fluctuate by chance around f with
+#             the global total held exact; the between-allocation spread at
+#             icc=0 is this chance imbalance. Design effect ~ 1.
+#   0<icc<1 -> extra site-level over-dispersion (partial clustering).
+#   icc = 1 -> whole sites are single-arm (cluster randomised).
 # ---------------------------------------------------------------------------
 
 # Integer partition of N_tot into L (near-equal) site sizes.
@@ -1584,7 +1588,9 @@ multisite_vac_counts <- function(N_site_vec, N_vac_total, f, icc) {
     kappa <- (1 - icc) / icc
     rbeta(L, f * kappa, (1 - f) * kappa)
   }
-  vac  <- pmin(pmax(round(p * N_site_vec), 0), N_site_vec)
+  # Random per-site counts (Binomial), so icc=0 is simple randomisation with
+  # per-site chance imbalance rather than deterministic exact balance.
+  vac  <- rbinom(L, N_site_vec, pmin(pmax(p, 0), 1))
   # Nudge one unit at a time to hit N_vac_total exactly, respecting caps.
   step  <- sign(N_vac_total - sum(vac))
   guard <- 0L

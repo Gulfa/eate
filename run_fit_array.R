@@ -126,10 +126,12 @@ pl_alphas               <- c(2, 3, 5)   # Pareto exponents to sweep (kept separa
 mean_k                  <- 6
 
 # Multi-site RCT knobs. n_sites locations; site_icc in [0,1] is the intra-site
-# correlation of vaccine status (0 = individually randomised / max within-site
-# cancellation, 1 = cluster randomised / fully separated arms). Edit to vary.
+# correlation of vaccine status. 0 = simple (individual) randomisation:
+# per-site vaccinated counts vary by chance around f with the global total
+# held exact (the realistic phase-3 design); 1 = cluster randomised (whole
+# sites single-arm). Edit to vary.
 multisite_n_sites <- 4
-multisite_icc     <- 0.5
+multisite_icc     <- 0
 
 base_common <- list(
   gamma = gamma, dt = dt,
