@@ -160,8 +160,10 @@ fit_dt[, beta_lo  := beta  - z_ci * sd_beta]
 fit_dt[, beta_hi  := beta  + z_ci * sd_beta]
 fit_dt[, alpha_lo := alpha - z_ci * sd_alpha]
 fit_dt[, alpha_hi := alpha + z_ci * sd_alpha]
-# Fit-quality flags: loss relative to the MC noise floor, and a
-# chi-square-scaled misfit test (~2 = perfect fit, > 6 = genuine misfit).
+# Fit-quality flags: loss relative to the MC noise floor, and the misfit test
+# loss_chisq = Mahalanobis distance of the data from the model mean vs the
+# per-realisation Sigma (~chi-square_2; small = data plausible under the model,
+# > 6 = model's reachable mean is implausibly far from the data).
 fit_dt[, loss_ratio := loss / loss_floor]
 # NA (not FALSE) when chisq is unavailable (e.g. legacy results), so old
 # fits aren't miscounted as misfits.

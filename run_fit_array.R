@@ -535,22 +535,24 @@ run_one_job <- function(cfg) {
   message(glue("[{cfg$name}] sd_beta = {signif(pcov$sd['beta'], 3)}  ",
                "sd_alpha = {signif(pcov$sd['alpha'], 3)}"))
 
-  # Fit-quality diagnostics: compare the fit residuals to the Monte-Carlo
-  # noise floor. Sigma is the per-realisation Var(C); residuals are the
-  # model-vs-data gap at the optimum (pcov$base, post_cov_n_sim reps).
+  # Fit-quality diagnostics. Sigma is the per-realisation Cov(C); residuals
+  # are the model-vs-data gap at the optimum (pcov$base, post_cov_n_sim reps).
   #   loss_floor = E[fit$loss] at a perfect fit = tr(Sigma) / n_sim_opt.
-  #   loss_chisq = residuals normalised by their SE^2 (~chi-square with 2
-  #                df); ~2 is a perfect fit, > ~6 (95th pct) signals a
-  #                genuine misfit the model cannot reach, not just noise.
+  #   loss_chisq = Mahalanobis distance of the data from the model mean using
+  #                the PER-REALISATION Sigma: "is (data_C1,data_C2) a plausible
+  #                draw from the model?" (~chi-square with 2 df; > ~6 = the
+  #                model's reachable mean is implausibly far from the data =
+  #                genuine misfit). NB: dividing by Sigma/n instead would test
+  #                whether the mean matches the data to ~1/sqrt(n) of an SD,
+  #                which over-flags even good fits and low-variance models.
   Sig        <- pcov$Sigma
-  n_bp       <- cfg$post_cov_n_sim
-  resid_C1   <- mean(pcov$base$C1) - cfg$data_C1
-  resid_C2   <- mean(pcov$base$C2) - cfg$data_C2
+  resid      <- c(mean(pcov$base$C1) - cfg$data_C1,
+                  mean(pcov$base$C2) - cfg$data_C2)
+  resid_C1   <- resid[1]
+  resid_C2   <- resid[2]
   loss_floor <- (Sig[1, 1] + Sig[2, 2]) / cfg$n_sim_opt
-  loss_chisq <- if (Sig[1, 1] > 0 && Sig[2, 2] > 0)
-                  resid_C1^2 / (Sig[1, 1] / n_bp) +
-                  resid_C2^2 / (Sig[2, 2] / n_bp)
-                else NA_real_
+  loss_chisq <- tryCatch(as.numeric(t(resid) %*% solve(Sig) %*% resid),
+                         error = function(e) NA_real_)
   message(glue("[{cfg$name}] loss = {round(fit$loss, 3)}  ",
                "floor = {signif(loss_floor, 3)}  ",
                "chisq = {signif(loss_chisq, 3)}",
