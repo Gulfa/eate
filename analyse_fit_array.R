@@ -140,6 +140,7 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
   data.table(
     name            = as.character(r$name),
     model_type      = as.character(r$model_type),
+    pl_alpha        = r$pl_alpha        %||% NA_real_,
     network_seed    = r$network_seed    %||% NA_integer_,
     allocation_seed = r$allocation_seed %||% NA_integer_,
     beta            = r$fit$beta,
@@ -147,6 +148,8 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
     loss            = r$fit$loss,
     loss_floor      = r$loss_floor %||% NA_real_,
     loss_chisq      = r$loss_chisq %||% NA_real_,
+    resid_C1        = r$resid_C1   %||% NA_real_,
+    resid_C2        = r$resid_C2   %||% NA_real_,
     convergence     = r$fit$convergence,
     sd_beta         = r$posterior_cov$sd[["beta"]],
     cor_ba          = r$posterior_cov$cov[1, 2] /
@@ -185,6 +188,27 @@ if (n_bad > 0) {
   print(fit_dt[!(acceptable), .(name, loss, loss_floor,
                                 loss_chisq = round(loss_chisq, 2))][
                                 order(-loss_chisq)][seq_len(min(.N, 20))])
+}
+
+# Network fit breakdown by Pareto exponent: tells apart the misfit causes.
+# Clustered in one pl_alpha with convergence == 0 and consistent residual
+# signs => structural infeasibility (that network can't reproduce the target).
+# High conv_nonzero => optimiser didn't settle. med_resid_* signs show the
+# direction of the miss (both negative = epidemic undershoots the data).
+net_fits <- fit_dt[model_type == "network" & is.finite(loss_chisq)]
+if (nrow(net_fits)) {
+  net_break <- net_fits[, .(
+    n            = .N,
+    n_misfit     = sum(!acceptable, na.rm = TRUE),
+    med_chisq    = round(median(loss_chisq), 2),
+    max_chisq    = round(max(loss_chisq), 2),
+    conv_nonzero = sum(convergence != 0),
+    med_resid_C1 = round(median(resid_C1), 1),
+    med_resid_C2 = round(median(resid_C2), 1)),
+    by = pl_alpha][order(pl_alpha)]
+  fwrite(net_break, file.path(out_dir, "network_misfit_by_pl_alpha.csv"))
+  message("\n=== Network fit breakdown by pl_alpha ===")
+  print(net_break)
 }
 
 # Group labels / order_key are defined at top-level scope (above the
