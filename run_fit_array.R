@@ -72,6 +72,19 @@ n_seed_opt  <- 3
 log_beta_lo  <- log(0.01); log_beta_hi  <- log(5)
 log_alpha_lo <- log(0.01); log_alpha_hi <- log(2)
 
+# Fit method. "mean": least-squares on the simulated mean (correct when the
+# final-size distribution is unimodal; cheapest). "kernel": negative-log kernel
+# synthetic likelihood, which matches the data to the MODE and is unbiased when
+# the distribution is bimodal (low initial infecteds, e.g. the network's
+# init_I_nw = 2). The kernel posterior comes from the kernel-Hessian with an
+# h->0 extrapolation and needs a larger n_sim (the MC-likelihood Hessian is
+# noisy). Assumes data_C1/C2 are a single observed realisation, not E[C].
+fit_method       <- "mean"
+kernel_h         <- 3            # kernel bandwidth (count units) for the fit loss
+kernel_hess_hs   <- c(2, 3, 4)   # bandwidths for the h->0 posterior extrapolation
+kernel_hess_nsim <- 8000L        # sims for the (noisy) kernel Hessian
+kernel_hess_hrel <- 0.03         # FD step (relative) for the 2nd-derivative Hessian
+
 # Posterior cov
 post_cov_n_sim <- 1000
 post_cov_seed  <- 1234L
@@ -142,6 +155,9 @@ base_common <- list(
   inner_cores = 1L,
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
   post_cov_h = post_cov_h,
+  fit_method = fit_method, kernel_h = kernel_h,
+  kernel_hess_hs = kernel_hess_hs, kernel_hess_nsim = kernel_hess_nsim,
+  kernel_hess_hrel = kernel_hess_hrel,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
 )
@@ -351,16 +367,31 @@ materialise_cfg <- function(cfg) {
 # Fit (grid search + Nelder-Mead with restarts)
 # ---------------------------------------------------------------------------
 
+# Negative-log kernel (synthetic) likelihood at (beta, alpha), CRN-averaged
+# over the fit seeds. L_hat(theta) = mean_i K_h(C_i - d) is the Monte-Carlo
+# likelihood of the observed count pair; a Gaussian product kernel of
+# bandwidth h (count units) smooths the exact "fraction equal to d" so the
+# surface is differentiable. Matches the data to the MODE (unbiased under a
+# bimodal / low-seed final-size distribution), unlike mean-matching.
+.kernel_negloglik <- function(out, d1, d2, h) {
+  if (is.null(out) || nrow(out) == 0) return(NA_real_)
+  k <- exp(-0.5 * (((out$C1 - d1) / h)^2 + ((out$C2 - d2) / h)^2))
+  -log(mean(k) / (2 * pi * h * h) + 1e-300)
+}
+
 make_loss <- function(simulator, cfg) {
   # Common Random Numbers: the SAME fixed seeds are reused at every probe,
   # so the loss is deterministic and smooth in (beta, alpha). Averaging
   # over the seeds reduces the seed-specific bias of the optimum.
-  seeds <- as.integer(cfg$opt_seed) + seq_len(max(1L, cfg$n_seed_opt)) - 1L
+  seeds  <- as.integer(cfg$opt_seed) + seq_len(max(1L, cfg$n_seed_opt)) - 1L
+  method <- cfg$fit_method %||% "mean"
+  h      <- cfg$kernel_h %||% 3
   function(log_par) {
     par <- exp(log_par); beta <- par[1]; alpha <- par[2]
     vals <- vapply(seeds, function(s) {
       out <- tryCatch(simulator(beta, alpha, cfg$n_sim_opt, seed = s),
                       error = function(e) NULL)
+      if (method == "kernel") return(.kernel_negloglik(out, cfg$data_C1, cfg$data_C2, h))
       if (is.null(out) || nrow(out) == 0) return(NA_real_)
       (mean(out$C1) - cfg$data_C1)^2 + (mean(out$C2) - cfg$data_C2)^2
     }, numeric(1))
@@ -399,6 +430,47 @@ fit_one <- function(simulator, cfg) {
        grid_start_beta = exp(start$log_par[1]),
        grid_start_alpha = exp(start$log_par[2]),
        grid_start_loss = start$loss)
+}
+
+# Kernel-likelihood posterior covariance: the Laplace covariance is the inverse
+# observed information = [Hessian of -log L_hat]^-1 at the MLE. The kernel
+# broadens the data-space covariance by H = diag(h^2), inflating the posterior;
+# rather than subtract it (unreliable under bimodality, since the mode-mass term
+# dominates), extrapolate Var(h) -> 0 linearly in h^2 over `hs`, which keeps
+# that information. Uses CRN (one fixed seed) and a larger n_sim, since the
+# Hessian of a Monte-Carlo likelihood is noisy. Falls back to NA on failure.
+kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
+  d1 <- cfg$data_C1; d2 <- cfg$data_C2
+  seed <- cfg$post_cov_seed
+  nsim <- cfg$kernel_hess_nsim %||% 8000L
+  hs   <- cfg$kernel_hess_hs   %||% c(2, 3, 4)
+  nll <- function(b, a, h)
+    .kernel_negloglik(simulator(b, a, nsim, seed = seed), d1, d2, h)
+  h_rel <- cfg$kernel_hess_hrel %||% 0.03
+  hess_cov_at <- function(h) {
+    hb <- beta * h_rel; ha <- alpha * h_rel
+    if (beta  - hb <= 0) hb <- beta  / 2
+    if (alpha - ha <= 0) ha <- alpha / 2
+    f0  <- nll(beta, alpha, h)
+    fbb <- (nll(beta + hb, alpha, h) - 2 * f0 + nll(beta - hb, alpha, h)) / hb^2
+    faa <- (nll(beta, alpha + ha, h) - 2 * f0 + nll(beta, alpha - ha, h)) / ha^2
+    fba <- (nll(beta + hb, alpha + ha, h) - nll(beta + hb, alpha - ha, h) -
+            nll(beta - hb, alpha + ha, h) + nll(beta - hb, alpha - ha, h)) / (4 * hb * ha)
+    tryCatch(solve(matrix(c(fbb, fba, fba, faa), 2)),
+             error = function(e) matrix(NA_real_, 2, 2))
+  }
+  covs <- lapply(hs, hess_cov_at)
+  h2   <- hs^2
+  extr <- function(idx) {
+    y <- vapply(covs, function(C) C[idx], numeric(1))
+    if (any(!is.finite(y))) return(NA_real_)
+    unname(coef(stats::lm(y ~ h2))[1])                 # intercept = h -> 0
+  }
+  cov0 <- matrix(vapply(1:4, extr, numeric(1)), 2)
+  cov0[1, 2] <- cov0[2, 1] <- 0.5 * (cov0[1, 2] + cov0[2, 1])
+  dimnames(cov0) <- list(c("beta", "alpha"), c("beta", "alpha"))
+  list(cov = cov0,
+       sd  = sqrt(pmax(c(beta = cov0[1, 1], alpha = cov0[2, 2]), 0)))
 }
 
 # ---------------------------------------------------------------------------
@@ -528,10 +600,19 @@ run_one_job <- function(cfg) {
                "loss = {round(fit$loss, 3)}  conv = {fit$convergence}"))
 
   message(glue("[{cfg$name}] posterior cov..."))
+  # Always compute the moment pieces (base, Sigma, J) for the misfit
+  # diagnostics below. For the kernel fit the posterior cov/sd come from the
+  # kernel-Hessian (h->0 extrapolated) instead of the moment sandwich, since
+  # the fit matched the mode, not the mean.
   pcov <- estimate_posterior_cov(simulator, fit$beta, fit$alpha,
                                  n_sim = cfg$post_cov_n_sim,
                                  seed  = cfg$post_cov_seed,
                                  h_rel = cfg$post_cov_h)
+  if ((cfg$fit_method %||% "mean") == "kernel") {
+    kc <- kernel_posterior_cov(simulator, cfg_fit, fit$beta, fit$alpha)
+    pcov$cov <- kc$cov
+    pcov$sd  <- kc$sd
+  }
   message(glue("[{cfg$name}] sd_beta = {signif(pcov$sd['beta'], 3)}  ",
                "sd_alpha = {signif(pcov$sd['alpha'], 3)}"))
 
@@ -577,6 +658,7 @@ run_one_job <- function(cfg) {
     name            = cfg$name,
     experiment_id   = cfg$experiment_id   %||% NA_character_,
     model_type      = cfg$model_type,
+    fit_method      = cfg$fit_method      %||% "mean",
     pl_alpha        = cfg$pl_alpha        %||% NA_real_,
     network_seed    = cfg$network_seed    %||% NA_integer_,
     allocation_seed = cfg$allocation_seed %||% NA_integer_,
