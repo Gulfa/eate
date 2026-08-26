@@ -80,10 +80,11 @@ log_alpha_lo <- log(0.01); log_alpha_hi <- log(2)
 # h->0 extrapolation and needs a larger n_sim (the MC-likelihood Hessian is
 # noisy). Assumes data_C1/C2 are a single observed realisation, not E[C].
 fit_method       <- "mean"
-kernel_h         <- 3            # kernel bandwidth (count units) for the fit loss
-kernel_hess_hs   <- c(2, 3, 4)   # bandwidths for the h->0 posterior extrapolation
-kernel_hess_nsim <- 8000L        # sims for the (noisy) kernel Hessian
-kernel_hess_hrel <- 0.03         # FD step (relative) for the 2nd-derivative Hessian
+kernel_h_frac    <- 0.1              # kernel bandwidth as a fraction of each data
+                                     # count (scales with N; floored at 1 count)
+kernel_hess_mult <- c(0.6, 0.8, 1.0, 1.2, 1.5) # bandwidth multipliers for ->0 extrapolation
+kernel_hess_nsim <- 8000L            # sims for the (noisy) kernel Hessian
+kernel_hess_hrel <- 0.03             # FD step (relative) for the 2nd-derivative Hessian
 
 # Posterior cov
 post_cov_n_sim <- 1000
@@ -155,8 +156,8 @@ base_common <- list(
   inner_cores = 1L,
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
   post_cov_h = post_cov_h,
-  fit_method = fit_method, kernel_h = kernel_h,
-  kernel_hess_hs = kernel_hess_hs, kernel_hess_nsim = kernel_hess_nsim,
+  fit_method = fit_method, kernel_h_frac = kernel_h_frac,
+  kernel_hess_mult = kernel_hess_mult, kernel_hess_nsim = kernel_hess_nsim,
   kernel_hess_hrel = kernel_hess_hrel,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
@@ -369,14 +370,23 @@ materialise_cfg <- function(cfg) {
 
 # Negative-log kernel (synthetic) likelihood at (beta, alpha), CRN-averaged
 # over the fit seeds. L_hat(theta) = mean_i K_h(C_i - d) is the Monte-Carlo
-# likelihood of the observed count pair; a Gaussian product kernel of
-# bandwidth h (count units) smooths the exact "fraction equal to d" so the
-# surface is differentiable. Matches the data to the MODE (unbiased under a
-# bimodal / low-seed final-size distribution), unlike mean-matching.
-.kernel_negloglik <- function(out, d1, d2, h) {
+# likelihood of the observed count pair; a Gaussian product kernel of per-arm
+# bandwidth (h1, h2) smooths the exact "fraction equal to d" so the surface is
+# differentiable. Matches the data to the MODE (unbiased under a bimodal /
+# low-seed final-size distribution), unlike mean-matching.
+.kernel_negloglik <- function(out, d1, d2, h1, h2) {
   if (is.null(out) || nrow(out) == 0) return(NA_real_)
-  k <- exp(-0.5 * (((out$C1 - d1) / h)^2 + ((out$C2 - d2) / h)^2))
-  -log(mean(k) / (2 * pi * h * h) + 1e-300)
+  k <- exp(-0.5 * (((out$C1 - d1) / h1)^2 + ((out$C2 - d2) / h2)^2))
+  -log(mean(k) / (2 * pi * h1 * h2) + 1e-300)
+}
+
+# Per-arm kernel bandwidths, scaled to the data magnitude so the kernel works
+# at any N: h_arm = kernel_h_frac * data_arm (floored at 1 count). A fixed
+# absolute bandwidth would be far too small once counts reach the thousands,
+# leaving no simulated point within h of the data -> flat (L_hat=0) plateau.
+.kernel_bw <- function(cfg) {
+  frac <- cfg$kernel_h_frac %||% 0.1
+  c(max(frac * cfg$data_C1, 1), max(frac * cfg$data_C2, 1))
 }
 
 make_loss <- function(simulator, cfg) {
@@ -385,13 +395,13 @@ make_loss <- function(simulator, cfg) {
   # over the seeds reduces the seed-specific bias of the optimum.
   seeds  <- as.integer(cfg$opt_seed) + seq_len(max(1L, cfg$n_seed_opt)) - 1L
   method <- cfg$fit_method %||% "mean"
-  h      <- cfg$kernel_h %||% 3
+  bw     <- .kernel_bw(cfg)
   function(log_par) {
     par <- exp(log_par); beta <- par[1]; alpha <- par[2]
     vals <- vapply(seeds, function(s) {
       out <- tryCatch(simulator(beta, alpha, cfg$n_sim_opt, seed = s),
                       error = function(e) NULL)
-      if (method == "kernel") return(.kernel_negloglik(out, cfg$data_C1, cfg$data_C2, h))
+      if (method == "kernel") return(.kernel_negloglik(out, cfg$data_C1, cfg$data_C2, bw[1], bw[2]))
       if (is.null(out) || nrow(out) == 0) return(NA_real_)
       (mean(out$C1) - cfg$data_C1)^2 + (mean(out$C2) - cfg$data_C2)^2
     }, numeric(1))
@@ -436,37 +446,44 @@ fit_one <- function(simulator, cfg) {
 # observed information = [Hessian of -log L_hat]^-1 at the MLE. The kernel
 # broadens the data-space covariance by H = diag(h^2), inflating the posterior;
 # rather than subtract it (unreliable under bimodality, since the mode-mass term
-# dominates), extrapolate Var(h) -> 0 linearly in h^2 over `hs`, which keeps
-# that information. Uses CRN (one fixed seed) and a larger n_sim, since the
-# Hessian of a Monte-Carlo likelihood is noisy. Falls back to NA on failure.
+# dominates), extrapolate the bandwidth -> 0 (variance linear in the squared
+# scale multiplier), which keeps that information. The per-arm base bandwidth
+# is scaled by the multipliers in kernel_hess_mult. Uses CRN (one fixed seed)
+# and a larger n_sim, since the Hessian of a MC likelihood is noisy.
 kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
   d1 <- cfg$data_C1; d2 <- cfg$data_C2
   seed <- cfg$post_cov_seed
   nsim <- cfg$kernel_hess_nsim %||% 8000L
-  hs   <- cfg$kernel_hess_hs   %||% c(2, 3, 4)
-  nll <- function(b, a, h)
-    .kernel_negloglik(simulator(b, a, nsim, seed = seed), d1, d2, h)
+  bw   <- .kernel_bw(cfg)                               # per-arm base bandwidth
+  mult <- cfg$kernel_hess_mult %||% c(0.7, 1.0, 1.4)    # scale factors
+  nll <- function(b, a, m)
+    .kernel_negloglik(simulator(b, a, nsim, seed = seed), d1, d2, m * bw[1], m * bw[2])
   h_rel <- cfg$kernel_hess_hrel %||% 0.03
-  hess_cov_at <- function(h) {
+  hess_cov_at <- function(m) {
     hb <- beta * h_rel; ha <- alpha * h_rel
     if (beta  - hb <= 0) hb <- beta  / 2
     if (alpha - ha <= 0) ha <- alpha / 2
-    f0  <- nll(beta, alpha, h)
-    fbb <- (nll(beta + hb, alpha, h) - 2 * f0 + nll(beta - hb, alpha, h)) / hb^2
-    faa <- (nll(beta, alpha + ha, h) - 2 * f0 + nll(beta, alpha - ha, h)) / ha^2
-    fba <- (nll(beta + hb, alpha + ha, h) - nll(beta + hb, alpha - ha, h) -
-            nll(beta - hb, alpha + ha, h) + nll(beta - hb, alpha - ha, h)) / (4 * hb * ha)
+    f0  <- nll(beta, alpha, m)
+    fbb <- (nll(beta + hb, alpha, m) - 2 * f0 + nll(beta - hb, alpha, m)) / hb^2
+    faa <- (nll(beta, alpha + ha, m) - 2 * f0 + nll(beta, alpha - ha, m)) / ha^2
+    fba <- (nll(beta + hb, alpha + ha, m) - nll(beta + hb, alpha - ha, m) -
+            nll(beta - hb, alpha + ha, m) + nll(beta - hb, alpha - ha, m)) / (4 * hb * ha)
     tryCatch(solve(matrix(c(fbb, fba, fba, faa), 2)),
              error = function(e) matrix(NA_real_, 2, 2))
   }
-  covs <- lapply(hs, hess_cov_at)
-  h2   <- hs^2
+  covs <- lapply(mult, hess_cov_at)
+  m2   <- mult^2
+  imin <- which.min(mult)                              # least bandwidth inflation
   extr <- function(idx) {
     y <- vapply(covs, function(C) C[idx], numeric(1))
-    if (any(!is.finite(y))) return(NA_real_)
-    unname(coef(stats::lm(y ~ h2))[1])                 # intercept = h -> 0
+    if (any(!is.finite(y))) return(covs[[imin]][idx])  # fall back to smallest bw
+    unname(coef(stats::lm(y ~ m2))[1])                 # intercept = bandwidth -> 0
   }
   cov0 <- matrix(vapply(1:4, extr, numeric(1)), 2)
+  # A variance that extrapolated <= 0 is MC noise on a tightly-determined
+  # direction; fall back to the least-inflated (smallest-bw) Hessian variance.
+  for (d in c(1L, 4L))
+    if (!is.finite(cov0[d]) || cov0[d] <= 0) cov0[d] <- covs[[imin]][d]
   cov0[1, 2] <- cov0[2, 1] <- 0.5 * (cov0[1, 2] + cov0[2, 1])
   dimnames(cov0) <- list(c("beta", "alpha"), c("beta", "alpha"))
   list(cov = cov0,
