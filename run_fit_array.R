@@ -530,9 +530,23 @@ compute_ve <- function(cfg, beta, alpha) {
 # Gaussian approximation is wrong for that fit). Returns a [<=K, 2] matrix.
 sample_posterior <- function(beta_hat, alpha_hat, cov, K,
                              max_attempts_factor = 5) {
-  mu <- c(beta_hat, alpha_hat)
-  L  <- tryCatch(chol(cov),
-                 error = function(e) chol(cov + diag(1e-10, 2)))
+  mu    <- c(beta_hat, alpha_hat)
+  empty <- matrix(numeric(0), nrow = 0, ncol = 2,
+                  dimnames = list(NULL, c("beta", "alpha")))
+  # Guard: a singular Jacobian (e.g. a fit pinned at a parameter bound)
+  # yields an NA / non-positive-definite covariance. Return no samples so the
+  # job degrades gracefully (empty VE-with-uncertainty) instead of crashing.
+  if (any(!is.finite(cov)) || any(!is.finite(mu))) {
+    warning("Non-finite posterior covariance/mean; skipping VE-with-uncertainty.")
+    return(empty)
+  }
+  L <- tryCatch(chol(cov),
+                error = function(e) tryCatch(chol(cov + diag(1e-10, 2)),
+                                             error = function(e2) NULL))
+  if (is.null(L) || any(!is.finite(L))) {
+    warning("Posterior covariance not positive-definite; skipping VE-with-uncertainty.")
+    return(empty)
+  }
   out      <- matrix(NA_real_, nrow = K, ncol = 2,
                      dimnames = list(NULL, c("beta", "alpha")))
   n_filled <- 0L
@@ -567,6 +581,7 @@ sample_posterior <- function(beta_hat, alpha_hat, cov, K,
 compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
                                         K, n_rep_override, K_cores = 1L) {
   samples <- sample_posterior(fit$beta, fit$alpha, posterior_cov, K)
+  if (!nrow(samples)) return(data.table())    # no valid posterior samples
   cfg_u              <- cfg
   cfg_u$ve_n_rep     <- n_rep_override
   # Inside the K loop each worker owns one core — one dust call at a
@@ -598,6 +613,16 @@ run_one_job <- function(cfg) {
   fit <- fit_one(simulator, cfg_fit)
   message(glue("[{cfg$name}] fit: beta = {round(fit$beta, 4)}  alpha = {round(fit$alpha, 4)}  ",
                "loss = {round(fit$loss, 3)}  conv = {fit$convergence}"))
+  # A fit pinned at a parameter bound usually means the data target is
+  # unreachable for this setup (e.g. it sits in the bimodal fizzle/takeoff gap).
+  .at_bnd <- function(x, lo, hi) {
+    span <- abs(hi - lo)
+    abs(log(x) - lo) < 0.02 * span || abs(log(x) - hi) < 0.02 * span
+  }
+  if (.at_bnd(fit$beta, log_beta_lo, log_beta_hi) ||
+      .at_bnd(fit$alpha, log_alpha_lo, log_alpha_hi))
+    message(glue("[{cfg$name}] WARNING: fit pinned at a parameter bound -- ",
+                 "target likely infeasible for this N / seed setup."))
 
   message(glue("[{cfg$name}] posterior cov..."))
   # Always compute the moment pieces (base, Sigma, J) for the misfit
