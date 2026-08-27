@@ -208,3 +208,47 @@ cat(sprintf("ratio at MEAN (A+B blend)          = %.3f  ->  VE_mean = %.3f\n",
 cat(sprintf("=> ratio gap (mean - mode) = %.3f: the compartment mixture MOVES VE via the ratio\n",
             ratio_mean - ratio_mode))
 fwrite(comp_tab, "output/split_effect_ratio.csv")
+
+# ---------------------------------------------------------------------------
+# Model x functional variance table. For each model, how much does one
+# realisation tell us about the next? Compare the BETWEEN-realisation variance
+# of a functional to the i.i.d. (independent-units) benchmark -- the variance
+# it WOULD have if the arms were binomial samples of the same mean attack rate.
+# That ratio is the design effect = N / N_eff:
+#   ~1  => interference adds nothing; one sample is as good as N indep units.
+#   >>1 => shared epidemic inflates the variance; effective N collapses.
+# Two functionals: the arm RATIO (log risk ratio; the shared force of infection
+# CANCELS) and the arm DIFFERENCE (risk difference; it does NOT). Conditioned
+# on takeoff so both are well-defined (identification given an outbreak).
+# ---------------------------------------------------------------------------
+functional_de <- function(dt, N1, N2, takeoff_frac = 0.05) {
+  d <- copy(dt); d[, tot := C1 + C2]
+  d <- d[tot > takeoff_frac * (N1 + N2) & C1 > 0 & C2 > 0]
+  if (nrow(d) < 20) return(NULL)
+  p1 <- mean(d$C1) / N1; p2 <- mean(d$C2) / N2          # mean attack rates
+  RD  <- d$C1 / N1 - d$C2 / N2                          # risk difference
+  lRR <- log((d$C2 / N2) / (d$C1 / N1))                 # log risk ratio (vac/unvac)
+  Viid_RD  <- p1 * (1 - p1) / N1 + p2 * (1 - p2) / N2   # binomial benchmarks
+  Viid_lRR <- (1 - p1) / (N1 * p1) + (1 - p2) / (N2 * p2)
+  de_ratio <- var(lRR) / Viid_lRR
+  de_diff  <- var(RD)  / Viid_RD
+  data.table(n_take = nrow(d), p1 = round(p1, 3), p2 = round(p2, 3),
+             DE_ratio = round(de_ratio, 1), DE_diff = round(de_diff, 1),
+             diff_over_ratio = round(de_diff / de_ratio, 1),
+             Neff_ratio = round((N1 + N2) / de_ratio),
+             Neff_diff  = round((N1 + N2) / de_diff))
+}
+
+N1 <- base$N_cont; N2 <- base$N_vac
+func_dt <- rbindlist(lapply(names(raw), function(nm)
+  cbind(model = nm, functional_de(raw[[nm]], N1, N2))), fill = TRUE)
+sp_pooled <- functional_de(sp[, .(C1, C2)], N1, N2)     # split-effect mixture
+if (!is.null(sp_pooled)) func_dt <- rbind(func_dt, cbind(model = "sir_split_effect", sp_pooled))
+
+cat(sprintf("\n=== Model x functional design effect (N=%d; DE = between-var / i.i.d.-var = N/N_eff) ===\n",
+            N1 + N2))
+print(func_dt[, .(model, DE_ratio, DE_diff, diff_over_ratio, Neff_ratio, Neff_diff)])
+cat("  DE ~ 1: functional robust to interference; DE >> 1: variance inflated, N_eff collapses.\n")
+cat("  Standard models: ratio (shared FOI cancels) well identified, difference not.\n")
+cat("  sir_split_effect: even the ratio is inflated (we broke the cancellation).\n")
+fwrite(func_dt, "output/model_functional_variance.csv")

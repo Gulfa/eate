@@ -55,6 +55,12 @@ experiments <- list(
 gamma  <- 1
 dt     <- 0.01
 
+# Override the initial infecteds c(unvac, vac) for the homogeneous SIR model
+# ONLY, independent of the experiment's I_ini_2g. NULL = use the experiment's.
+# Useful to push just SIR into the low-seed / bimodal regime without touching
+# the other models or experiments.
+sir_I_ini_2g <- NULL
+
 # Optim
 n_sim_opt   <- 1000
 optim_maxit <- 250
@@ -191,7 +197,9 @@ build_configs_for_experiment <- function(exp) {
     model_type = "linear", ve_n_vac = 1))
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__sir"),
-    model_type = "sir", ve_n_vac = 1))
+    model_type = "sir", ve_n_vac = 1,
+    # optional SIR-only initial-infecteds override (else use the experiment's)
+    I_ini_2g = if (!is.null(sir_I_ini_2g)) sir_I_ini_2g else base$I_ini_2g))
   # Two-block effect-modification model: same vaccine, different effect in two
   # non-mixing compartments; one random index case decides which ignites, so
   # mode != mean in the vaccine ratio. Randomisation is simple within
