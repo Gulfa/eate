@@ -30,7 +30,7 @@ beta_net     <- R0 * gamma        # user-facing beta; R0 = beta/gamma in the
                                   # homogeneous-network limit (see project
                                   # memory on the beta convention).
 
-pl_alphas    <- c(1.5, 2, 3, 5)
+pl_alphas    <- c(1.5, 5)
 n_networks   <- 5                 # independent contact-matrix realisations
                                   # per pl_alpha
 n_rep        <- 100               # dust replicates per (pl_alpha, network)

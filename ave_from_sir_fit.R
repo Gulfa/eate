@@ -78,7 +78,7 @@ post_cov_seed  <- 4321L
 out_dir <- "output/ave_from_sir_fit"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-N_total  <- N_cont + N_vac
+N_total  <- N_cont + N_vac        
 vac_frac <- N_vac / N_total
 timepoints <- seq_len(t_star)
 

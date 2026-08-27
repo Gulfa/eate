@@ -1704,3 +1704,121 @@ get_stoch_eate_sir_multisite <- function(beta = 1, susceptibility = c(1, 1),
                             mc.cores = mc.cores)
   rbindlist(res, fill = TRUE)
 }
+
+# ---------------------------------------------------------------------------
+# Two-block "effect modification" model. The population splits into two
+# NON-MIXING compartments (block-diagonal contacts): fraction split_frac in A,
+# the rest in B. The vaccinated susceptibility differs by compartment --
+# alpha in A and split_alpha_prod / alpha in B (so alpha_A * alpha_B =
+# split_alpha_prod, fixed) -- i.e. the SAME vaccine has a different effect in
+# the two sub-populations. Each realisation is seeded by a single index case
+# in a random person, so it lands in A w.p. split_frac (else B) and only that
+# compartment ignites. Because A and B have different vaccine ratios, the MODE
+# (typical = A outbreak) and the MEAN (A/B blend) give different VE.
+#
+# Groups: [unvac_A, vac_A, unvac_B, vac_B]; within-compartment mixing weight =
+# sum(N)/N_comp so each keeps R0 = beta/gamma. Seeding is stratified (run each
+# seed-compartment, weight by split_frac) -- the exact single-seed mixture,
+# variance-reduced.
+.split_effect_setup <- function(alpha, f, N, split_frac, split_alpha_prod) {
+  alpha_B <- split_alpha_prod / alpha
+  N_A <- round(split_frac * N); N_B <- N - N_A
+  unvacA <- round((1 - f) * N_A); vacA <- N_A - unvacA
+  unvacB <- round((1 - f) * N_B); vacB <- N_B - unvacB
+  mm <- matrix(0, 4, 4); mm[1:2, 1:2] <- N / N_A; mm[3:4, 3:4] <- N / N_B
+  list(Ngrp = c(unvacA, vacA, unvacB, vacB), sus = c(1, alpha, 1, alpha_B),
+       mm = mm, N_A = N_A, N_B = N_B,
+       unvacA = unvacA, vacA = vacA, unvacB = unvacB, vacB = vacB,
+       alpha_A = alpha, alpha_B = alpha_B)
+}
+
+get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
+                                            f = 0.5, N = 200, t = 30, gamma = 1,
+                                            I_ini_total = 1, split_frac = 0.75,
+                                            split_alpha_prod = 0.5,
+                                            n_vac = 10, n_rep = 20,
+                                            dt = 0.1, timepoints = NULL,
+                                            mc.cores = 10, inner_cores = 1,
+                                            seed = NULL) {
+  alpha <- susceptibility[2]
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t <- length(timepoints)
+  s   <- .split_effect_setup(alpha, f, N, split_frac, split_alpha_prod)
+  I0  <- as.integer(max(1, round(I_ini_total)))
+
+  # Zero-padded [n_t, n_rep] matrix from a batch that fills columns col_range.
+  pad <- function(vec_or_null, n_rep_full, col_range) {
+    m <- matrix(0, nrow = n_t, ncol = n_rep_full)
+    if (length(col_range)) m[, col_range] <- vec_or_null
+    m
+  }
+
+  run_one_allocation <- function() {
+    sim_id <- runif(1)
+    nA <- max(1L, round(split_frac * n_rep)); nB <- n_rep - nA
+    run_batch <- function(gseed, nsim) {
+      if (nsim <= 0L) return(NULL)
+      Ii <- integer(4); Ii[gseed] <- I0
+      raw <- run_stoch_cd_dust(s$mm, beta = beta, N = s$Ngrp, t = t, I_ini = Ii,
+                               susceptibility = s$sus, gamma = gamma, dt = dt,
+                               timepoints = timepoints, n_sim = nsim,
+                               cores = inner_cores, seed = seed)
+      setDT(raw); raw
+    }
+    rawA <- run_batch(1L, nA)      # seed in compartment A (group 1)
+    rawB <- run_batch(3L, nB)      # seed in compartment B (group 3)
+
+    col <- function(raw, nm, ncol) if (is.null(raw)) NULL else
+      .dt_col_to_t_rep_matrix(raw[[nm]], n_t, ncol)
+    cA <- if (nB > 0) seq_len(nA) else seq_len(nA)
+    cB <- if (nA > 0) (nA + 1L):n_rep else seq_len(nB)
+
+    # Per-compartment infected + case matrices, zero in the non-seeded batch.
+    I_A <- pad(if (nA > 0) col(rawA, "I1", nA) + col(rawA, "I2", nA) else NULL, n_rep, cA)
+    I_B <- pad(if (nB > 0) col(rawB, "I3", nB) + col(rawB, "I4", nB) else NULL, n_rep, cB)
+    Cu_A <- pad(if (nA > 0) col(rawA, "C1", nA) else NULL, n_rep, cA)
+    Cv_A <- pad(if (nA > 0) col(rawA, "C2", nA) else NULL, n_rep, cA)
+    Cu_B <- pad(if (nB > 0) col(rawB, "C3", nB) else NULL, n_rep, cB)
+    Cv_B <- pad(if (nB > 0) col(rawB, "C4", nB) else NULL, n_rep, cB)
+
+    cum_foi_A <- .cum_trapz(beta * I_A / s$N_A, timepoints)
+    cum_foi_B <- .cum_trapz(beta * I_B / s$N_B, timepoints)
+
+    # Frozen-field counterfactuals per compartment (each uses its own alpha).
+    P_vac_cf_A   <- 1 - rowMeans(exp(-s$alpha_A * cum_foi_A))
+    P_unvac_cf_A <- 1 - rowMeans(exp(-1         * cum_foi_A))
+    P_vac_cf_B   <- 1 - rowMeans(exp(-s$alpha_B * cum_foi_B))
+    P_unvac_cf_B <- 1 - rowMeans(exp(-1         * cum_foi_B))
+
+    P_fac_vac_A   <- rowMeans(Cv_A) / s$vacA
+    P_fac_unvac_A <- rowMeans(Cu_A) / s$unvacA
+    P_fac_vac_B   <- rowMeans(Cv_B) / s$vacB
+    P_fac_unvac_B <- rowMeans(Cu_B) / s$unvacB
+
+    num_t   <- s$vacA   * P_fac_vac_A   + s$unvacA * P_vac_cf_A +
+               s$vacB   * P_fac_vac_B   + s$unvacB * P_vac_cf_B
+    denom_t <- s$unvacA * P_fac_unvac_A + s$vacA   * P_unvac_cf_A +
+               s$unvacB * P_fac_unvac_B + s$vacB   * P_unvac_cf_B
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N
+    # Pooled factual CIR across compartments.
+    P_fac_vac   <- (rowMeans(Cv_A) + rowMeans(Cv_B)) / (s$vacA   + s$vacB)
+    P_fac_unvac <- (rowMeans(Cu_A) + rowMeans(Cu_B)) / (s$unvacA + s$unvacB)
+    crr_t     <- P_fac_vac / P_fac_unvac
+    crr_ave_t <- P_fac_unvac - P_fac_vac
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}

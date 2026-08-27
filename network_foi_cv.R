@@ -32,15 +32,15 @@ source("utils.R")
 # ---------------------------------------------------------------------------
 
 pl_alphas   <- c(1.5, 3, 5)     # network Pareto exponents (one facet each)
-N           <- 500
+N           <- 2000
 mean_k      <- 6
-beta        <- 1.5              # R0 = beta/gamma in homog limit
-gamma       <- 1
+beta        <- 1.5/2             # R0 = beta/gamma in homog limit
+gamma       <- 1/4
 vac_frac    <- 0.5              # fraction vaccinated
 alpha_vac   <- 0.5              # vaccine susceptibility multiplier
 alloc_seed  <- 1                # for reproducible vac allocation
 init_I      <- 20
-t_horizon   <- 10
+t_horizon   <- 20
 # dust2 requires every requested time to be an fp-exact integer
 # multiple of dt. Non-dyadic dt (0.1, 0.05, 0.02) are all IEEE754-
 # inexact, and k*dt/dt drifts off integer at some k, tripping the
@@ -54,7 +54,7 @@ dt          <- 0.0625
 .first_step <- round(1        / dt)
 .last_step  <- round(t_horizon / dt)
 timepoints  <- seq(.first_step, .last_step, .step_out) * dt
-n_rep       <- 200
+n_rep       <- 100
 inner_cores <- 8
 
 out_dir <- "output/network_foi_cv"

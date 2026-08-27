@@ -147,6 +147,15 @@ mean_k                  <- 6
 multisite_n_sites <- 4
 multisite_icc     <- 0
 
+# Two-block effect-modification model. split_frac = fraction of the population
+# in compartment A; the vaccinated susceptibility is alpha in A and
+# split_alpha_prod/alpha in B (so alpha_A*alpha_B = split_alpha_prod). One
+# index case per realisation seeds a random compartment. split_init_I = index
+# cases placed in the seeded compartment.
+split_frac       <- 0.75
+split_alpha_prod <- 0.5
+split_init_I     <- 1
+
 base_common <- list(
   gamma = gamma, dt = dt,
   n_sim_opt = n_sim_opt, optim_maxit = optim_maxit,
@@ -159,6 +168,8 @@ base_common <- list(
   fit_method = fit_method, kernel_h_frac = kernel_h_frac,
   kernel_hess_mult = kernel_hess_mult, kernel_hess_nsim = kernel_hess_nsim,
   kernel_hess_hrel = kernel_hess_hrel,
+  split_frac = split_frac, split_alpha_prod = split_alpha_prod,
+  split_init_I = split_init_I,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
 )
@@ -181,6 +192,13 @@ build_configs_for_experiment <- function(exp) {
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__sir"),
     model_type = "sir", ve_n_vac = 1))
+  # Two-block effect-modification model: same vaccine, different effect in two
+  # non-mixing compartments; one random index case decides which ignites, so
+  # mode != mean in the vaccine ratio. Randomisation is simple within
+  # compartments (exchangeable), so a single config + ve_n_vac = 1.
+  cs[[length(cs)+1]] <- modifyList(base, list(
+    name = glue("{exp$id}__sir_split_effect"),
+    model_type = "sir_split_effect", ve_n_vac = 1))
   # Multi-site RCT: n_sites locations, per-site vaccine fraction dispersion
   # set by site_icc (0 = individually randomised / max within-site
   # cancellation, 1 = cluster randomised / fully separated). The allocation
@@ -287,6 +305,30 @@ build_simulator <- function(cfg) {
       data.table(sim = fin$sim,
                  C1 = rowSums(as.matrix(fin[, ..uc])),
                  C2 = rowSums(as.matrix(fin[, ..vc])))
+    },
+    sir_split_effect = function(beta, alpha, n_sim, seed = NULL) {
+      # Two non-mixing compartments, vaccinated susceptibility alpha in A and
+      # split_alpha_prod/alpha in B. One index case per realisation lands in a
+      # random compartment (stratified: split_frac of particles seeded in A,
+      # rest in B). Pool arms across compartments: C1 = unvac cases, C2 = vac.
+      f  <- cfg$N_vac / (cfg$N_cont + cfg$N_vac)
+      sp <- .split_effect_setup(alpha, f, cfg$N_cont + cfg$N_vac,
+                                cfg$split_frac, cfg$split_alpha_prod)
+      I0 <- as.integer(max(1, round(cfg$split_init_I %||% 1)))
+      nA <- round(cfg$split_frac * n_sim)
+      run_b <- function(gseed, nsim, sd) {
+        if (nsim <= 0) return(NULL)
+        Ii <- integer(4); Ii[gseed] <- I0
+        o <- run_stoch_cd_dust(sp$mm, beta = beta, N = sp$Ngrp, t = cfg$t_star,
+                               I_ini = Ii, susceptibility = sp$sus,
+                               gamma = cfg$gamma, dt = cfg$dt,
+                               timepoints = seq(1, cfg$t_star, 1),
+                               n_sim = nsim, cores = cfg$inner_cores, seed = sd)
+        setDT(o); fin <- o[time == cfg$t_star]
+        data.table(C1 = fin$C1 + fin$C3, C2 = fin$C2 + fin$C4)
+      }
+      sdB <- if (is.null(seed)) NULL else as.integer(seed) + 1L
+      rbindlist(list(run_b(1L, nA, seed), run_b(3L, n_sim - nA, sdB)))
     },
     sir_sus_frailty = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_frailty_cd(
@@ -516,6 +558,12 @@ compute_ve <- function(cfg, beta, alpha) {
       n_sites = cfg$n_sites, site_icc = cfg$site_icc,
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
+    sir_split_effect = get_stoch_eate_sir_split_effect(
+      beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
+      t = cfg$t_star, gamma = cfg$gamma, I_ini_total = cfg$split_init_I %||% 1,
+      split_frac = cfg$split_frac, split_alpha_prod = cfg$split_alpha_prod,
+      n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
+      dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
     sir_sus_frailty = ,
     sir_trans_frailty = get_stoch_eate_frailty(
       alpha = alpha, sd = cfg$sd, sd_trans = cfg$sd_trans, beta = beta,
@@ -726,6 +774,11 @@ run_one_job <- function(cfg) {
 # parallelism is entirely inside each config (fit dust threading +
 # K-loop parallelism), driven by `cores_per_node`. No outer mclapply
 # to avoid nested-fork thrashing.
+#
+# Set EATE_SOURCE_ONLY=1 to load the definitions (build_simulator,
+# materialise_cfg, configs, ...) without running the array -- used by
+# helper scripts such as compare_mode_mean.R.
+if (Sys.getenv("EATE_SOURCE_ONLY") != "1") {
 
 id <- Sys.getenv("SLURM_ARRAY_TASK_ID")
 if (id == "") id <- 1
@@ -752,3 +805,5 @@ results <- lapply(ids, run_id)
 
 saveRDS(results, file.path(out_dir, glue("results_{id}.RDS")))
 message(glue("Wrote {out_dir}/results_{id}.RDS"))
+
+}   # end if (EATE_SOURCE_ONLY != "1")
