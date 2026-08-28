@@ -87,6 +87,7 @@ labels_L3_pool_nets <- function(r) {
 
 order_key <- function(label) {
   if (label %in% c("linear", "sir", "sir_multisite", "sir_split_effect")) return(paste0("0_", label))
+  if (grepl("^sir_i[0-9]+$", label)) return(paste0("0_", label))   # SIR I_ini sweep
   if (grepl("frailty", label))       return(paste0("1_", label))
   if (grepl("multisite", label))     return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
@@ -101,6 +102,7 @@ display_name <- function(x) {
     if (g == "linear")           return("Linear")
     if (g == "sir")              return("SIR (homogeneous)")
     if (g == "sir_split_effect") return("SIR (two-block effect mod.)")
+    if (grepl("^sir_i[0-9]+$", g)) return(sprintf("SIR (I_ini = %s)", sub("^sir_i0*", "", g)))
     if (grepl("^sir_multisite(_a[0-9]+)?$", g)) {
       s <- sub("^sir_multisite", "SIR multi-site", g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))

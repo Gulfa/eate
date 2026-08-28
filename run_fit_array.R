@@ -55,11 +55,11 @@ experiments <- list(
 gamma  <- 1
 dt     <- 0.01
 
-# Override the initial infecteds c(unvac, vac) for the homogeneous SIR model
-# ONLY, independent of the experiment's I_ini_2g. NULL = use the experiment's.
-# Useful to push just SIR into the low-seed / bimodal regime without touching
-# the other models or experiments.
-sir_I_ini_2g <- NULL
+# Sweep the homogeneous SIR model over multiple initial-infected settings
+# WITHIN each experiment; each appears as its OWN model ("sir_i<total>") in the
+# plots, so the I_ini effect is directly comparable. NULL = a single plain
+# "sir" at the experiment's I_ini_2g. Each entry is a c(unvac, vac) vector.
+sir_I_inis <- NULL          # e.g. list(c(1, 1), c(5, 5), c(10, 10))
 
 # Optim
 n_sim_opt   <- 1000
@@ -195,11 +195,23 @@ build_configs_for_experiment <- function(exp) {
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__linear"),
     model_type = "linear", ve_n_vac = 1))
-  cs[[length(cs)+1]] <- modifyList(base, list(
-    name = glue("{exp$id}__sir"),
-    model_type = "sir", ve_n_vac = 1,
-    # optional SIR-only initial-infecteds override (else use the experiment's)
-    I_ini_2g = if (!is.null(sir_I_ini_2g)) sir_I_ini_2g else base$I_ini_2g))
+  # Homogeneous SIR: either a single plain "sir", or one config per I_ini in
+  # sir_I_inis, each shown as its own model "sir_i<total>" (sim_type stays
+  # "sir" so the simulator/EATE switch is unchanged).
+  sir_variants <- if (is.null(sir_I_inis)) list(NULL) else sir_I_inis
+  for (iv in sir_variants) {
+    if (is.null(iv)) {
+      cs[[length(cs)+1]] <- modifyList(base, list(
+        name = glue("{exp$id}__sir"),
+        model_type = "sir", ve_n_vac = 1))
+    } else {
+      tag <- sprintf("i%02d", sum(iv))
+      cs[[length(cs)+1]] <- modifyList(base, list(
+        name = glue("{exp$id}__sir_{tag}"),
+        model_type = glue("sir_{tag}"), sim_type = "sir",
+        ve_n_vac = 1, I_ini_2g = iv))
+    }
+  }
   # Two-block effect-modification model: same vaccine, different effect in two
   # non-mixing compartments; one random index case decides which ignites, so
   # mode != mean in the vaccine ratio. Randomisation is simple within
@@ -271,7 +283,9 @@ at_tstar <- function(out, t_star) {
 
 build_simulator <- function(cfg) {
   N_total <- cfg$N_cont + cfg$N_vac
-  switch(cfg$model_type,
+  # sim_type drives the simulator; model_type may be a display variant
+  # (e.g. "sir_i02") that shares a simulator.
+  switch(cfg$sim_type %||% cfg$model_type,
     linear = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_linear_dust(
         beta = beta, N = c(cfg$N_cont, cfg$N_vac),
@@ -550,7 +564,7 @@ compute_ve <- function(cfg, beta, alpha) {
   sus      <- c(1, alpha)
   tp       <- seq(1, cfg$t_star, 1)
 
-  ve <- switch(cfg$model_type,
+  ve <- switch(cfg$sim_type %||% cfg$model_type,
     linear = get_stoch_eate_linear(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
