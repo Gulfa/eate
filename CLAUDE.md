@@ -45,6 +45,29 @@ install.packages(c("dplyr", "data.table", "ggplot2", "adaptivetau", "odin",
 
 The `odin` package may need to be installed from GitHub: `remotes::install_github("mrc-ide/odin")`
 
+## Model compile cache (`odin_cache.R`)
+
+The six odin2/dust2 models take ~3 minutes to compile from scratch. `odin_cache.R`
+points dust2 at a persistent build directory (`.odin_cache/`, gitignored) via
+`DUST_WORKDIR_ROOT`, so a fresh session reuses the compiled shared libraries and
+starts in ~6s instead. It is loaded automatically by the project `.Rprofile` and
+by `model.R` / `det_model.R` / `stoch_model.R`.
+
+Nothing needs to be invalidated by hand: the cache key is a hash of the generated
+C++, so editing a model file recompiles it and reverting the edit gets the old
+build back for free. Compiles are locked per model, so the slurm arrays can start
+cold without racing each other.
+
+```r
+odin_cache_warm()          # precompile everything (do this before submitting an array)
+odin_cache_status()        # what is cached, when it was built, how big
+odin_cache_clean(days=30)  # reclaim disk; 0 clears the cache
+```
+
+Run with `R --vanilla` or set `EATE_ODIN_CACHE_DISABLE=1` to bypass it. The two
+odin v1 models (`det_mod_cd.R`, `det_mod_ncd.R`) are not cached — odin v1 rewrites
+its generated C every time — but they are only ~5s together.
+
 ## Architecture
 
 The code is organized in three layers:

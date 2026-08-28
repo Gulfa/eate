@@ -1,11 +1,13 @@
 library(adaptivetau)
 library(data.table)
 
-stoch_model_cd     <- odin2::odin("stoch_sir.R")
-stoch_model_adj        <- odin2::odin("stoch_mod_adj.R")
-stoch_model_adj_sparse <- odin2::odin("stoch_mod_adj_sparse.R")
-stoch_model_linear <- odin2::odin("stoch_linear.R")
-stoch_model_ind    <- odin2::odin("stoch_ind.R")
+source("odin_cache.R")
+
+stoch_model_cd         <- odin_cached("stoch_sir.R")
+stoch_model_adj        <- odin_cached("stoch_mod_adj.R")
+stoch_model_adj_sparse <- odin_cached("stoch_mod_adj_sparse.R")
+stoch_model_linear     <- odin_cached("stoch_linear.R")
+stoch_model_ind        <- odin_cached("stoch_ind.R")
 
 transitions_sir <- list(
   c(S1=-1, I1=1, C1=1), c(I1=-1, R1=1),

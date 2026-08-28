@@ -5,9 +5,11 @@
 
 #odin_model <- odin.dust::odin_dust("odinmodel.R")
 
+source("odin_cache.R")
+
 det_model_cd  <- odin::odin("det_mod_cd.R")
 det_model_ncd <- odin::odin("det_mod_ncd.R")
-det_model_adj <- odin2::odin("det_mod_adj.R")
+det_model_adj <- odin_cached("det_mod_adj.R")
 
 #det_model_hazard <- odin::odin("det_hazard.R")
 #det_non_linear <- odin::odin("simple_non_linear.R")
