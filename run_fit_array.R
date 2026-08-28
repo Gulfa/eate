@@ -96,9 +96,12 @@ kernel_hess_hrel <- 0.03             # FD step (relative) for the 2nd-derivative
 # n x n nodes around the fit, box +/- span in log units (auto-expanded until
 # the likelihood-ratio region is interior). Gives the MLE, profile LR
 # intervals, moments, and the draws propagated into VE.
-grid_post_n    <- 25L
-grid_post_nsim <- 4000L
-grid_post_span <- 0.7
+grid_post_n          <- 25L
+grid_post_nsim       <- 4000L
+grid_post_span       <- 0.7
+grid_post_max_expand <- 8L   # box doublings allowed; too few -> a wide (low
+                             # I_ini) posterior is truncated and its sd becomes
+                             # an artefact of the box, erasing real trends
 
 # Posterior cov
 post_cov_n_sim <- 1000
@@ -183,7 +186,7 @@ base_common <- list(
   kernel_hess_mult = kernel_hess_mult, kernel_hess_nsim = kernel_hess_nsim,
   kernel_hess_hrel = kernel_hess_hrel,
   grid_post_n = grid_post_n, grid_post_nsim = grid_post_nsim,
-  grid_post_span = grid_post_span,
+  grid_post_span = grid_post_span, grid_post_max_expand = grid_post_max_expand,
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
@@ -564,15 +567,18 @@ grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
   }
 
   lb <- log(beta_hat); la <- log(alpha_hat)
-  g <- NULL
-  for (it in seq_len(3L)) {
+  g <- NULL; interior <- FALSE
+  max_expand <- cfg$grid_post_max_expand %||% 8L
+  for (it in seq_len(max_expand)) {
     bs  <- seq(exp(lb - span), exp(lb + span), length.out = n_grid)
     as_ <- seq(exp(la - span), exp(la + span), length.out = n_grid)
     g   <- eval_grid(bs, as_)
     if (!any(is.finite(g$nll))) return(NULL)
     g[, dev := 2 * (nll - min(nll, na.rm = TRUE))]
     edge <- g[beta %in% range(bs) | alpha %in% range(as_)]
-    if (!any(is.finite(edge$dev)) || min(edge$dev, na.rm = TRUE) > cut_in) break
+    if (!any(is.finite(edge$dev)) || min(edge$dev, na.rm = TRUE) > cut_in) {
+      interior <- TRUE; break
+    }
     span <- span * 1.6                        # region hits the edge -> widen
   }
   g <- g[is.finite(nll)]
@@ -580,6 +586,18 @@ grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
   g[, dev := 2 * (nll - min(nll))]
   g[, w := exp(-(nll - min(nll)))]
   g[, w := w / sum(w)]
+
+  # --- Diagnostics: is this posterior driven by the DATA or by the BOX? -----
+  # With a flat prior on a finite box, a weakly informative likelihood makes
+  # the posterior tend to the prior, and then sd -> box_width/sqrt(12), i.e.
+  # an artefact of `span` (which is relative to the fit, so it would look the
+  # same for every config and erase real trends). ESS flags weight degeneracy;
+  # boundary mass and `interior` flag truncation / prior dominance.
+  ess       <- 1 / sum(g$w^2)
+  edge_b    <- range(g$beta); edge_a <- range(g$alpha)
+  bnd_mass  <- sum(g$w[g$beta %in% edge_b | g$alpha %in% edge_a])
+  box_sd_b  <- diff(edge_b) / sqrt(12)        # sd if the posterior were uniform
+  box_sd_a  <- diff(edge_a) / sqrt(12)
 
   mu_b <- sum(g$w * g$beta); mu_a <- sum(g$w * g$alpha)
   vb   <- sum(g$w * (g$beta  - mu_b)^2)
@@ -595,12 +613,32 @@ grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
     range(p[[par]])
   }
   mle <- g[which.min(nll)]
+  ci_b <- prof("beta"); ci_a <- prof("alpha")
+  # Box-limited => the reported sd reflects `span`, not the data. Flag when the
+  # LR region never became interior, when a profile CI runs to the box edge, or
+  # when the sd is a large fraction of the uniform-over-box sd.
+  box_limited <- (!interior) || bnd_mass > 0.01 ||
+                 isTRUE(all.equal(ci_b[1], edge_b[1])) ||
+                 isTRUE(all.equal(ci_b[2], edge_b[2])) ||
+                 isTRUE(all.equal(ci_a[1], edge_a[1])) ||
+                 isTRUE(all.equal(ci_a[2], edge_a[2])) ||
+                 sqrt(vb) > 0.7 * box_sd_b || sqrt(va) > 0.7 * box_sd_a
+  if (box_limited)
+    warning(sprintf(paste0("grid_posterior: posterior is BOX-LIMITED ",
+                           "(interior=%s, boundary mass=%.3f, span=%.2f, ESS=%.0f/%d). ",
+                           "Reported sd reflects the grid box, not the data -- ",
+                           "raise grid_post_span / grid_post_max_expand."),
+                    interior, bnd_mass, span, ess, nrow(g)))
   list(cov = cov0,
        sd  = sqrt(c(beta = vb, alpha = va)),
        mean = c(beta = mu_b, alpha = mu_a),
        mle  = c(beta = mle$beta, alpha = mle$alpha),
-       ci_beta = prof("beta"), ci_alpha = prof("alpha"),
-       span = span, n_grid = n_grid,
+       ci_beta = ci_b, ci_alpha = ci_a,
+       span = span, n_grid = n_grid, interior = interior,
+       ess = ess, ess_frac = ess / nrow(g), bnd_mass = bnd_mass,
+       box_sd = c(beta = box_sd_b, alpha = box_sd_a),
+       sd_over_box = c(beta = sqrt(vb) / box_sd_b, alpha = sqrt(va) / box_sd_a),
+       box_limited = box_limited,
        d_beta = diff(sort(unique(g$beta))[1:2]),
        d_alpha = diff(sort(unique(g$alpha))[1:2]),
        grid = g[, .(beta, alpha, nll, dev, w)])
@@ -896,6 +934,12 @@ run_one_job <- function(cfg) {
                    "alpha = {signif(gpost$mle['alpha'], 4)}  |  ",
                    "95% LR CI beta [{signif(gpost$ci_beta[1],3)}, {signif(gpost$ci_beta[2],3)}] ",
                    "alpha [{signif(gpost$ci_alpha[1],3)}, {signif(gpost$ci_alpha[2],3)}]"))
+      message(glue("[{cfg$name}] grid diag: span={signif(gpost$span,3)} ",
+                   "interior={gpost$interior} bnd_mass={signif(gpost$bnd_mass,3)} ",
+                   "ESS={round(gpost$ess)}/{gpost$n_grid^2} ",
+                   "sd/box=({signif(gpost$sd_over_box['beta'],2)}, ",
+                   "{signif(gpost$sd_over_box['alpha'],2)})",
+                   "{if (isTRUE(gpost$box_limited)) '  [BOX-LIMITED]' else ''}"))
     } else {
       message(glue("[{cfg$name}] grid posterior failed; keeping moment sandwich."))
     }
@@ -956,7 +1000,11 @@ run_one_job <- function(cfg) {
     grid_post       = if (is.null(gpost)) NULL else
                       list(mle = gpost$mle, mean = gpost$mean,
                            ci_beta = gpost$ci_beta, ci_alpha = gpost$ci_alpha,
-                           span = gpost$span, n_grid = gpost$n_grid),
+                           span = gpost$span, n_grid = gpost$n_grid,
+                           interior = gpost$interior, ess = gpost$ess,
+                           ess_frac = gpost$ess_frac, bnd_mass = gpost$bnd_mass,
+                           box_sd = gpost$box_sd, sd_over_box = gpost$sd_over_box,
+                           box_limited = gpost$box_limited),
     loss_floor      = loss_floor,
     loss_chisq      = loss_chisq,
     resid_C1        = resid_C1,
