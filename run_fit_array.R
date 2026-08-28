@@ -819,6 +819,13 @@ run_one_job <- function(cfg) {
     loss_chisq      = loss_chisq,
     resid_C1        = resid_C1,
     resid_C2        = resid_C2,
+    # The post_cov_n_sim realisations of (C1, C2) at the FITTED (beta, alpha)
+    # -- i.e. the model's outcome distribution at the best fit, which the
+    # analysis plots against the observed (data_C1, data_C2). Already computed
+    # for Sigma above, so this is free; ~1000 x 2 counts per job to store.
+    fit_draws       = data.table::as.data.table(pcov$base)[, .(C1, C2)],
+    data_C1         = cfg$data_C1,
+    data_C2         = cfg$data_C2,
     ve              = ve,
     ve_uncertainty  = ve_unc
   )
