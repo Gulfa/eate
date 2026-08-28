@@ -309,6 +309,13 @@ summarise_param <- function(ok, group_fn, param) {
 }
 
 forest_plot <- function(df, title, xlab, vline = NULL) {
+  # copy(): the group := below is a data.table modify-by-reference, which would
+  # otherwise convert the CALLER's df$group from raw codes ("sir_i02") to
+  # display-name factors ("SIR (I_ini = 2)"). Downstream code (the two-column
+  # VE|alpha plot) re-derives its order with order_key, which only recognises
+  # the raw codes -- so the mutation silently reordered the sir_i sweep
+  # alphabetically by label (10, 2, 20) instead of numerically.
+  df    <- copy(df)
   ord   <- rev(as.character(df$group))
   labs  <- setNames(display_name(ord), ord)
   df[, group := factor(as.character(group), levels = ord, labels = labs[ord])]
