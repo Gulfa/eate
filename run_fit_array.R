@@ -216,9 +216,17 @@ build_configs_for_experiment <- function(exp) {
   # non-mixing compartments; one random index case decides which ignites, so
   # mode != mean in the vaccine ratio. Randomisation is simple within
   # compartments (exchangeable), so a single config + ve_n_vac = 1.
+  # Fit with the KERNEL (mode) method: the moment-matching sandwich
+  # J^-1 Sigma J^-T breaks for this model -- at large N the two compartments
+  # ignite near-deterministically, so per-realisation (C1,C2) collapses to two
+  # points (rank-1 Sigma) -> non-PD covariance / sd = 0; and alpha enters the
+  # two compartments oppositely (alpha vs prod/alpha) so its column of J
+  # nearly cancels -> wide/degenerate alpha. The kernel-Hessian posterior at
+  # the ignited compartment's mode avoids both.
   cs[[length(cs)+1]] <- modifyList(base, list(
     name = glue("{exp$id}__sir_split_effect"),
-    model_type = "sir_split_effect", ve_n_vac = 1))
+    model_type = "sir_split_effect", ve_n_vac = 1,
+    fit_method = "kernel"))
   # Multi-site RCT: n_sites locations, per-site vaccine fraction dispersion
   # set by site_icc (0 = individually randomised / max within-site
   # cancellation, 1 = cluster randomised / fully separated). The allocation
@@ -522,12 +530,33 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
   mult <- cfg$kernel_hess_mult %||% c(0.7, 1.0, 1.4)    # scale factors
   nll <- function(b, a, m)
     .kernel_negloglik(simulator(b, a, nsim, seed = seed), d1, d2, m * bw[1], m * bw[2])
-  h_rel <- cfg$kernel_hess_hrel %||% 0.03
+  h_rel     <- cfg$kernel_hess_hrel %||% 0.03
+  floor_nll <- -log(1e-300)                             # value when L_hat = 0
+  # Adaptive FD step: shrink while a +/- perturbation leaves the kernel (nll
+  # near the floor, or a huge jump) -> keeps the 2nd difference in the
+  # informative region; grow while the perturbation is too small to register.
+  # A fixed relative step overshoots the SHARP likelihood at large N (a small
+  # param change moves the near-deterministic outbreak past the bandwidth),
+  # hitting the floor -> spuriously huge Hessian -> sd = 0.
+  find_step <- function(f_pert, base_step, f0) {
+    h <- base_step
+    for (it in 1:16) {
+      fp <- f_pert(h); fm <- f_pert(-h)
+      if (!is.finite(fp) || !is.finite(fm)) { h <- h / 2; next }
+      dmax <- max(fp, fm) - f0
+      if (max(fp, fm) > floor_nll - 5 || dmax > 15) { h <- h / 2; next }  # overshoot
+      if (dmax < 0.05) { h <- h * 2; next }                              # understep
+      break
+    }
+    h
+  }
   hess_cov_at <- function(m) {
-    hb <- beta * h_rel; ha <- alpha * h_rel
+    f0 <- nll(beta, alpha, m)
+    if (!is.finite(f0) || f0 > floor_nll - 5) return(matrix(NA_real_, 2, 2))
+    hb <- find_step(function(dh) nll(beta + dh, alpha, m), beta  * h_rel, f0)
+    ha <- find_step(function(dh) nll(beta, alpha + dh, m), alpha * h_rel, f0)
     if (beta  - hb <= 0) hb <- beta  / 2
     if (alpha - ha <= 0) ha <- alpha / 2
-    f0  <- nll(beta, alpha, m)
     fbb <- (nll(beta + hb, alpha, m) - 2 * f0 + nll(beta - hb, alpha, m)) / hb^2
     faa <- (nll(beta, alpha + ha, m) - 2 * f0 + nll(beta, alpha - ha, m)) / ha^2
     fba <- (nll(beta + hb, alpha + ha, m) - nll(beta + hb, alpha - ha, m) -
