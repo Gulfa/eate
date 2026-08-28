@@ -578,6 +578,15 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
   for (d in c(1L, 4L))
     if (!is.finite(cov0[d]) || cov0[d] <= 0) cov0[d] <- covs[[imin]][d]
   cov0[1, 2] <- cov0[2, 1] <- 0.5 * (cov0[1, 2] + cov0[2, 1])
+  # Enforce positive-definiteness. The diagonal (variances) is well estimated
+  # by the adaptive-step 2nd differences, but the CROSS term moves both params
+  # at once and is noisier -- it can push |rho| >= 1 -> non-PD -> chol fails ->
+  # VE-with-uncertainty skipped. Clamp the correlation magnitude to rho_max so
+  # the matrix is PD by construction, keeping the trustworthy diagonal.
+  rho_max <- 0.95
+  cmax <- rho_max * sqrt(cov0[1, 1] * cov0[2, 2])
+  cov0[1, 2] <- cov0[2, 1] <- if (!is.finite(cov0[1, 2])) 0
+                              else max(-cmax, min(cmax, cov0[1, 2]))
   dimnames(cov0) <- list(c("beta", "alpha"), c("beta", "alpha"))
   list(cov = cov0,
        sd  = sqrt(pmax(c(beta = cov0[1, 1], alpha = cov0[2, 2]), 0)))
