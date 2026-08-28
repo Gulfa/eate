@@ -45,6 +45,25 @@ flat <- unlist(lapply(files, readRDS), recursive = FALSE)
 ok_all <- Filter(function(x) !is.null(x) && !is.null(x$fit), flat)
 message(glue("{length(ok_all)}/{length(flat)} jobs returned a result"))
 
+# Normalise string-ish fields to PLAIN character. Configs built with glue()
+# carry class c("glue","character"), which propagates into ve$model; rbindlist
+# then refuses to stack a glue-classed column against a plain-character one
+# ("Class attribute on column N of item 2 does not match..."). Coerce on load
+# so results written before the run_fit_array fix still analyse.
+ok_all <- lapply(ok_all, function(r) {
+  for (f in c("name", "model_type", "sim_type", "experiment_id", "fit_method"))
+    if (!is.null(r[[f]])) r[[f]] <- as.character(r[[f]])
+  for (tb in c("ve", "ve_uncertainty")) {
+    d <- r[[tb]]
+    if (is.null(d) || !nrow(d)) next
+    for (cl in names(d))
+      if (is.character(d[[cl]]) && !identical(class(d[[cl]]), "character"))
+        data.table::set(d, j = cl, value = as.character(d[[cl]]))
+    r[[tb]] <- d
+  }
+  r
+})
+
 # Split by experiment_id (backwards-compat: NA -> "default")
 experiment_ids <- vapply(ok_all,
                          function(r) r$experiment_id %||% "default",
@@ -471,7 +490,7 @@ if (!nrow(draws_dt)) {
     p <- ggplot(d, aes(x = value, fill = fillf)) +
       geom_histogram(bins = 40, position = "stack", colour = "white", linewidth = 0.1) +
       geom_vline(data = qs, aes(xintercept = x, linetype = interval),
-                 inherit.aes = FALSE, colour = "grey20", linewidth = 0.4) +
+                 colour = "grey20", linewidth = 0.4) +
       facet_wrap(vars(rowf, metric), scales = "free", ncol = 3) +
       scale_fill_manual(name = fill_name, values = pal, na.value = "grey60") +
       scale_linetype_manual(name = "central interval",
@@ -582,7 +601,7 @@ if (!nrow(fit_draws_dt)) {
     geom_histogram(bins = 40, position = "stack",
                    colour = "white", linewidth = 0.1) +
     geom_vline(data = vlines, aes(xintercept = target),
-               inherit.aes = FALSE, colour = "firebrick",
+               colour = "firebrick",
                linetype = "dashed", linewidth = 0.6) +
     facet_wrap(vars(model, outcome), scales = "free", ncol = 2) +
     scale_fill_manual(name = "allocation", values = dark2_pal(n_fill),
@@ -606,7 +625,7 @@ if (!nrow(fit_draws_dt)) {
     geom_jitter(width = 0.4, height = 0.4, alpha = 0.15,
                 size = 0.7, colour = "grey25") +
     geom_point(data = tpts, aes(x = target_C1, y = target_C2),
-               inherit.aes = FALSE, colour = "firebrick",
+               colour = "firebrick",
                shape = 18, size = 4) +
     facet_wrap(~ model, scales = "free") +
     theme_bw(base_size = 13) +

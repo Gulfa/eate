@@ -221,7 +221,10 @@ build_configs_for_experiment <- function(exp) {
       tag <- sprintf("i%02d", sum(iv))
       cs[[length(cs)+1]] <- modifyList(base, list(
         name = glue("{exp$id}__sir_{tag}"),
-        model_type = glue("sir_{tag}"), sim_type = "sir",
+        # paste0, NOT glue: glue() returns a c("glue","character") object, and
+        # a glue-classed model_type propagates into ve$model, which then fails
+        # rbindlist against the plain-character columns of the other models.
+        model_type = paste0("sir_", tag), sim_type = "sir",
         ve_n_vac = 1, I_ini_2g = iv))
     }
   }
