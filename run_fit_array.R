@@ -997,6 +997,10 @@ run_one_job <- function(cfg) {
     pl_alpha        = cfg$pl_alpha        %||% NA_real_,
     network_seed    = cfg$network_seed    %||% NA_integer_,
     allocation_seed = cfg$allocation_seed %||% NA_integer_,
+    # Needed by the analysis to report the population-average alpha for
+    # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
+    split_frac       = cfg$split_frac       %||% NA_real_,
+    split_alpha_prod = cfg$split_alpha_prod %||% NA_real_,
     fit             = fit,
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),

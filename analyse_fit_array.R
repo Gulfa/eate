@@ -86,6 +86,23 @@ dark2_pal <- function(n) {
   else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
 }
 
+# For sir_split_effect the FITTED alpha is compartment A's vaccinated
+# susceptibility; B's is split_alpha_prod / alpha. Report the population-
+# average instead: split_frac * alpha_A + (1 - split_frac) * alpha_B.
+# Applied elementwise to the posterior DRAWS (not just the point estimate),
+# so intervals reflect the non-linear transform rather than being mapped
+# through it after the fact. Identity for every other model.
+#
+# NB the map is non-monotonic in alpha (minimum at sqrt((1-f)*p/f)), so two
+# fitted alphas can give the same average; near that minimum the transform
+# compresses the interval.
+alpha_report <- function(a, r) {
+  if (!identical(as.character(r$model_type), "sir_split_effect")) return(a)
+  f <- r$split_frac       %||% 0.75
+  p <- r$split_alpha_prod %||% 0.5
+  f * a + (1 - f) * (p / a)
+}
+
 labels_L1_all_splits <- function(r) {
   switch(r$model_type,
          network           = sprintf("network_%s_n%02d_a%02d",
@@ -191,7 +208,11 @@ fit_dt <- rbindlist(lapply(ok, function(r) {
     network_seed    = r$network_seed    %||% NA_integer_,
     allocation_seed = r$allocation_seed %||% NA_integer_,
     beta            = r$fit$beta,
+    # Raw fitted parameter (sd_alpha / cor_ba below are in this space).
     alpha           = r$fit$alpha,
+    # Reported alpha: identical except for sir_split_effect, where it is the
+    # population-average over the two compartments (see alpha_report).
+    alpha_avg       = alpha_report(r$fit$alpha, r),
     loss            = r$fit$loss,
     loss_floor      = r$loss_floor %||% NA_real_,
     loss_chisq      = r$loss_chisq %||% NA_real_,
@@ -280,13 +301,15 @@ summarise_param <- function(ok, group_fn, param) {
   draws <- rbindlist(lapply(seq_along(ok), function(i) {
     r   <- ok[[i]]
     grp <- group_fn(r)
+    # sir_split_effect reports the population-average alpha (see alpha_report).
+    tf  <- if (param == "alpha") function(x) alpha_report(x, r) else identity
     vu  <- r$ve_uncertainty
     if (is.null(vu) || !nrow(vu) || !(col %in% names(vu)))
-      return(data.table(group = grp, job = i, value = r$fit[[param]]))
+      return(data.table(group = grp, job = i, value = tf(r$fit[[param]])))
     v  <- vu[method == "full_stoch"]
     if (!nrow(v)) v <- vu
     dd <- unique(v[, .(param_sample, value = get(col))])
-    data.table(group = grp, job = i, value = dd$value)
+    data.table(group = grp, job = i, value = tf(dd$value))
   }))
 
   # Within/between decomposition (equal weight per job), for diagnostics.
@@ -460,7 +483,7 @@ draws_dt <- rbindlist(lapply(seq_along(ok), function(i) {
              allocation_seed = r$allocation_seed %||% NA_integer_,
              network_seed    = r$network_seed    %||% NA_integer_,
              pl_alpha        = r$pl_alpha        %||% NA_real_,
-             VE = agg$VE, alpha = agg$alpha, beta = agg$beta)
+             VE = agg$VE, alpha = alpha_report(agg$alpha, r), beta = agg$beta)
 }))
 
 if (!nrow(draws_dt)) {
