@@ -92,6 +92,14 @@ kernel_hess_mult <- c(0.6, 0.8, 1.0, 1.2, 1.5) # bandwidth multipliers for ->0 e
 kernel_hess_nsim <- 8000L            # sims for the (noisy) kernel Hessian
 kernel_hess_hrel <- 0.03             # FD step (relative) for the 2nd-derivative Hessian
 
+# Grid likelihood surface (the kernel posterior; replaces the FD Hessian).
+# n x n nodes around the fit, box +/- span in log units (auto-expanded until
+# the likelihood-ratio region is interior). Gives the MLE, profile LR
+# intervals, moments, and the draws propagated into VE.
+grid_post_n    <- 25L
+grid_post_nsim <- 4000L
+grid_post_span <- 0.7
+
 # Posterior cov
 post_cov_n_sim <- 1000
 post_cov_seed  <- 1234L
@@ -174,6 +182,8 @@ base_common <- list(
   fit_method = fit_method, kernel_h_frac = kernel_h_frac,
   kernel_hess_mult = kernel_hess_mult, kernel_hess_nsim = kernel_hess_nsim,
   kernel_hess_hrel = kernel_hess_hrel,
+  grid_post_n = grid_post_n, grid_post_nsim = grid_post_nsim,
+  grid_post_span = grid_post_span,
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
@@ -514,6 +524,102 @@ fit_one <- function(simulator, cfg) {
        grid_start_loss = start$loss)
 }
 
+# ---------------------------------------------------------------------------
+# Grid likelihood surface (replaces the finite-difference Hessian)
+# ---------------------------------------------------------------------------
+# Evaluate -log L_hat on a grid around the fit under CRN. With only 2
+# parameters this is cheap and fully parallel, and -- unlike a numerical
+# Hessian -- it does NOT differentiate a Monte-Carlo function: FD amplifies MC
+# noise by ~1/h^2 (which produced sd=0 / non-PD / unstable rho, with the
+# across-seed CV of sd_beta measured at 0.4-1.2), whereas summing over a grid
+# averages it. From one surface we get:
+#   - the MLE (argmax) as a check on the optimiser,
+#   - frequentist likelihood-ratio regions: {2*(logLmax - logL) <= chisq},
+#     profiled per parameter (chisq_1 = 3.84 at 95%),
+#   - moments and DRAWS by weighting nodes by L (flat prior over the box),
+#     used to propagate parameter uncertainty into VE.
+# Box is set in log space around the fit and expanded until the region of
+# interest is interior; nodes are spaced linearly so a flat prior in (beta,
+# alpha) makes the weights proportional to L.
+#
+# NB the chi-square calibration is exact for a true likelihood; L_hat is
+# kernel-smoothed (bandwidth h) and MC-estimated, so intervals are h-inflated
+# and only approximately calibrated.
+grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
+  n_grid <- cfg$grid_post_n    %||% 25L
+  nsim   <- cfg$grid_post_nsim %||% 4000L
+  span   <- cfg$grid_post_span %||% 0.7      # +/- in log units, then expanded
+  seed   <- cfg$post_cov_seed
+  bw     <- .kernel_bw(cfg)
+  d1     <- cfg$data_C1; d2 <- cfg$data_C2
+  cut_in <- 12                                # region that must be interior
+
+  eval_grid <- function(bs, as_) {
+    g <- as.data.table(expand.grid(beta = bs, alpha = as_))
+    v <- unlist(parallel::mclapply(seq_len(nrow(g)), function(i)
+      .kernel_negloglik(simulator(g$beta[i], g$alpha[i], nsim, seed = seed),
+                        d1, d2, bw[1], bw[2]),
+      mc.cores = cores, mc.preschedule = TRUE))
+    g[, nll := as.numeric(v)][]
+  }
+
+  lb <- log(beta_hat); la <- log(alpha_hat)
+  g <- NULL
+  for (it in seq_len(3L)) {
+    bs  <- seq(exp(lb - span), exp(lb + span), length.out = n_grid)
+    as_ <- seq(exp(la - span), exp(la + span), length.out = n_grid)
+    g   <- eval_grid(bs, as_)
+    if (!any(is.finite(g$nll))) return(NULL)
+    g[, dev := 2 * (nll - min(nll, na.rm = TRUE))]
+    edge <- g[beta %in% range(bs) | alpha %in% range(as_)]
+    if (!any(is.finite(edge$dev)) || min(edge$dev, na.rm = TRUE) > cut_in) break
+    span <- span * 1.6                        # region hits the edge -> widen
+  }
+  g <- g[is.finite(nll)]
+  if (!nrow(g)) return(NULL)
+  g[, dev := 2 * (nll - min(nll))]
+  g[, w := exp(-(nll - min(nll)))]
+  g[, w := w / sum(w)]
+
+  mu_b <- sum(g$w * g$beta); mu_a <- sum(g$w * g$alpha)
+  vb   <- sum(g$w * (g$beta  - mu_b)^2)
+  va   <- sum(g$w * (g$alpha - mu_a)^2)
+  cba  <- sum(g$w * (g$beta - mu_b) * (g$alpha - mu_a))
+  cov0 <- matrix(c(vb, cba, cba, va), 2,
+                 dimnames = list(c("beta", "alpha"), c("beta", "alpha")))
+
+  # Profile likelihood-ratio intervals (chisq_1 = 3.84 at 95%).
+  prof <- function(par) {
+    p <- g[, .(dev = min(dev)), by = par][dev <= 3.84]
+    if (!nrow(p)) return(c(NA_real_, NA_real_))
+    range(p[[par]])
+  }
+  mle <- g[which.min(nll)]
+  list(cov = cov0,
+       sd  = sqrt(c(beta = vb, alpha = va)),
+       mean = c(beta = mu_b, alpha = mu_a),
+       mle  = c(beta = mle$beta, alpha = mle$alpha),
+       ci_beta = prof("beta"), ci_alpha = prof("alpha"),
+       span = span, n_grid = n_grid,
+       d_beta = diff(sort(unique(g$beta))[1:2]),
+       d_alpha = diff(sort(unique(g$alpha))[1:2]),
+       grid = g[, .(beta, alpha, nll, dev, w)])
+}
+
+# Draw K parameter pairs by weighting grid nodes by L (flat prior over the
+# box), jittered within a cell so the draws are not stuck on grid lines.
+sample_grid_posterior <- function(gp, K) {
+  if (is.null(gp) || !nrow(gp$grid)) return(NULL)
+  g   <- gp$grid
+  idx <- sample.int(nrow(g), K, replace = TRUE, prob = g$w)
+  out <- cbind(beta  = g$beta[idx]  + runif(K, -gp$d_beta  / 2, gp$d_beta  / 2),
+               alpha = g$alpha[idx] + runif(K, -gp$d_alpha / 2, gp$d_alpha / 2))
+  out[, 1] <- pmax(out[, 1], 1e-8)
+  out[, 2] <- pmax(out[, 2], 1e-8)
+  colnames(out) <- c("beta", "alpha")
+  out
+}
+
 # Kernel-likelihood posterior covariance: the Laplace covariance is the inverse
 # observed information = [Hessian of -log L_hat]^-1 at the MLE. The kernel
 # broadens the data-space covariance by H = diag(h^2), inflating the posterior;
@@ -719,9 +825,13 @@ sample_posterior <- function(beta_hat, alpha_hat, cov, K,
 # the corresponding (beta_k, alpha_k) so downstream can decompose
 # variance into "parameter" vs "allocation" components.
 compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
-                                        K, n_rep_override, K_cores = 1L) {
-  samples <- sample_posterior(fit$beta, fit$alpha, posterior_cov, K)
-  if (!nrow(samples)) return(data.table())    # no valid posterior samples
+                                        K, n_rep_override, K_cores = 1L,
+                                        samples = NULL) {
+  # `samples` (e.g. grid-posterior draws) takes precedence; otherwise fall
+  # back to the Gaussian MVN(fit, posterior_cov) approximation.
+  if (is.null(samples))
+    samples <- sample_posterior(fit$beta, fit$alpha, posterior_cov, K)
+  if (is.null(samples) || !nrow(samples)) return(data.table())
   cfg_u              <- cfg
   cfg_u$ve_n_rep     <- n_rep_override
   # Inside the K loop each worker owns one core — one dust call at a
@@ -766,17 +876,29 @@ run_one_job <- function(cfg) {
 
   message(glue("[{cfg$name}] posterior cov..."))
   # Always compute the moment pieces (base, Sigma, J) for the misfit
-  # diagnostics below. For the kernel fit the posterior cov/sd come from the
-  # kernel-Hessian (h->0 extrapolated) instead of the moment sandwich, since
-  # the fit matched the mode, not the mean.
+  # diagnostics below. For the kernel fit the posterior comes from the GRID
+  # likelihood surface (no differentiation of a Monte-Carlo function), which
+  # also supplies the draws used to propagate uncertainty into VE.
   pcov <- estimate_posterior_cov(simulator, fit$beta, fit$alpha,
                                  n_sim = cfg$post_cov_n_sim,
                                  seed  = cfg$post_cov_seed,
                                  h_rel = cfg$post_cov_h)
+  gpost <- NULL; post_draws <- NULL
   if ((cfg$fit_method %||% "mean") == "kernel") {
-    kc <- kernel_posterior_cov(simulator, cfg_fit, fit$beta, fit$alpha)
-    pcov$cov <- kc$cov
-    pcov$sd  <- kc$sd
+    cfg_g <- cfg_fit; cfg_g$inner_cores <- 1L      # parallelise over grid nodes
+    gpost <- grid_posterior(build_simulator(cfg_g), cfg_g,
+                            fit$beta, fit$alpha, cores = cores_per_node)
+    if (!is.null(gpost)) {
+      pcov$cov   <- gpost$cov
+      pcov$sd    <- gpost$sd
+      post_draws <- sample_grid_posterior(gpost, cfg$K_post_samples)
+      message(glue("[{cfg$name}] grid MLE: beta = {signif(gpost$mle['beta'], 4)} ",
+                   "alpha = {signif(gpost$mle['alpha'], 4)}  |  ",
+                   "95% LR CI beta [{signif(gpost$ci_beta[1],3)}, {signif(gpost$ci_beta[2],3)}] ",
+                   "alpha [{signif(gpost$ci_alpha[1],3)}, {signif(gpost$ci_alpha[2],3)}]"))
+    } else {
+      message(glue("[{cfg$name}] grid posterior failed; keeping moment sandwich."))
+    }
   }
   message(glue("[{cfg$name}] sd_beta = {signif(pcov$sd['beta'], 3)}  ",
                "sd_alpha = {signif(pcov$sd['alpha'], 3)}"))
@@ -817,7 +939,8 @@ run_one_job <- function(cfg) {
   ve_unc <- compute_ve_with_uncertainty(cfg, fit, pcov$cov,
                                         K = cfg$K_post_samples,
                                         n_rep_override = cfg$ve_n_rep_uncert,
-                                        K_cores = cores_per_node)
+                                        K_cores = cores_per_node,
+                                        samples = post_draws)
 
   list(
     name            = cfg$name,
@@ -830,6 +953,10 @@ run_one_job <- function(cfg) {
     fit             = fit,
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),
+    grid_post       = if (is.null(gpost)) NULL else
+                      list(mle = gpost$mle, mean = gpost$mean,
+                           ci_beta = gpost$ci_beta, ci_alpha = gpost$ci_alpha,
+                           span = gpost$span, n_grid = gpost$n_grid),
     loss_floor      = loss_floor,
     loss_chisq      = loss_chisq,
     resid_C1        = resid_C1,
