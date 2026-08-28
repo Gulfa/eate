@@ -550,19 +550,39 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
     }
     h
   }
-  hess_cov_at <- function(m) {
+  # Hessian of -log L_hat at (beta, alpha) for bandwidth multiplier m, by
+  # fitting a local QUADRATIC surface via least squares over a small design
+  # that is kept INSIDE the kernel. This estimates the cross term (and hence
+  # the beta-alpha correlation) stably -- the old corner second-difference
+  # moved both params at once, so its corners left the kernel and the cross
+  # term was garbage (|rho| >= 1 -> non-PD). Design radii come from the
+  # per-axis adaptive steps, shrunk together until the corners are in-kernel.
+  hessian_at <- function(m) {
     f0 <- nll(beta, alpha, m)
-    if (!is.finite(f0) || f0 > floor_nll - 5) return(matrix(NA_real_, 2, 2))
+    if (!is.finite(f0) || f0 > floor_nll - 5) return(NULL)
     hb <- find_step(function(dh) nll(beta + dh, alpha, m), beta  * h_rel, f0)
     ha <- find_step(function(dh) nll(beta, alpha + dh, m), alpha * h_rel, f0)
-    if (beta  - hb <= 0) hb <- beta  / 2
-    if (alpha - ha <= 0) ha <- alpha / 2
-    fbb <- (nll(beta + hb, alpha, m) - 2 * f0 + nll(beta - hb, alpha, m)) / hb^2
-    faa <- (nll(beta, alpha + ha, m) - 2 * f0 + nll(beta, alpha - ha, m)) / ha^2
-    fba <- (nll(beta + hb, alpha + ha, m) - nll(beta + hb, alpha - ha, m) -
-            nll(beta - hb, alpha + ha, m) + nll(beta - hb, alpha - ha, m)) / (4 * hb * ha)
-    tryCatch(solve(matrix(c(fbb, fba, fba, faa), 2)),
-             error = function(e) matrix(NA_real_, 2, 2))
+    hb <- min(hb, beta / 2); ha <- min(ha, alpha / 2)
+    dirs <- rbind(c(1,0), c(-1,0), c(0,1), c(0,-1),
+                  c(1,1), c(-1,-1), c(1,-1), c(-1,1))
+    for (shrink in 1:6) {                              # keep corners in-kernel
+      pts <- cbind(beta + dirs[,1]*hb, alpha + dirs[,2]*ha)
+      y   <- vapply(seq_len(nrow(pts)),
+                    function(i) nll(pts[i,1], pts[i,2], m), numeric(1))
+      if (all(is.finite(y)) && max(y) < floor_nll - 5) break
+      hb <- hb * 0.7; ha <- ha * 0.7
+    }
+    if (!all(is.finite(y))) return(NULL)
+    db <- pts[,1] - beta; da <- pts[,2] - alpha
+    X  <- cbind(db, da, db^2, da^2, db*da)             # centre absorbs f0
+    cf <- tryCatch(unname(coef(lm(I(y - f0) ~ X - 1))), error = function(e) NULL)
+    if (is.null(cf) || any(!is.finite(cf))) return(NULL)
+    matrix(c(2*cf[3], cf[5], cf[5], 2*cf[4]), 2)       # H = curvature
+  }
+  hess_cov_at <- function(m) {
+    H <- hessian_at(m)
+    if (is.null(H)) return(matrix(NA_real_, 2, 2))
+    tryCatch(solve(H), error = function(e) matrix(NA_real_, 2, 2))
   }
   covs <- lapply(mult, hess_cov_at)
   m2   <- mult^2
@@ -573,20 +593,15 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
     unname(coef(stats::lm(y ~ m2))[1])                 # intercept = bandwidth -> 0
   }
   cov0 <- matrix(vapply(1:4, extr, numeric(1)), 2)
-  # A variance that extrapolated <= 0 is MC noise on a tightly-determined
-  # direction; fall back to the least-inflated (smallest-bw) Hessian variance.
-  for (d in c(1L, 4L))
-    if (!is.finite(cov0[d]) || cov0[d] <= 0) cov0[d] <- covs[[imin]][d]
   cov0[1, 2] <- cov0[2, 1] <- 0.5 * (cov0[1, 2] + cov0[2, 1])
-  # Enforce positive-definiteness. The diagonal (variances) is well estimated
-  # by the adaptive-step 2nd differences, but the CROSS term moves both params
-  # at once and is noisier -- it can push |rho| >= 1 -> non-PD -> chol fails ->
-  # VE-with-uncertainty skipped. Clamp the correlation magnitude to rho_max so
-  # the matrix is PD by construction, keeping the trustworthy diagonal.
-  rho_max <- 0.95
-  cmax <- rho_max * sqrt(cov0[1, 1] * cov0[2, 2])
-  cov0[1, 2] <- cov0[2, 1] <- if (!is.finite(cov0[1, 2])) 0
-                              else max(-cmax, min(cmax, cov0[1, 2]))
+  # Project to the nearest positive-definite matrix (eigenvalue floor). Handles
+  # a residual noisy/ridge cross term or a variance that extrapolated <= 0,
+  # without pretending a specific correlation.
+  if (any(!is.finite(cov0))) cov0 <- covs[[imin]]
+  if (any(!is.finite(cov0))) cov0 <- diag(c(1e-4, 1e-4))
+  ev  <- eigen(cov0, symmetric = TRUE)
+  lam <- pmax(ev$values, max(ev$values, 0) * 1e-3 + 1e-12)
+  cov0 <- ev$vectors %*% diag(lam) %*% t(ev$vectors)
   dimnames(cov0) <- list(c("beta", "alpha"), c("beta", "alpha"))
   list(cov = cov0,
        sd  = sqrt(pmax(c(beta = cov0[1, 1], alpha = cov0[2, 2]), 0)))
