@@ -60,6 +60,13 @@ message(glue("Experiments found: {paste(experiments_present, collapse=', ')}"))
 
 .pa_str <- function(pa) sprintf("pa%s", format(pa, trim = TRUE))
 
+# Dark2, extended by interpolation past its 8 colours (an I_ini sweep can
+# push the model count over 8).
+dark2_pal <- function(n) {
+  if (n <= 8L) brewer.pal(max(n, 3L), "Dark2")[seq_len(n)]
+  else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
+}
+
 labels_L1_all_splits <- function(r) {
   switch(r$model_type,
          network           = sprintf("network_%s_n%02d_a%02d",
@@ -87,7 +94,10 @@ labels_L3_pool_nets <- function(r) {
 
 order_key <- function(label) {
   if (label %in% c("linear", "sir", "sir_multisite", "sir_split_effect")) return(paste0("0_", label))
-  if (grepl("^sir_i[0-9]+$", label)) return(paste0("0_", label))   # SIR I_ini sweep
+  # SIR I_ini sweep: sort NUMERICALLY by the seed total, not lexically, so
+  # I_ini = 2, 10, 100 come out in that order regardless of the tag's padding.
+  if (grepl("^sir_i[0-9]+$", label))
+    return(sprintf("0_sir_i%06d", as.integer(sub("^sir_i", "", label))))
   if (grepl("frailty", label))       return(paste0("1_", label))
   if (grepl("multisite", label))     return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
@@ -103,6 +113,12 @@ display_name <- function(x) {
     if (g == "sir")              return("SIR (homogeneous)")
     if (g == "sir_split_effect") return("SIR (two-block effect mod.)")
     if (grepl("^sir_i[0-9]+$", g)) return(sprintf("SIR (I_ini = %s)", sub("^sir_i0*", "", g)))
+    # Raw model_type codes: the facets/legends keyed on model_type (VE
+    # trajectories, outcome distributions) pass these rather than the
+    # forest-plot group labels handled below.
+    if (g == "sir_sus_frailty")   return("SIR + sus. frailty")
+    if (g == "sir_trans_frailty") return("SIR + trans. frailty")
+    if (g == "network")           return("Network")
     if (grepl("^sir_multisite(_a[0-9]+)?$", g)) {
       s <- sub("^sir_multisite", "SIR multi-site", g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))
@@ -128,6 +144,15 @@ display_name <- function(x) {
     }
     g
   }, character(1))
+}
+
+# Factor of model/group codes ordered by order_key (so the sir_i<N> sweep
+# runs in I_ini order, not alphabetically) and labelled with display_name.
+# Used for every facet / colour / legend keyed on model_type.
+model_factor <- function(x) {
+  lvl <- unique(as.character(x))
+  lvl <- lvl[order(sapply(lvl, order_key))]
+  factor(as.character(x), levels = lvl, labels = display_name(lvl))
 }
 
 # ---------------------------------------------------------------------------
@@ -422,16 +447,16 @@ if (!nrow(draws_dt)) {
                   variable.name = "metric", value.name = "value")
   hist_dt[, metric := factor(metric, levels = c("VE", "alpha", "beta"))]
 
-  dark2_pal <- function(n) if (n <= 8L) brewer.pal(max(n, 3L), "Dark2")[seq_len(n)]
-                           else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
-
   # Stacked histogram of the K posterior draws, faceted by `rowvar` x metric
   # (free scales) and filled by `fill_col`. Shows how each configuration
   # contributes to the pooled VE / alpha / beta distribution.
   save_hist <- function(dt, rowvar, fill_col, fill_name, title, file) {
     if (!nrow(dt)) return(invisible(NULL))
     d <- copy(dt)
-    d[, rowf  := factor(get(rowvar))]
+    # Model rows follow order_key (I_ini order for the sir_i sweep) and get
+    # display names; any other row variable keeps its natural factor order.
+    d[, rowf  := if (rowvar == "model_type") model_factor(get(rowvar))
+                 else factor(get(rowvar))]
     d[, fillf := factor(get(fill_col))]
     pal <- dark2_pal(length(levels(d$fillf)))
 
@@ -499,11 +524,119 @@ if (!nrow(draws_dt)) {
          sd_between_VE    = if (has_var) sd(VE)    else 0,
          cor_alpha_VE     = if (fit_ok) cor(alpha, VE) else NA_real_,
          dVE_dalpha       = if (fit_ok) unname(coef(lm(VE ~ alpha))[2]) else NA_real_)
-  }, by = .(model_type, pl_alpha)][order(model_type, pl_alpha)]
+  }, by = .(model_type, pl_alpha)][order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
   message("\n=== Between-allocation spread (sd of per-allocation means) ===")
   print(between_tbl[, lapply(.SD, function(x)
                              if (is.numeric(x)) round(x, 4) else x)])
+}
+
+# ---------------------------------------------------------------------------
+# Outcome distribution at the best fit: the post_cov_n_sim realisations of
+# (C1, C2) simulated at each job's FITTED (beta, alpha), against the observed
+# (data_C1, data_C2). This is the distributional companion to loss_chisq,
+# which compresses the same comparison into one Mahalanobis number: here you
+# see whether the data sits in the bulk, in a tail, or in the gap of a
+# bimodal (fizzle / take-off) final-size distribution.
+# ---------------------------------------------------------------------------
+
+fit_draws_dt <- rbindlist(lapply(seq_along(ok), function(i) {
+  r <- ok[[i]]
+  d <- r$fit_draws
+  if (is.null(d) || !nrow(d)) return(NULL)
+  data.table(job             = i,
+             # Same grouping as the L3 ("everything pooled per model") forest
+             # plots, so network rows split by Pareto exponent rather than
+             # pooling structurally different networks into one histogram.
+             model_type      = labels_L3_pool_nets(r),
+             allocation_seed = r$allocation_seed %||% NA_integer_,
+             network_seed    = r$network_seed    %||% NA_integer_,
+             pl_alpha        = r$pl_alpha        %||% NA_real_,
+             C1              = as.numeric(d$C1),
+             C2              = as.numeric(d$C2),
+             target_C1       = as.numeric(r$data_C1 %||% NA_real_),
+             target_C2       = as.numeric(r$data_C2 %||% NA_real_))
+}))
+
+if (!nrow(fit_draws_dt)) {
+  message("No fit_draws stored in these results (they pre-date the ",
+          "outcome-distribution output); skipping C1/C2 plots. Re-run ",
+          "run_fit_array.R to populate them.")
+} else {
+  fit_draws_dt[, model := model_factor(model_type)]
+
+  # Long form: one row per (draw, outcome), with that outcome's target.
+  cd <- rbind(
+    fit_draws_dt[, .(model, model_type, job, allocation_seed, network_seed,
+                     outcome = "C1", value = C1, target = target_C1)],
+    fit_draws_dt[, .(model, model_type, job, allocation_seed, network_seed,
+                     outcome = "C2", value = C2, target = target_C2)])
+  cd[, outcome := factor(outcome, levels = c("C1", "C2"),
+                          labels = c("C1 (unvaccinated)", "C2 (vaccinated)"))]
+
+  # Marginal distributions, stacked by allocation like the posterior-draw
+  # histograms, with the observed value as a vertical line per panel.
+  vlines <- unique(cd[, .(model, outcome, target)])[is.finite(target)]
+  n_fill <- length(unique(cd$allocation_seed))
+  p_cd <- ggplot(cd, aes(x = value, fill = factor(allocation_seed))) +
+    geom_histogram(bins = 40, position = "stack",
+                   colour = "white", linewidth = 0.1) +
+    geom_vline(data = vlines, aes(xintercept = target),
+               inherit.aes = FALSE, colour = "firebrick",
+               linetype = "dashed", linewidth = 0.6) +
+    facet_wrap(vars(model, outcome), scales = "free", ncol = 2) +
+    scale_fill_manual(name = "allocation", values = dark2_pal(n_fill),
+                      na.value = "grey60") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA)) +
+    labs(x = "cumulative cases at t*", y = "count",
+         title = "Outcome distribution at the fitted (beta, alpha)",
+         subtitle = "red dashed line = observed data value")
+  ggsave(file.path(out_dir, "hist_C1_C2_at_fit.png"), p_cd,
+         width = 10, height = max(4, 2.4 * nlevels(fit_draws_dt$model)),
+         dpi = 130, limitsize = FALSE)
+
+  # Joint (C1, C2): the marginals hide the correlation, and loss_chisq is a
+  # statement about the JOINT distribution, so plot the cloud with the data
+  # point on top. Jittered because the counts are integers.
+  tpts <- unique(fit_draws_dt[, .(model, target_C1, target_C2)])[
+    is.finite(target_C1) & is.finite(target_C2)]
+  p_joint <- ggplot(fit_draws_dt, aes(x = C1, y = C2)) +
+    geom_jitter(width = 0.4, height = 0.4, alpha = 0.15,
+                size = 0.7, colour = "grey25") +
+    geom_point(data = tpts, aes(x = target_C1, y = target_C2),
+               inherit.aes = FALSE, colour = "firebrick",
+               shape = 18, size = 4) +
+    facet_wrap(~ model, scales = "free") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA)) +
+    labs(x = "C1 (unvaccinated)", y = "C2 (vaccinated)",
+         title = "Joint outcome distribution at the fitted (beta, alpha)",
+         subtitle = "grey = simulated realisations; red diamond = observed data")
+  ggsave(file.path(out_dir, "scatter_C1_C2_at_fit.png"), p_joint,
+         width = 11, height = max(4, 3.0 * ceiling(nlevels(fit_draws_dt$model) / 3)),
+         dpi = 130, limitsize = FALSE)
+
+  # Per-(model, outcome) summary. pct_below_target is the empirical percentile
+  # of the observed value within the fitted model's outcome distribution:
+  # ~50% = data sits at the centre, near 0 or 100 = the fit reproduces the
+  # data only in a tail.
+  cd_summary <- cd[, .(n        = .N,
+                       mean     = mean(value),
+                       sd       = sd(value),
+                       q10      = quantile(value, 0.10),
+                       median   = median(value),
+                       q90      = quantile(value, 0.90),
+                       target   = target[1],
+                       pct_below_target = 100 * mean(value < target[1])),
+                   by = .(model_type, model, outcome)][
+                     order(sapply(model_type, order_key), outcome)]
+  fwrite(cd_summary, file.path(out_dir, "outcome_distribution_at_fit.csv"))
+  message("\n=== Outcome distribution at the fit (data percentile) ===")
+  print(cd_summary[, lapply(.SD, function(x)
+                            if (is.numeric(x)) round(x, 2) else x)])
 }
 
 # ---------------------------------------------------------------------------
@@ -543,12 +676,15 @@ ve_comb <- ve_alloc[, .(VE_med = median(VE),
                         n      = .N),
                     by = .(t, model_type)]
 
+ve_sep[,  model := model_factor(model_type)]
+ve_comb[, model := model_factor(model_type)]
+
 p_sep <- ggplot(ve_sep, aes(x = t, y = VE_med, group = network_seed,
                             colour = factor(network_seed))) +
   geom_ribbon(aes(ymin = VE_min, ymax = VE_max, fill = factor(network_seed)),
               alpha = 0.15, colour = NA) +
   geom_line(size = 1) +
-  facet_wrap(~ model_type, scales = "free_y") +
+  facet_wrap(~ model, scales = "free_y") +
   scale_colour_viridis_d(name = "network_seed", na.value = "black") +
   scale_fill_viridis_d(name   = "network_seed", na.value = "black") +
   theme_minimal(base_size = 13) +
@@ -557,12 +693,12 @@ p_sep <- ggplot(ve_sep, aes(x = t, y = VE_med, group = network_seed,
 ggsave(file.path(out_dir, "ve_trajectory_separate.png"),
        p_sep, width = 11, height = 7, dpi = 130)
 
-p_comb <- ggplot(ve_comb, aes(x = t, y = VE_med, group = model_type,
-                              colour = model_type, fill = model_type)) +
+p_comb <- ggplot(ve_comb, aes(x = t, y = VE_med, group = model,
+                              colour = model, fill = model)) +
   geom_ribbon(aes(ymin = VE_min, ymax = VE_max), alpha = 0.2, colour = NA) +
   geom_line(size = 1) +
-  scale_colour_brewer(palette = "Dark2") +
-  scale_fill_brewer(palette = "Dark2") +
+  scale_colour_manual(name = "model", values = dark2_pal(nlevels(ve_comb$model))) +
+  scale_fill_manual(name   = "model", values = dark2_pal(nlevels(ve_comb$model))) +
   theme_minimal(base_size = 13) +
   labs(x = "t", y = "VE = 1 - EATE (full_stoch)",
        title = "VE(t) per model (allocations + networks pooled)")
@@ -576,6 +712,7 @@ ve_final <- ve_alloc[t == max(t),
                        VE_hi    = quantile(VE, q_hi),
                        n        = .N),
                      by = .(model_type)]
+ve_final <- ve_final[order(sapply(model_type, order_key))]
 fwrite(ve_final, file.path(out_dir, "ve_final.csv"))
 message("\n=== VE at t* (allocations pooled) ===")
 print(ve_final)
@@ -657,6 +794,12 @@ if (nrow(ve_unc_long) > 0) {
   # Double-ribbon plot: inner (param-only) + outer (total). Allocation
   # band shown by colour overlay if you want, but for the headline plot
   # param + total is most informative.
+  # Shared model levels (order_key order) so both ribbons land on the same
+  # facet grid, in I_ini order for the sir_i sweep.
+  mod_lvl <- levels(model_factor(ve_unc$model_type))
+  total_band[, model := factor(display_name(model_type), levels = mod_lvl)]
+  param_band[, model := factor(display_name(model_type), levels = mod_lvl)]
+
   p_unc <- ggplot(total_band, aes(x = t, y = VE_med)) +
     geom_ribbon(aes(ymin = lo, ymax = hi),
                 fill = "grey60", alpha = 0.4) +
@@ -664,7 +807,7 @@ if (nrow(ve_unc_long) > 0) {
                 aes(ymin = lo, ymax = hi),
                 fill = "steelblue", alpha = 0.5) +
     geom_line(size = 1, colour = "black") +
-    facet_wrap(~ model_type, scales = "free_y") +
+    facet_wrap(~ model, scales = "free_y") +
     theme_minimal(base_size = 13) +
     labs(x = "t", y = "VE = 1 - EATE",
          title = glue("VE(t) with posterior uncertainty ({ci_pct}% intervals)"),
