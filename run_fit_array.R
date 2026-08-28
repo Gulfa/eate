@@ -485,6 +485,15 @@ make_loss <- function(simulator, cfg) {
   method <- cfg$fit_method %||% "mean"
   bw     <- .kernel_bw(cfg)
   function(log_par) {
+    # Enforce the parameter box. Nelder-Mead is UNCONSTRAINED, so without this
+    # it walks past log_beta_hi / log_alpha_hi into regions where the simulator
+    # is degenerate (observed: beta=9.6 with a log(5) bound), which then sends
+    # grid_posterior expanding after a signal-free surface. A distance penalty
+    # (rather than a flat wall) leaves a gradient pushing the simplex back.
+    over <- c(log_par[1] - log_beta_hi,  log_alpha_lo - log_par[2],
+              log_beta_lo - log_par[1],  log_par[2] - log_alpha_hi)
+    pen  <- sum(pmax(over, 0)^2)
+    if (pen > 0) return(1e6 * (1 + pen))
     par <- exp(log_par); beta <- par[1]; alpha <- par[2]
     vals <- vapply(seeds, function(s) {
       out <- tryCatch(simulator(beta, alpha, cfg$n_sim_opt, seed = s),
@@ -572,16 +581,33 @@ grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
   lb <- log(beta_hat); la <- log(alpha_hat)
   g <- NULL; interior <- FALSE
   max_expand <- cfg$grid_post_max_expand %||% 8L
+  floor_nll  <- -log(1e-300)                  # nll when L_hat is exactly 0
   for (it in seq_len(max_expand)) {
-    bs  <- seq(exp(lb - span), exp(lb + span), length.out = n_grid)
-    as_ <- seq(exp(la - span), exp(la + span), length.out = n_grid)
+    # Clip the box to the fitting bounds: expanding past them chases the
+    # simulator into degenerate regions (and produced beta ~ 5.8e7 once the
+    # unconstrained optimiser handed over a fit outside the box).
+    bs  <- seq(max(exp(lb - span), exp(log_beta_lo)),
+               min(exp(lb + span), exp(log_beta_hi)),  length.out = n_grid)
+    as_ <- seq(max(exp(la - span), exp(log_alpha_lo)),
+               min(exp(la + span), exp(log_alpha_hi)), length.out = n_grid)
     g   <- eval_grid(bs, as_)
     if (!any(is.finite(g$nll))) return(NULL)
+    # No likelihood signal anywhere: every node has L_hat = 0, so the surface
+    # is flat at the floor and min(nll) is arbitrary. Refuse rather than
+    # report a "posterior" that is really the grid box.
+    if (min(g$nll, na.rm = TRUE) > floor_nll - 5) {
+      warning("grid_posterior: L_hat = 0 across the whole grid ",
+              "(data unreachable, or bandwidth too small); no posterior.")
+      return(NULL)
+    }
     g[, dev := 2 * (nll - min(nll, na.rm = TRUE))]
     edge <- g[beta %in% range(bs) | alpha %in% range(as_)]
     if (!any(is.finite(edge$dev)) || min(edge$dev, na.rm = TRUE) > cut_in) {
       interior <- TRUE; break
     }
+    at_bounds <- min(bs) <= exp(log_beta_lo)  && max(bs) >= exp(log_beta_hi) &&
+                 min(as_) <= exp(log_alpha_lo) && max(as_) >= exp(log_alpha_hi)
+    if (at_bounds) break                      # box already spans the bounds
     span <- span * 1.6                        # region hits the edge -> widen
   }
   g <- g[is.finite(nll)]
