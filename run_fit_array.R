@@ -613,7 +613,40 @@ grid_posterior <- function(simulator, cfg, beta_hat, alpha_hat, cores = 1L) {
   g <- g[is.finite(nll)]
   if (!nrow(g)) return(NULL)
   g[, dev := 2 * (nll - min(nll))]
+
+  # --- Stage 2: refine onto the likelihood-ratio region ---------------------
+  # After the expansion the box can span the whole parameter range, so most
+  # nodes sit where the data excludes them. That wastes resolution AND is
+  # actively harmful: w ~ exp(-nll), so a single far-field node with an MC-noise
+  # low nll gets enormous weight and inflates the moment-based sd (seen as
+  # ESS = 26/625 with sd/box = 0.6-0.7 while the dev-based LR CIs were tight).
+  # Re-grid over the bounding box of {dev <= cut_in}, padded, then recompute.
+  reg <- g[dev <= cut_in]
+  if (nrow(reg) >= 4 && nrow(reg) < nrow(g)) {
+    br <- range(reg$beta); ar <- range(reg$alpha)
+    pb <- 0.3 * diff(br) + diff(sort(unique(g$beta))[1:2])
+    pa <- 0.3 * diff(ar) + diff(sort(unique(g$alpha))[1:2])
+    bs2 <- seq(max(br[1] - pb, exp(log_beta_lo)),
+               min(br[2] + pb, exp(log_beta_hi)),  length.out = n_grid)
+    as2 <- seq(max(ar[1] - pa, exp(log_alpha_lo)),
+               min(ar[2] + pa, exp(log_alpha_hi)), length.out = n_grid)
+    if (diff(range(bs2)) > 0 && diff(range(as2)) > 0) {
+      g2 <- eval_grid(bs2, as2)
+      g2 <- g2[is.finite(nll)]
+      if (nrow(g2) > 4 && min(g2$nll) < floor_nll - 5) {
+        g <- g2
+        g[, dev := 2 * (nll - min(nll))]
+        edge <- g[beta %in% range(bs2) | alpha %in% range(as2)]
+        interior <- !any(is.finite(edge$dev)) || min(edge$dev, na.rm = TRUE) > cut_in
+      }
+    }
+  }
+
+  # Weights, with negligible nodes dropped. Beyond dev ~ 25 the likelihood is
+  # e^-12 of the peak, so any weight there is Monte-Carlo noise, not signal.
   g[, w := exp(-(nll - min(nll)))]
+  g[dev > 25, w := 0]
+  if (sum(g$w) <= 0) g[, w := exp(-(nll - min(nll)))]
   g[, w := w / sum(w)]
 
   # --- Diagnostics: is this posterior driven by the DATA or by the BOX? -----
