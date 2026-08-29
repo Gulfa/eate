@@ -1,8 +1,10 @@
 source("utils.R")
 
+source("odin_cache.R")
+
 det_model_cd  <- odin::odin("det_mod_cd.R")
 det_model_ncd <- odin::odin("det_mod_ncd.R")
-det_model_adj <- odin2::odin("det_mod_adj.R")
+det_model_adj <- odin_cached("det_mod_adj.R")
 
 # ---------------------------------------------------------------------------
 # Core ODE runners
