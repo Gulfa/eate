@@ -71,15 +71,20 @@ odin_cache_disable <- function() {
 # per model file: the first process compiles, the rest wait and then hit the
 # up-to-date .so.
 odin_cache_lock <- function(root, file) {
-  if (!requireNamespace("filelock", quietly = TRUE)) return(NULL)
+  if (!requireNamespace("filelock", quietly = TRUE)) {
+    warning("Package 'filelock' is not installed: cannot serialise odin builds, ",
+            "so this process will compile into a PRIVATE workdir (no cache ",
+            "reuse). Install filelock to get the shared cache.", call. = FALSE)
+    return(NULL)
+  }
   dir <- file.path(root, "locks")
   dir.create(dir, showWarnings = FALSE, recursive = TRUE)
   key <- sprintf("%s-%s.lock", tools::file_path_sans_ext(basename(file)),
                  substr(tools::md5sum(file), 1, 8))
   lock <- filelock::lock(file.path(dir, key), timeout = 15 * 60 * 1000)
   if (is.null(lock)) {
-    warning(sprintf("Timed out waiting to build '%s'; compiling unlocked", file),
-            call. = FALSE)
+    warning(sprintf("Timed out waiting to build '%s'; compiling in a private workdir",
+                    file), call. = FALSE)
   }
   lock
 }
@@ -112,6 +117,19 @@ odin_cache_note <- function(root, file, gen) {
 odin_cached <- function(file, ..., quiet = TRUE) {
   root <- odin_cache_enable()
   lock <- odin_cache_lock(root, file)
+  if (is.null(lock)) {
+    # No lock (filelock missing, or the wait timed out). Compiling into the
+    # SHARED cache directory would then let concurrent processes clobber each
+    # other's object files mid-build -- seen on the cluster as
+    #   ld: cannot find cpp11.o: No such file or directory
+    # after both cpp11.o and dust.o had apparently just been compiled. Fall
+    # back to a per-process workdir: no cache reuse (slower), but correct.
+    private <- file.path(tempdir(), "odin_cache_private")
+    dir.create(private, showWarnings = FALSE, recursive = TRUE)
+    Sys.setenv(DUST_WORKDIR_ROOT = private)
+    on.exit(Sys.setenv(DUST_WORKDIR_ROOT = root), add = TRUE)
+    return(odin2::odin(file, ..., quiet = quiet))
+  }
   on.exit(odin_cache_unlock(lock), add = TRUE)
   gen <- odin2::odin(file, ..., quiet = quiet)
   odin_cache_note(root, file, gen)
