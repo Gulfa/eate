@@ -86,11 +86,18 @@ log_alpha_lo <- log(0.01); log_alpha_hi <- log(2)
 # h->0 extrapolation and needs a larger n_sim (the MC-likelihood Hessian is
 # noisy). Assumes data_C1/C2 are a single observed realisation, not E[C].
 fit_method       <- "mean"
-kernel_h_frac    <- 0.1              # kernel bandwidth as a fraction of each data
-                                     # count (scales with N; floored at 1 count)
+kernel_h_frac    <- 0.5              # kernel bandwidth as a fraction of each arm's
+                                     # BINOMIAL SD sqrt(d(1-d/n)) -- the outcome's
+                                     # stochastic scale (see .kernel_bw). NOT a
+                                     # fraction of the count itself.
 kernel_hess_mult <- c(0.6, 0.8, 1.0, 1.2, 1.5) # bandwidth multipliers for ->0 extrapolation
 kernel_hess_nsim <- 8000L            # sims for the (noisy) kernel Hessian
 kernel_hess_hrel <- 0.03             # FD step (relative) for the 2nd-derivative Hessian
+# Bandwidth annealing for the kernel fit: multipliers on .kernel_bw applied in
+# sequence, each optim starting from the previous optimum. Wide first (find the
+# well), narrow last (correct scale). The last entry is the bandwidth used for
+# the reported loss and the grid posterior.
+kernel_anneal    <- c(12, 5, 2, 1)
 
 # Grid likelihood surface (the kernel posterior; replaces the FD Hessian).
 # n x n nodes around the fit, box +/- span in log units (auto-expanded until
@@ -98,10 +105,15 @@ kernel_hess_hrel <- 0.03             # FD step (relative) for the 2nd-derivative
 # intervals, moments, and the draws propagated into VE.
 grid_post_n          <- 25L
 grid_post_nsim       <- 4000L
-grid_post_span       <- 0.7
-grid_post_max_expand <- 8L   # box doublings allowed; too few -> a wide (low
-                             # I_ini) posterior is truncated and its sd becomes
-                             # an artefact of the box, erasing real trends
+# Start SMALL and let the expansion loop widen as needed. The box must resolve
+# the likelihood well, whose width is the posterior sd (~1-2% of beta for a
+# well-identified fit). Starting at +/-0.7 log units (a factor of 2) put the
+# grid spacing an order of magnitude coarser than the kernel bandwidth, so the
+# scan stepped straight over the well and found L_hat = 0 everywhere.
+grid_post_span       <- 0.05
+grid_post_max_expand <- 10L  # 0.05 * 1.6^10 ~ 5.5 log units; too few and a wide
+                             # (low I_ini) posterior is truncated and its sd
+                             # becomes an artefact of the box, erasing trends
 
 # Posterior cov
 post_cov_n_sim <- 1000
@@ -183,6 +195,7 @@ base_common <- list(
   post_cov_n_sim = post_cov_n_sim, post_cov_seed = post_cov_seed,
   post_cov_h = post_cov_h,
   fit_method = fit_method, kernel_h_frac = kernel_h_frac,
+  kernel_anneal = kernel_anneal,
   kernel_hess_mult = kernel_hess_mult, kernel_hess_nsim = kernel_hess_nsim,
   kernel_hess_hrel = kernel_hess_hrel,
   grid_post_n = grid_post_n, grid_post_nsim = grid_post_nsim,
@@ -468,22 +481,37 @@ materialise_cfg <- function(cfg) {
   -log(mean(k) / (2 * pi * h1 * h2) + 1e-300)
 }
 
-# Per-arm kernel bandwidths, scaled to the data magnitude so the kernel works
-# at any N: h_arm = kernel_h_frac * data_arm (floored at 1 count). A fixed
-# absolute bandwidth would be far too small once counts reach the thousands,
-# leaving no simulated point within h of the data -> flat (L_hat=0) plateau.
+# Per-arm kernel bandwidths. The kernel convolves the likelihood, so the
+# data-space variance it implies is Sigma + h^2: the bandwidth must therefore
+# be set relative to the outcome's STOCHASTIC scale, not to the size of the
+# count. Scaling h to the count itself (h = 0.1 * data) mis-scales with N --
+# at N=200 that gave h ~ 0.7 sd (fine), at N=10000 h ~ 8 sd, smoothing the
+# likelihood over eight standard deviations and inflating the posterior ~7x
+# (linear model: sd_alpha 0.080 vs a correct 0.0116).
+#
+# Use the binomial SD of the observed counts, sqrt(d * (1 - d/n)) -- the right
+# order of magnitude in every regime, needs no simulation, and is FIXED across
+# theta so the likelihood surface stays comparable between parameter values.
+# frac ~ 0.5 keeps the convolution inflation to sqrt(1 + 0.5^2) ~ 12% while
+# still catching enough draws per evaluation. Over-dispersed models (network,
+# bimodal final sizes) have a true spread wider than binomial, so h sits well
+# inside their cluster -- which is what a density probe should do.
 .kernel_bw <- function(cfg) {
-  frac <- cfg$kernel_h_frac %||% 0.1
-  c(max(frac * cfg$data_C1, 1), max(frac * cfg$data_C2, 1))
+  frac <- cfg$kernel_h_frac %||% 0.5
+  n1   <- cfg$N_cont; n2 <- cfg$N_vac
+  s1   <- sqrt(max(cfg$data_C1 * (1 - cfg$data_C1 / n1), 1))
+  s2   <- sqrt(max(cfg$data_C2 * (1 - cfg$data_C2 / n2), 1))
+  c(max(frac * s1, 1), max(frac * s2, 1))
 }
 
-make_loss <- function(simulator, cfg) {
+make_loss <- function(simulator, cfg, bw_mult = 1) {
   # Common Random Numbers: the SAME fixed seeds are reused at every probe,
   # so the loss is deterministic and smooth in (beta, alpha). Averaging
   # over the seeds reduces the seed-specific bias of the optimum.
+  # bw_mult widens the kernel for the early annealing stages (see fit_one).
   seeds  <- as.integer(cfg$opt_seed) + seq_len(max(1L, cfg$n_seed_opt)) - 1L
   method <- cfg$fit_method %||% "mean"
-  bw     <- .kernel_bw(cfg)
+  bw     <- .kernel_bw(cfg) * bw_mult
   function(log_par) {
     # Enforce the parameter box. Nelder-Mead is UNCONSTRAINED, so without this
     # it walks past log_beta_hi / log_alpha_hi into regions where the simulator
@@ -519,9 +547,29 @@ grid_search_start <- function(loss_fn, cfg) {
 }
 
 fit_one <- function(simulator, cfg) {
-  loss  <- make_loss(simulator, cfg)
-  start <- grid_search_start(loss, cfg)
-  o <- optim(par = start$log_par, fn = loss, method = "Nelder-Mead",
+  # Kernel fits are BANDWIDTH-ANNEALED. There is a real tension: a bandwidth
+  # narrow enough to be statistically correct (~0.5 sd) makes the likelihood
+  # well far narrower than any affordable start grid, so grid_search_start
+  # probes only L_hat = 0 and the optimiser has nothing to follow; but a
+  # bandwidth wide enough to find the well over-smooths and inflates the
+  # posterior. Locate the well with a wide kernel, then tighten it in stages,
+  # each starting from the previous optimum. The reported loss and the
+  # posterior both use the FINAL (narrow) bandwidth.
+  method <- cfg$fit_method %||% "mean"
+  mults  <- if (method == "kernel") cfg$kernel_anneal %||% c(12, 5, 2, 1) else 1
+  loss   <- make_loss(simulator, cfg, bw_mult = mults[1])
+  start  <- grid_search_start(loss, cfg)
+  par0   <- start$log_par
+  if (length(mults) > 1) {
+    for (m in mults[-length(mults)]) {
+      o_a  <- optim(par = par0, fn = make_loss(simulator, cfg, bw_mult = m),
+                    method = "Nelder-Mead",
+                    control = list(maxit = cfg$optim_maxit, reltol = 1e-3))
+      par0 <- o_a$par
+    }
+    loss <- make_loss(simulator, cfg, bw_mult = mults[length(mults)])
+  }
+  o <- optim(par = par0, fn = loss, method = "Nelder-Mead",
              control = list(maxit = cfg$optim_maxit, reltol = 1e-4))
   best <- o
   for (rs in seq_len(cfg$n_restarts)) {
