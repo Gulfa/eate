@@ -419,7 +419,7 @@ build_simulator <- function(cfg) {
       at_tstar(run_stoch_network(
         beta = beta, N = N_total,
         susceptibility = c(1, alpha),
-        t = cfg$t_star, c_ij = cfg$.c_ij, vac = cfg$.vac,
+        t = cfg$t_star, c_ij = cfg$.c_ij, vac = cfg$.vac, adj = cfg$.adj,
         k_mean = cfg$mean_k, gamma = cfg$gamma,
         dt = cfg$dt, timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
@@ -436,6 +436,11 @@ materialise_cfg <- function(cfg) {
     cfg$.c_ij <- get_conact_matrix_pl(cfg$N_cont + cfg$N_vac,
                                        alpha = cfg$pl_alpha,
                                        mean_k = cfg$mean_k)
+    # Build the adjacency list ONCE per config: contact_matrix_to_adj is an
+    # O(n^2) R loop (1.8 s at n = 5000) and run_stoch_adj otherwise rebuilds it
+    # on every simulator call -- thousands of times across the fit, the grid
+    # posterior and the K VE draws.
+    cfg$.adj <- contact_matrix_to_adj(cfg$.c_ij)
     set.seed(NULL)
     set.seed(cfg$allocation_seed)
     cfg$.vac <- sample(seq_len(cfg$N_cont + cfg$N_vac), cfg$N_vac)
@@ -904,7 +909,7 @@ compute_ve <- function(cfg, beta, alpha) {
       frailty_amp = cfg$frailty_amp %||% 2.5),
     network = get_stoch_eate_network(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
-      t = cfg$t_star, c_ij = cfg$.c_ij, k_mean = cfg$mean_k,
+      t = cfg$t_star, c_ij = cfg$.c_ij, k_mean = cfg$mean_k, adj = cfg$.adj,
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       timepoints = tp, init_I = cfg$init_I_nw,
       mc.cores = cfg$inner_cores),

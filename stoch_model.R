@@ -179,9 +179,14 @@ run_stoch_adj <- function(contact_matrix, beta, t, I_ini,
                           N=NULL, susceptibility=NULL, transmissibility=NULL,
                           gamma=1/3, waning=0, dt=0.1,
                           timepoints=seq(0, t, 1), n_sim=100, cores=10,
-                          seed=NULL) {
-  n   <- nrow(contact_matrix)
-  adj <- contact_matrix_to_adj(contact_matrix)
+                          seed=NULL, adj=NULL) {
+  # `adj` lets the caller pass a PRE-BUILT adjacency list. contact_matrix_to_adj
+  # is an R-level loop over every row, i.e. O(n^2) and slow (1.8 s at n = 5000),
+  # and the contact matrix is fixed for a whole config -- so rebuilding it on
+  # every simulator call dominated the network runtime. Build it once
+  # (materialise_cfg) and pass it in.
+  adj <- if (is.null(adj)) contact_matrix_to_adj(contact_matrix) else adj
+  n   <- if (is.null(contact_matrix)) ncol(adj$neighbors) else nrow(contact_matrix)
 
   if (is.null(N))                N                <- rep(1L, n)
   if (is.null(susceptibility))   susceptibility   <- rep(1, n)
@@ -395,8 +400,9 @@ run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
                               vac_frac=0.5, vac=NULL, gamma=1/3,
                               c_ij=NULL, k_mean=6,
                               dt=0.1, timepoints=seq(0, t, 1),I_ini=2,
-                              n_sim=100, cores=10, seed=NULL) {
-  if (is.null(c_ij))  c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
+                              n_sim=100, cores=10, seed=NULL, adj=NULL) {
+  if (is.null(c_ij) && is.null(adj))
+    c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
   if (is.null(vac))   vac  <- sample(seq_len(N), vac_frac * N)
 
   # susceptibility = c(control, vaccinated)
@@ -409,7 +415,7 @@ run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
   full <- run_stoch_adj(c_ij, beta = N * beta / k_mean, t = t, I_ini = I_ini,
                         susceptibility = susept, gamma = gamma,
                         dt = dt, timepoints = timepoints,
-                        n_sim = n_sim, cores = cores, seed = seed)
+                        n_sim = n_sim, cores = cores, seed = seed, adj = adj)
 
   vac_cols   <- paste0("C", vac)
   unvac_cols <- paste0("C", non_vac)
@@ -1108,9 +1114,12 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                                    k_mean = 6, gamma = 1 / 3, dt = 0.1,
                                    timepoints = NULL, init_I = 2,
                                    mc.cores = 10, inner_cores = 1,
-                                   vac_list = NULL) {
+                                   vac_list = NULL, adj = NULL) {
   alpha <- susceptibility[2]
-  if (is.null(c_ij))       c_ij       <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
+  if (is.null(c_ij) && is.null(adj))
+    c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
+  # Build the adjacency ONCE, not once per allocation (see run_stoch_adj).
+  if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
 
@@ -1137,7 +1146,8 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                          dt             = dt,
                          timepoints     = timepoints,
                          n_sim          = n_rep,
-                         cores          = inner_cores)
+                         cores          = inner_cores,
+                         adj            = adj)
     setDT(raw)
 
     # Factual cumulative cases per (timepoint, individual), averaged over
