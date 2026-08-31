@@ -3,6 +3,18 @@ library(data.table)
 
 source("odin_cache.R")
 
+# Event-driven network simulator (adj_to_csr, run_stoch_network_events,
+# net_sir_compile). Sourcing only defines functions -- the C++ translation
+# unit is compiled lazily on first use -- so this is free for callers that
+# stay on the dust engine. Guarded so a machine without cpp11 can still load
+# stoch_model.R and run everything except the "events" engine.
+if (requireNamespace("cpp11", quietly = TRUE)) {
+  local({
+    f <- file.path(odin_project_root(), "net_sir_events.R")
+    if (file.exists(f)) source(f)
+  })
+}
+
 stoch_model_cd         <- odin_cached("stoch_sir.R")
 stoch_model_adj        <- odin_cached("stoch_mod_adj.R")
 stoch_model_adj_sparse <- odin_cached("stoch_mod_adj_sparse.R")
@@ -389,21 +401,77 @@ run_stoch_ind <- function(contact_matrix, beta, t, I_ini,
   out[]
 }
 
+# Which simulator run_stoch_network() uses under the hood:
+#
+#   "events" — exact event-driven C++ first-passage simulator
+#              (net_sir_events.cpp). No dt discretisation bias, O(E log V)
+#              per realisation, ~50-250x faster than "dust" at the dt the
+#              pipeline needs. This is the default.
+#   "dust"   — the original discrete-time tau-leaping model (stoch_mod_adj.R)
+#              via run_stoch_adj(). Kept as the fallback: it is the only
+#              engine that produces per-node S/I/R trajectories, and it is
+#              what every result before this switch was produced with.
+#
+# Override globally with the environment variable (so a slurm array can be
+# flipped without touching code) or the option:
+#
+#   EATE_NETWORK_ENGINE=dust Rscript run_fit_array.R
+#   options(eate.network_engine = "dust")
+#
+# The env var wins; per-call `engine=` wins over both.
+network_engine <- function() {
+  e <- Sys.getenv("EATE_NETWORK_ENGINE", "")
+  if (!nzchar(e)) e <- getOption("eate.network_engine", "events")
+  match.arg(tolower(e), c("events", "dust"))
+}
+
+# Compile the event-driven simulator. It is a single translation unit and the
+# build is cached for the session; call this eagerly in the parent process
+# before any fork, so the mclapply workers inherit a loaded DLL instead of
+# each triggering a build of their own.
+ensure_net_sir_events <- function() {
+  if (!exists("run_stoch_network_events", mode = "function"))
+    stop("the \"events\" network engine needs net_sir_events.R and the 'cpp11' ",
+         "package; install cpp11 or select the dust engine with ",
+         "EATE_NETWORK_ENGINE=dust")
+  net_sir_compile()
+  invisible(TRUE)
+}
+
 # Stochastic counterpart of run_mean_field (det_model.R): same signature/
-# defaults, backed by run_stoch_adj. Builds a Pareto contact network if c_ij
-# is not given, picks a vaccination set if vac is not given, then runs the
-# adjacency-list stochastic SIR with susceptibility = alpha for vaccinated
-# nodes and 1 otherwise. Returns a list with $sum (per-sim/time vac/unvac/CRR)
-# and $full (the underlying per-node data.table from run_stoch_adj).
+# defaults. Builds a Pareto contact network if c_ij is not given, picks a
+# vaccination set if vac is not given, then runs the network SIR with
+# susceptibility = alpha for vaccinated nodes and 1 otherwise. Returns a
+# per-(sim, time) data.table of C1 (unvaccinated cases) and C2 (vaccinated).
+#
+# `engine` selects the simulator — see network_engine() above. Both engines
+# simulate the same continuous-time process and return the same columns on
+# the same scale; "dust" additionally honours `dt`, which "events" ignores
+# because it has no time discretisation. `csr` is the event engine's
+# pre-built graph (adj_to_csr); pass it for the same reason `adj` is passed
+# to run_stoch_adj — so a fit does not rebuild it on every call.
 run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
                               susceptibility=c(1, 1), t=100,
                               vac_frac=0.5, vac=NULL, gamma=1/3,
                               c_ij=NULL, k_mean=6,
                               dt=0.1, timepoints=seq(0, t, 1),I_ini=2,
-                              n_sim=100, cores=10, seed=NULL, adj=NULL) {
-  if (is.null(c_ij) && is.null(adj))
+                              n_sim=100, cores=10, seed=NULL, adj=NULL,
+                              engine=network_engine(), csr=NULL) {
+  engine <- match.arg(engine, c("events", "dust"))
+  if (is.null(c_ij) && is.null(adj) && is.null(csr))
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
   if (is.null(vac))   vac  <- sample(seq_len(N), vac_frac * N)
+
+  if (engine == "events") {
+    ensure_net_sir_events()
+    # beta is scaled inside run_stoch_network_events (same N/k_mean factor as
+    # the dust branch below), so it takes the user-scale beta unchanged.
+    return(run_stoch_network_events(
+      beta = beta, N = N, susceptibility = susceptibility, t = t,
+      vac = vac, csr = csr, adj = adj, c_ij = c_ij, gamma = gamma,
+      timepoints = timepoints, I_ini = I_ini, n_sim = n_sim,
+      seed = seed, k_mean = k_mean, cores = cores))
+  }
 
   # susceptibility = c(control, vaccinated)
   susept <- rep(susceptibility[1], N)
@@ -419,9 +487,11 @@ run_stoch_network <- function(beta=1, N=100, pl_alpha=3,
 
   vac_cols   <- paste0("C", vac)
   unvac_cols <- paste0("C", non_vac)
+  # C1 before C2, matching the "events" engine, so the two are comparable
+  # column-for-column and not just by name.
   sum_df <- full[, .(time, sim,
-                     C2   = rowSums(.SD[, vac_cols,   with=FALSE]),
-                     C1 = rowSums(.SD[, unvac_cols, with=FALSE]))]
+                     C1 = rowSums(.SD[, unvac_cols, with=FALSE]),
+                     C2 = rowSums(.SD[, vac_cols,   with=FALSE]))]
 #  sum_df[, CRR := (vac / (vac_frac * N)) / (unvac / ((1 - vac_frac) * N))]
 
   return(sum_df)#list(sum = sum_df, full = full)

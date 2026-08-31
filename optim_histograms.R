@@ -83,6 +83,13 @@ set.seed(alloc_seed)
 vac_fixed <- sample(seq_len(N_total), N_vac)
 set.seed(NULL)
 
+# Graph representations built once for the whole fit, not once per loss
+# evaluation: .adj for the dust engine, .csr for the event-driven one.
+adj_fixed <- contact_matrix_to_adj(c_ij_fixed)
+csr_fixed <- if (network_engine() == "events") {
+  ensure_net_sir_events(); adj_to_csr(adj = adj_fixed)
+} else NULL
+
 # ---------------------------------------------------------------------------
 # Model wrappers: each returns a data.table at time == t_star with C1, C2
 # ---------------------------------------------------------------------------
@@ -148,6 +155,7 @@ run_network <- function(beta, alpha, n_sim, seed = NULL) {
   out <- run_stoch_network(beta = beta, N = N_total,
                            susceptibility = c(1, alpha),
                            t = t_star, c_ij = c_ij_fixed, vac = vac_fixed,
+                           adj = adj_fixed, csr = csr_fixed,
                            k_mean = mean_k, gamma = gamma,
                            dt = dt, timepoints = seq(1, t_star, 1),
                            n_sim = n_sim, cores = cores, I_ini = init_I_nw,

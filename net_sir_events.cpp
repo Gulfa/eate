@@ -33,6 +33,10 @@
 #include <cmath>
 #include <limits>
 #include <cstdint>
+#include <algorithm>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using namespace cpp11;
 
@@ -94,23 +98,35 @@ doubles_matrix<> net_sir_event_times(int n,
                                      doubles susceptibility,
                                      doubles transmissibility,
                                      double beta, double gamma, double t_max,
-                                     integers seeds, int n_sim, int seed) {
+                                     integers seeds, int n_sim, int seed,
+                                     int n_threads) {
   const std::vector<int>    v_nbr(nbr.begin(), nbr.end());
   const std::vector<int>    v_ptr(ptr.begin(), ptr.end());
   const std::vector<double> v_sus(susceptibility.begin(), susceptibility.end());
   const std::vector<double> v_tr(transmissibility.begin(), transmissibility.end());
   const std::vector<int>    v_seed(seeds.begin(), seeds.end());
 
-  writable::doubles_matrix<> out(n_sim, n);
-  std::vector<double> inf(n);
-  std::vector<char>   done(n);
+  // Simulate into a plain buffer so the loop can be threaded: each realisation
+  // is independent, with its own RNG stream keyed on its index (so results do
+  // NOT depend on the thread count or scheduling). R API calls are not
+  // thread-safe, so the writable matrix is filled serially afterwards.
+  std::vector<double> buf(static_cast<size_t>(n_sim) * n);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic) num_threads(n_threads)
+#endif
   for (int s = 0; s < n_sim; ++s) {
-    // Independent stream per realisation, reproducible from `seed`.
+    std::vector<double> inf(n);
+    std::vector<char>   done(n);
     std::mt19937_64 rng(static_cast<uint64_t>(seed) * 1000003ULL +
                         static_cast<uint64_t>(s) * 7919ULL + 1ULL);
     one_sim(n, v_nbr, v_ptr, v_sus, v_tr, beta, gamma, t_max, v_seed, rng,
             inf, done);
-    for (int i = 0; i < n; ++i) out(s, i) = inf[i];
+    std::copy(inf.begin(), inf.end(), buf.begin() + static_cast<size_t>(s) * n);
   }
+
+  writable::doubles_matrix<> out(n_sim, n);
+  for (int s = 0; s < n_sim; ++s)
+    for (int i = 0; i < n; ++i) out(s, i) = buf[static_cast<size_t>(s) * n + i];
   return out;
 }
