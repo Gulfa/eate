@@ -55,6 +55,17 @@ experiments <- list(
 gamma  <- 1
 dt     <- 0.01
 
+# Network simulator backend, resolved once here so the whole array is
+# internally consistent and the choice is recorded with every result:
+#   "events" (default) exact event-driven C++, no dt bias
+#   "dust"             the original tau-leaping model -- the way back
+# Flip without editing anything:  EATE_NETWORK_ENGINE=dust Rscript run_fit_array.R
+# NOTE: only the fit/simulator side switches. The network EATE
+# (get_stoch_eate_network) needs per-node I trajectories, which the event
+# engine does not produce, so it always uses dust.
+net_engine <- network_engine()
+message(glue("Network simulator engine: {net_engine}"))
+
 # Sweep the homogeneous SIR model over multiple initial-infected settings
 # WITHIN each experiment; each appears as its OWN model ("sir_i<total>") in the
 # plots, so the I_ini effect is directly comparable. NULL = a single plain
@@ -203,7 +214,8 @@ base_common <- list(
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
-  K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert
+  K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
+  network_engine = net_engine
 )
 
 build_configs_for_experiment <- function(exp) {
@@ -423,7 +435,11 @@ build_simulator <- function(cfg) {
         k_mean = cfg$mean_k, gamma = cfg$gamma,
         dt = cfg$dt, timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
-        I_ini = cfg$init_I_nw, seed = seed), cfg$t_star)
+        I_ini = cfg$init_I_nw, seed = seed,
+        # `dt` above is ignored by the event engine (it has no time step);
+        # .csr is prebuilt in materialise_cfg for the same reason as .adj.
+        engine = cfg$network_engine %||% "events",
+        csr = cfg$.csr), cfg$t_star)
     },
     stop("Unknown model_type: ", cfg$model_type))
 }
@@ -441,6 +457,13 @@ materialise_cfg <- function(cfg) {
     # on every simulator call -- thousands of times across the fit, the grid
     # posterior and the K VE draws.
     cfg$.adj <- contact_matrix_to_adj(cfg$.c_ij)
+    # Same argument for the event engine's CSR graph, plus: compile the C++
+    # here, in the parent, so the mclapply workers inherit a loaded DLL
+    # instead of each triggering a build.
+    if ((cfg$network_engine %||% "events") == "events") {
+      ensure_net_sir_events()
+      cfg$.csr <- adj_to_csr(adj = cfg$.adj)
+    }
     set.seed(NULL)
     set.seed(cfg$allocation_seed)
     cfg$.vac <- sample(seq_len(cfg$N_cont + cfg$N_vac), cfg$N_vac)
@@ -1109,6 +1132,10 @@ run_one_job <- function(cfg) {
     pl_alpha        = cfg$pl_alpha        %||% NA_real_,
     network_seed    = cfg$network_seed    %||% NA_integer_,
     allocation_seed = cfg$allocation_seed %||% NA_integer_,
+    # Which network simulator produced this fit ("events" / "dust"); NA for
+    # every non-network model.
+    network_engine  = if (identical(cfg$model_type, "network"))
+                        (cfg$network_engine %||% "events") else NA_character_,
     # Needed by the analysis to report the population-average alpha for
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
     split_frac       = cfg$split_frac       %||% NA_real_,
