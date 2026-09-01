@@ -383,6 +383,27 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
   s[order(sapply(group, order_key))]
 }
 
+# Same, on the ABSOLUTE scale: `ave` is the per-person absolute effect
+# (denom - num) / N stored alongside eate by every get_stoch_eate_* function
+# -- i.e. the risk difference, where VE = 1 - eate is the risk ratio. Same
+# draws, same SD-based interval, so the two forests are directly comparable.
+summarise_ave_by <- function(ok, group_fn, t_target) {
+  draws <- rbindlist(lapply(ok, function(r) {
+    if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+    if (!("ave" %in% names(r$ve_uncertainty))) return(NULL)   # legacy results
+    v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
+    if (!nrow(v)) return(NULL)
+    data.table(group = group_fn(r), AVE = v$ave)
+  }))
+  if (!nrow(draws)) return(data.table())
+  s <- draws[, .(n        = .N,
+                 estimate = mean(AVE, na.rm = TRUE),
+                 lo       = mean(AVE, na.rm = TRUE) - z_ci * sd(AVE, na.rm = TRUE),
+                 hi       = mean(AVE, na.rm = TRUE) + z_ci * sd(AVE, na.rm = TRUE)),
+             by = group]
+  s[order(sapply(group, order_key))]
+}
+
 # ---------------------------------------------------------------------------
 # Level-driven forest plots for beta, alpha, VE at t*
 # ---------------------------------------------------------------------------
@@ -765,6 +786,109 @@ ve_final <- ve_final[order(sapply(model_type, order_key))]
 fwrite(ve_final, file.path(out_dir, "ve_final.csv"))
 message("\n=== VE at t* (allocations pooled) ===")
 print(ve_final)
+
+# ---------------------------------------------------------------------------
+# Combined 2x2 summary figure (everything pooled, i.e. the L3 pool_nets level)
+# ---------------------------------------------------------------------------
+#   A  VE at t*        (forest)      B  alpha            (forest)
+#   C  AVE at t*       (forest)      D  VE(t)            (trajectory)
+#
+# A/B/C are the same three quantities on one shared y-axis of model groups:
+# the risk ratio (VE), the fitted susceptibility multiplier (alpha), and the
+# risk difference (AVE). They come from the SAME posterior draws, so the
+# panels are directly comparable. D is the pooled VE(t) trajectory from
+# ve_trajectory_combined.png, restyled to sit in the grid.
+#
+# The four panels have two different geometries (three forests + one
+# trajectory), so this is a cowplot grid, not a facet_wrap.
+# ---------------------------------------------------------------------------
+
+if (requireNamespace("cowplot", quietly = TRUE)) {
+
+  g4_ve    <- summarise_ve_by(ok,    labels_L3_pool_nets, t_star_ve)
+  g4_alpha <- summarise_param(ok,    labels_L3_pool_nets, "alpha")
+  g4_ave   <- summarise_ave_by(ok,   labels_L3_pool_nets, t_star_ve)
+
+  if (nrow(g4_ve) && nrow(g4_alpha) && nrow(g4_ave)) {
+    # One shared y ordering across A/B/C, so rows line up in the grid even
+    # if a model is missing from one metric (scale_y_discrete(drop = FALSE)
+    # then keeps its empty row rather than shifting the others up).
+    g4_groups <- unique(c(as.character(g4_ve$group),
+                          as.character(g4_alpha$group),
+                          as.character(g4_ave$group)))
+    g4_groups <- g4_groups[order(sapply(g4_groups, order_key))]
+    g4_lev    <- rev(g4_groups)
+    g4_labs   <- setNames(display_name(g4_lev), g4_lev)
+
+    forest_panel <- function(df, xlab, title, show_y = TRUE, vline = NULL) {
+      d <- copy(df)
+      d[, group := factor(as.character(group), levels = g4_lev,
+                          labels = g4_labs[g4_lev])]
+      p <- ggplot(d, aes(y = group, x = estimate)) +
+        geom_point(size = 2.4) +
+        geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
+        scale_y_discrete(drop = FALSE) +
+        theme_bw(base_size = 12) +
+        theme(panel.grid.minor = element_blank(),
+              plot.title = element_text(size = 12, face = "bold")) +
+        labs(x = xlab, y = NULL, title = title)
+      if (!is.null(vline))
+        p <- p + geom_vline(xintercept = vline, linetype = "dashed",
+                            colour = "grey50")
+      if (!show_y)
+        p <- p + theme(axis.text.y = element_blank(),
+                       axis.ticks.y = element_blank())
+      p
+    }
+
+    # B drops its y labels: cowplot aligns the two top panels row-for-row,
+    # so the labels in A serve both and the alpha panel gets the width back.
+    pA <- forest_panel(g4_ve,    glue("VE = 1 - EATE  (t = {t_star_ve})"),
+                       "A. VE, everything pooled")
+    pB <- forest_panel(g4_alpha, "alpha", "B. alpha, everything pooled",
+                       show_y = FALSE, vline = 1)
+    pC <- forest_panel(g4_ave,   glue("AVE = (denom - num) / N  (t = {t_star_ve})"),
+                       "C. Absolute difference, everything pooled",
+                       vline = 0)
+
+    # D: same data as p_comb, restyled to match the forests (theme_bw, legend
+    # inside the panel so the plot area stays the same width as C above it).
+    pD <- ggplot(ve_comb, aes(x = t, y = VE_med, group = model,
+                              colour = model, fill = model)) +
+      geom_ribbon(aes(ymin = VE_min, ymax = VE_max), alpha = 0.2, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(ve_comb$model))) +
+      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(ve_comb$model))) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid.minor = element_blank(),
+            legend.position = "bottom",
+            legend.key.size = unit(0.8, "lines"),
+            legend.text = element_text(size = 8),
+            plot.title = element_text(size = 12, face = "bold")) +
+      guides(colour = guide_legend(ncol = 2), fill = guide_legend(ncol = 2)) +
+      labs(x = "t", y = "VE = 1 - EATE (full_stoch)",
+           title = "D. VE(t), allocations + networks pooled")
+
+    # align = "hv" keeps A/B row-aligned (so B can borrow A's labels) and
+    # A/C column-aligned; D has its own y scale and just fills its cell.
+    grid4 <- cowplot::plot_grid(pA, pB, pC, pD, nrow = 2, ncol = 2,
+                                align = "hv", axis = "tblr",
+                                rel_widths = c(1.35, 1))
+
+    h4 <- max(8, 0.45 * length(g4_groups) + 4)
+    ggsave(file.path(out_dir, glue("combined_4panel_pool_nets.png")),
+           grid4, width = 14, height = h4, dpi = 130, limitsize = FALSE)
+
+    fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
+    message(glue("Wrote combined_4panel_pool_nets.png ",
+                 "({length(g4_groups)} model groups, t* = {t_star_ve})"))
+  } else {
+    message("Skipping the combined 4-panel figure: one of VE / alpha / AVE is empty.")
+  }
+
+} else {
+  message("Skipping the combined 4-panel figure: package 'cowplot' not installed.")
+}
 
 # ---------------------------------------------------------------------------
 # VE with propagated parameter uncertainty
