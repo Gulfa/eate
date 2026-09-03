@@ -134,6 +134,12 @@ order_key <- function(label) {
   # I_ini = 2, 10, 100 come out in that order regardless of the tag's padding.
   if (grepl("^sir_i[0-9]+$", label))
     return(sprintf("0_sir_i%06d", as.integer(sub("^sir_i", "", label))))
+  # Heterogeneous-VE sweep: order NUMERICALLY by kappa (as the tag's integer
+  # percent), so k5 sorts before k30 rather than lexically after it.
+  if (grepl("^sir_ve_hetero_k[0-9]+", label))
+    return(sprintf("1_sir_ve_hetero_k%06d%s",
+                   as.integer(sub("^sir_ve_hetero_k([0-9]+).*$", "\\1", label)),
+                   sub("^sir_ve_hetero_k[0-9]+", "", label)))
   if (grepl("frailty", label))       return(paste0("1_", label))
   if (grepl("multisite", label))     return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
@@ -158,6 +164,16 @@ display_name <- function(x) {
     if (grepl("^sir_multisite(_a[0-9]+)?$", g)) {
       s <- sub("^sir_multisite", "SIR multi-site", g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))
+    }
+    # Heterogeneous vaccine effect, kappa tagged as integer percent.
+    # kappa = 0 IS the homogeneous SIR, so say so rather than "spread 0%".
+    if (grepl("^sir_ve_hetero_k[0-9]+(_a[0-9]+)?$", g)) {
+      kap   <- as.integer(sub("^sir_ve_hetero_k([0-9]+).*$", "\\1", g))
+      alloc <- sub("^sir_ve_hetero_k[0-9]+", "", g)
+      base  <- if (kap == 0L) "SIR (homogeneous VE)"
+               else sprintf("SIR + VE heterogeneity (kappa = %.2f)", kap / 100)
+      return(sub("^_a([0-9]+)$", " (alloc \\1)", alloc) |>
+             (\(s) if (nzchar(s)) paste0(base, s) else base)())
     }
     if (grepl("^sus_frailty(_a[0-9]+)?$", g)) {
       s <- sub("^sus_frailty",  "SIR + sus. frailty",  g)

@@ -1003,6 +1003,229 @@ run_stoch_frailty_cd <- function(sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, 
   raw[, .(time, sim, C1, C2, vac, unvac, CRR)]
 }
 
+# ---------------------------------------------------------------------------
+# Heterogeneous vaccine effect: alpha varies BY INDIVIDUAL
+# ---------------------------------------------------------------------------
+#
+# The frailty models put heterogeneity in baseline susceptibility, expressed
+# by everyone. Here baseline susceptibility is 1 for all, and the vaccine's
+# effect alpha_i varies between people: it is a fixed individual attribute
+# (how well *this* person responds if vaccinated), so it is defined for the
+# unvaccinated too and only EXPRESSED by those actually vaccinated. That is
+# what makes the flip counterfactual ("what if i had been vaccinated?")
+# well-posed -- it needs i's own alpha_i either way.
+#
+# Population structure is therefore the same 2 x K group layout the frailty
+# models use, but with the heterogeneity on the vaccinated side only:
+#
+#     group k         (k = 1..K)  unvaccinated, bin k, susceptibility 1
+#     group K + k                 vaccinated,   bin k, susceptibility alpha_k
+#
+# A "bin" is a slice of the alpha distribution, a fixed partition of the
+# population. Allocation draws which members of each bin get vaccinated
+# (multivariate hypergeometric), so varying the allocation varies WHICH
+# alpha_i values are expressed -- exactly the sampling variability of
+# interest.
+
+# Equal-probability bins of the per-individual vaccine effect.
+#
+#   alpha_i ~ Beta(mean = alpha, sd = kappa * sqrt(alpha * (1 - alpha)))
+#
+# Spread is given as a FRACTION kappa of the largest sd a Beta with that mean
+# admits, never as an absolute sd. The maximum, sqrt(mu(1-mu)), moves with the
+# mean, so an absolute sd turns infeasible the moment the optimiser walks
+# alpha towards 0 or 1 -- mid-fit, silently. In this parameterisation the
+# concentration is
+#       c = mu(1-mu)/s^2 - 1 = 1/kappa^2 - 1,
+# free of mu, so any kappa in [0,1) is valid at every alpha. kappa = 0
+# reproduces the homogeneous model exactly.
+#
+# Bins carry equal probability (p_k = 1/K) and sit at the CONDITIONAL MEAN of
+# the distribution over each quantile slice, not at the slice midpoint. That
+# makes sum_k p_k alpha_k == alpha exactly, by the partial-first-moment
+# identity E[X 1{a<X<b}] = mu (I_b(s1+1,s2) - I_a(s1+1,s2)); midpoint bins are
+# only mean-accurate to O(K^-2), and that discretisation error would bias the
+# fitted alpha rather than just blur it.
+#
+# Note what does and does not depend on alpha: the bin WEIGHTS are fixed at
+# 1/K, only the bin VALUES move. The allocation (who sits in which bin, and
+# who is vaccinated) is therefore frozen across the whole fit, and alpha only
+# slides the values -- which is what keeps the loss surface smooth enough for
+# Nelder-Mead and the finite-difference posterior covariance.
+alpha_ve_bins <- function(alpha, kappa = 0, n_alpha = 20L) {
+  n_alpha <- as.integer(n_alpha)
+  if (n_alpha < 1L) stop("n_alpha must be >= 1")
+  if (!is.finite(kappa) || kappa < 0 || kappa >= 1)
+    stop("alpha_kappa must be in [0, 1)")
+  p <- rep(1 / n_alpha, n_alpha)
+  # Degenerate cases: no spread, a single bin, or a mean on the boundary
+  # (Beta is a point mass at 0 or 1 there).
+  if (kappa == 0 || n_alpha == 1L || alpha <= 0 || alpha >= 1)
+    return(list(x = rep(min(max(alpha, 0), 1), n_alpha), p = p))
+
+  cc <- 1 / kappa^2 - 1
+  s1 <- alpha * cc
+  s2 <- (1 - alpha) * cc
+  u  <- seq(0, 1, length.out = n_alpha + 1L)
+
+  # Evaluate each bin edge from whichever tail it is nearer. Once cc < 1 the
+  # Beta is U-shaped, and for a small shape parameter the all-lower-tail forms
+  # saturate: qbeta() returns exactly 1 for the upper edges and the pbeta()
+  # differences collapse to zero, which drags the discretised mean silently
+  # away from alpha -- at alpha = 0.95, kappa = 0.95 it lands on 0.25. The
+  # failure is driven by min(s1, s2) going small, so it bites hardest exactly
+  # where the science is most interesting (a strongly protective vaccine with
+  # a wide spread of individual response).
+  lo     <- u <= 0.5
+  q      <- numeric(n_alpha + 1L)
+  q[lo]  <- qbeta(u[lo],      s1, s2)
+  q[!lo] <- qbeta(1 - u[!lo], s1, s2, lower.tail = FALSE)
+  Fl <- pbeta(q, s1 + 1, s2)                       # lower-tail partial moment
+  Fu <- pbeta(q, s1 + 1, s2, lower.tail = FALSE)   # upper-tail partial moment
+  d  <- ifelse(u[-1] <= 0.5,
+               Fl[-1] - Fl[-(n_alpha + 1L)],
+               Fu[-(n_alpha + 1L)] - Fu[-1])
+  x  <- alpha * d * n_alpha                        # E[alpha | bin k]
+  if (!all(is.finite(x)))
+    stop(sprintf("alpha_ve_bins: non-finite bins at alpha = %.6g, kappa = %.4g",
+                 alpha, kappa))
+
+  # Centre and shrink, rather than trusting the quantile arithmetic. The mean
+  # is the quantity the optimiser identifies, so it has to be exact -- a
+  # drifting mean does not look like a bug, it looks like a converged fit at
+  # the wrong alpha. Writing the bins as
+  #     x_k = alpha + c * (x_k - xbar)
+  # makes sum(p * x_k) == alpha by algebra, whatever the tails did, and c is
+  # taken as large as keeps every bin inside [0, 1].
+  #
+  # c < 1 only bites when alpha sits near a boundary, and there it is not a
+  # numerical fudge but the real constraint: a variable on [0,1] with mean
+  # alpha cannot have sd above sqrt(alpha(1-alpha)), so the requested spread
+  # is genuinely unattainable and the honest answer is the widest that fits.
+  # Clamping instead would silently move the mean; shrinking preserves it and
+  # keeps the shape.
+  xbar <- sum(p * x)
+  dev  <- x - xbar
+  cmax <- 1
+  pos  <- dev > 0
+  neg  <- dev < 0
+  if (any(pos)) cmax <- min(cmax, min((1 - alpha) / dev[pos]))
+  if (any(neg)) cmax <- min(cmax, min(alpha / (-dev[neg])))
+  cmax <- max(min(cmax, 1), 0)
+  x    <- alpha + cmax * dev
+  # Guard the floating-point edges only; the mean is exact by construction.
+  list(x = pmin(pmax(x, 0), 1), p = p)
+}
+
+# Split `total` individuals into bins of probability `p` so the parts sum to
+# `total` exactly (largest-remainder). round(total * p) does not: it can be
+# off by several people, which quietly changes the population size the fit is
+# matching against.
+.ve_bin_sizes <- function(total, p) {
+  target <- total * p
+  n      <- floor(target)
+  rem    <- as.integer(round(total - sum(n)))
+  if (rem > 0L) {
+    for (idx in order(target - n, decreasing = TRUE)[seq_len(rem)])
+      n[idx] <- n[idx] + 1L
+  }
+  as.integer(n)
+}
+
+# Distribute I_ini_total index cases over the unvac/vac group vectors,
+# proportional to population, keeping the arm split true to the arm sizes.
+# Mirrors the seeding in run_stoch_frailty_cd.
+#
+# NOT .spread_seeds: that name is already taken further down the file by a
+# two-argument (total, sizes) helper, and since that definition is sourced
+# LAST it silently wins. The collision surfaced as "unused argument".
+.spread_arm_seeds <- function(I_ini_total, N_unvac_grp, N_vac_grp) {
+  spread <- function(total, sizes) {
+    if (total == 0L) return(integer(length(sizes)))
+    target <- total * sizes / sum(sizes)
+    ini    <- pmin(floor(target), sizes)
+    rem    <- total - sum(ini)
+    if (rem > 0L) {
+      for (idx in order(target - ini, decreasing = TRUE)) {
+        if (rem == 0L) break
+        if (ini[idx] < sizes[idx]) { ini[idx] <- ini[idx] + 1L; rem <- rem - 1L }
+      }
+    }
+    as.integer(ini)
+  }
+  total_unvac <- sum(N_unvac_grp); total_vac <- sum(N_vac_grp)
+  if (I_ini_total > total_unvac + total_vac)
+    stop(sprintf("I_ini_total (%d) exceeds total population (%d).",
+                 I_ini_total, total_unvac + total_vac))
+  ut          <- I_ini_total * total_unvac / (total_unvac + total_vac)
+  unvac_seeds <- min(floor(ut), total_unvac)
+  vac_seeds   <- I_ini_total - unvac_seeds
+  if (vac_seeds > total_vac) {
+    deficit     <- vac_seeds - total_vac
+    vac_seeds   <- as.integer(total_vac)
+    unvac_seeds <- unvac_seeds + deficit
+  } else if (ut - unvac_seeds > 0.5 && unvac_seeds < total_unvac && vac_seeds > 0L) {
+    unvac_seeds <- unvac_seeds + 1L; vac_seeds <- vac_seeds - 1L
+  }
+  c(spread(as.integer(unvac_seeds), N_unvac_grp),
+    spread(as.integer(vac_seeds),   N_vac_grp))
+}
+
+# Homogeneous-mixing SIR with a per-individual vaccine effect. Sibling of
+# run_stoch_frailty_cd; same output columns (time, sim, C1, C2, vac, unvac,
+# CRR) so it drops into the same fit machinery.
+#
+#   N            : per-arm population (total = 2N), matching the frailty
+#                  wrapper's convention.
+#   alpha_kappa  : spread of alpha_i, as a fraction of the maximum (see
+#                  alpha_ve_bins). 0 = homogeneous, identical to the plain
+#                  SIR wrapper.
+#   vac_counts   : vaccinated count per alpha bin. Pass the allocation drawn
+#                  once per config; NULL gives the deterministic round(f * n_k)
+#                  split, i.e. no allocation variability.
+run_stoch_ve_hetero_cd <- function(beta = 1, f = 0.5, N = 1000, t = 100,
+                                   alpha_kappa = 0, n_alpha = 20L,
+                                   gamma = 1 / 2, vac_counts = NULL,
+                                   I_ini_total = 1, timepoints = seq(0, t, 1),
+                                   n_sim = 100, cores = 10, dt = 0.1,
+                                   susceptibility = c(1, 0.5), seed = NULL) {
+  alpha <- susceptibility[2]
+  ab    <- alpha_ve_bins(alpha, alpha_kappa, n_alpha)
+  K     <- length(ab$x)
+
+  n_total_k <- .ve_bin_sizes(round(2 * N), ab$p)
+  if (is.null(vac_counts)) vac_counts <- round(f * n_total_k)
+  vac_counts <- pmin(pmax(as.integer(vac_counts), 0L), n_total_k)
+
+  n_groups <- 2L * K
+  N_groups <- c(n_total_k - vac_counts, vac_counts)
+  # Baseline susceptibility for everyone; the vaccinated express alpha_k.
+  sus      <- c(rep(susceptibility[1], K), ab$x)
+  trans    <- rep(1, n_groups)         # vaccine acts on susceptibility only
+  # Unit mixing entries (NOT /n_groups): the dust SIR model uses
+  # foi = beta * sum_j mm[i,j] * I_j / N, so this keeps R0 = beta/gamma in the
+  # homogeneous limit -- same convention as run_stoch_frailty_cd.
+  mm       <- matrix(1, nrow = n_groups, ncol = n_groups)
+
+  I_ini <- .spread_arm_seeds(I_ini_total,
+                         N_groups[seq_len(K)],
+                         N_groups[(K + 1L):n_groups])
+
+  raw <- run_stoch_cd_dust(mm, beta = beta, N = N_groups, t = t, I_ini = I_ini,
+                           susceptibility = sus, transmissibility = trans,
+                           gamma = gamma, dt = dt, timepoints = timepoints,
+                           n_sim = n_sim, cores = cores, seed = seed)
+  setDT(raw)
+  N_vac_tot   <- sum(vac_counts)
+  N_unvac_tot <- sum(n_total_k - vac_counts)
+  raw[, vac   := rowSums(.SD), .SDcols = paste0("C", (K + 1L):n_groups)]
+  raw[, unvac := rowSums(.SD), .SDcols = paste0("C", 1:K)]
+  raw[, CRR   := (vac / N_vac_tot) / (unvac / N_unvac_tot)]
+  raw[, C1 := unvac]
+  raw[, C2 := vac]
+  raw[, .(time, sim, C1, C2, vac, unvac, CRR)]
+}
+
 regularise <- function(df, timepoints) {
   df_reg <- dplyr::bind_rows(df, data.frame(time=timepoints)) |> dplyr::arrange(time)
   for (col in setdiff(colnames(df_reg), c("time", "sim"))) {
@@ -1459,6 +1682,139 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
       surv_unvac_k <- colMeans(exp(-outer(cfi, sus_unvac_bin)))
       P_vac_k      <- 1 - surv_vac_k
       P_unvac_k    <- 1 - surv_unvac_k
+
+      num   <- sum(C_vac_bin[it, ])   + sum(P_vac_k   * N_unvac_grp)
+      denom <- sum(C_unvac_bin[it, ]) + sum(P_unvac_k * N_vac_grp)
+      num_t[it]   <- num
+      denom_t[it] <- denom
+      eate_t[it]  <- num / denom
+      ave_t[it]   <- (denom - num) / N_total
+    }
+    ar_fac_vac_t   <- rowSums(C_vac_bin)   / total_vac
+    ar_fac_unvac_t <- rowSums(C_unvac_bin) / total_unvac
+    crr_t     <- ar_fac_vac_t / ar_fac_unvac_t
+    crr_ave_t <- ar_fac_unvac_t - ar_fac_vac_t
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  res <- parallel::mclapply(seq_len(n_vac),
+                            function(i) run_one_allocation(),
+                            mc.cores = mc.cores)
+  rbindlist(res, fill = TRUE)
+}
+
+
+# ---------------------------------------------------------------------------
+# Stochastic EATE with a per-individual vaccine effect
+# ---------------------------------------------------------------------------
+#
+# Frozen-field counterfactual for run_stoch_ve_hetero_cd, built like
+# get_stoch_eate_frailty: run one allocation, freeze the realised cumulative
+# force of infection, then ask what would have happened to each bin under the
+# flipped treatment.
+#
+# The one thing that differs from every other EATE here: the counterfactual
+# is per BIN, because alpha_i is an individual attribute. Flipping an
+# unvaccinated person in bin k to vaccinated gives them THEIR OWN alpha_k, not
+# a population-average alpha:
+#
+#     P(case | vaccinated,   bin k) = 1 - E_reps[ exp(-alpha_k * cumFOI) ]
+#     P(case | unvaccinated, bin k) = 1 - E_reps[ exp(-1       * cumFOI) ]
+#
+# so the vaccinated-side counterfactual varies across bins even though the
+# frozen field does not. Averaging alpha first and exponentiating after would
+# be wrong by Jensen's inequality -- exp(-a x) is convex in a, so a single
+# mean alpha understates the counterfactual case count, and the size of that
+# error grows with alpha_kappa. That is precisely the effect being measured,
+# so getting it from the average would hide the whole phenomenon.
+#
+# Allocation variability is the outer loop (n_vac draws): each draw
+# re-samples which members of each bin are vaccinated, so it samples which
+# alpha_i values are expressed. The alpha_i values themselves are a fixed
+# population attribute and do NOT get redrawn.
+get_stoch_eate_ve_hetero <- function(alpha, alpha_kappa = 0, n_alpha = 20L,
+                                     beta = 1, f = 0.5, N = 1000, t = 30,
+                                     n_vac = 10, n_rep = 20,
+                                     gamma = 1, dt = 0.1, timepoints = NULL,
+                                     I_ini_total = 1, mc.cores = 10,
+                                     inner_cores = 1) {
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t <- length(timepoints)
+
+  ab  <- alpha_ve_bins(alpha, alpha_kappa, n_alpha)
+  K   <- length(ab$x)
+  n_total_k <- .ve_bin_sizes(round(2 * N), ab$p)
+  N_total   <- sum(n_total_k)
+  n_groups  <- 2L * K
+
+  sus_unvac_bin <- rep(1, K)      # baseline susceptibility, everyone
+  sus_vac_bin   <- ab$x           # this bin's own vaccine effect
+  trans_all     <- rep(1, n_groups)
+
+  run_one_allocation <- function() {
+    n_vac_total <- round(f * N_total)
+    # Multivariate hypergeometric: which members of each bin are vaccinated.
+    vac_counts  <- if (K == 1L) {
+      as.integer(n_vac_total)
+    } else {
+      tabulate(sample(rep(seq_len(K), n_total_k), n_vac_total), nbins = K)
+    }
+    sim_id <- runif(1)
+
+    N_groups    <- c(n_total_k - vac_counts, vac_counts)
+    N_unvac_grp <- N_groups[seq_len(K)]
+    N_vac_grp   <- N_groups[(K + 1L):n_groups]
+    total_unvac <- sum(N_unvac_grp); total_vac <- sum(N_vac_grp)
+
+    mm    <- matrix(1, nrow = n_groups, ncol = n_groups)
+    I_ini <- .spread_arm_seeds(I_ini_total, N_unvac_grp, N_vac_grp)
+
+    raw <- run_stoch_cd_dust(mm, beta = beta, N = N_groups, t = t,
+                             I_ini = I_ini,
+                             susceptibility = c(sus_unvac_bin, sus_vac_bin),
+                             transmissibility = trans_all,
+                             gamma = gamma, dt = dt, timepoints = timepoints,
+                             n_sim = n_rep, cores = inner_cores)
+    setDT(raw)
+
+    I_mat <- array(0, dim = c(n_t, n_rep, n_groups))
+    for (g in seq_len(n_groups))
+      I_mat[,, g] <- .dt_col_to_t_rep_matrix(raw[[paste0("I", g)]], n_t, n_rep)
+
+    # Uniform mixing => one common FOI per (t, rep).
+    cum_foi_rep <- matrix(0, nrow = n_t, ncol = n_rep)
+    for (r in seq_len(n_rep)) {
+      I_traj_r <- if (n_groups == 1L) matrix(I_mat[, r, ], nrow = n_t, ncol = 1)
+                  else                I_mat[, r, ]
+      FI_r     <- beta * as.numeric(I_traj_r %*% trans_all) / N_total
+      cum_foi_rep[, r] <- .cum_trapz(matrix(FI_r, ncol = 1), timepoints)[, 1]
+    }
+
+    C_unvac_bin <- matrix(0, nrow = n_t, ncol = K)
+    C_vac_bin   <- matrix(0, nrow = n_t, ncol = K)
+    for (k in seq_len(K)) {
+      C_unvac_bin[, k] <- rowMeans(.dt_col_to_t_rep_matrix(
+        raw[[paste0("C", k)]], n_t, n_rep))
+      C_vac_bin[, k]   <- rowMeans(.dt_col_to_t_rep_matrix(
+        raw[[paste0("C", K + k)]], n_t, n_rep))
+    }
+
+    eate_t <- numeric(n_t); num_t <- numeric(n_t); denom_t <- numeric(n_t)
+    ave_t  <- numeric(n_t)
+    for (it in seq_len(n_t)) {
+      cfi <- cum_foi_rep[it, ]                               # [n_rep]
+      # outer(cfi, sus_bin) -> [n_rep, K]; colMeans averages over reps only,
+      # keeping the per-bin alpha_k intact.
+      P_vac_k   <- 1 - colMeans(exp(-outer(cfi, sus_vac_bin)))
+      P_unvac_k <- 1 - colMeans(exp(-outer(cfi, sus_unvac_bin)))
 
       num   <- sum(C_vac_bin[it, ])   + sum(P_vac_k   * N_unvac_grp)
       denom <- sum(C_unvac_bin[it, ]) + sum(P_unvac_k * N_vac_grp)

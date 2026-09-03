@@ -187,6 +187,16 @@ mean_k                  <- 6
 multisite_n_sites <- 4
 multisite_icc     <- 0
 
+# Heterogeneous-vaccine-effect knobs. alpha_i ~ Beta(mean = alpha,
+# sd = kappa * sqrt(alpha(1-alpha))), so kappa in [0,1) is the spread as a
+# fraction of the maximum a Beta with that mean allows -- feasible at every
+# alpha the optimiser might visit, unlike an absolute sd. kappa = 0 is the
+# homogeneous SIR exactly, so it is the reference arm of the sweep.
+# n_alpha is the number of equal-probability bins the distribution is
+# discretised into (2 * n_alpha dust groups, so keep it modest).
+ve_hetero_kappas  <- c(0, 0.3, 0.6)
+ve_hetero_n_alpha <- 10L
+
 # Two-block effect-modification model. split_frac = fraction of the population
 # in compartment A; the vaccinated susceptibility is alpha in A and
 # split_alpha_prod/alpha in B (so alpha_A*alpha_B = split_alpha_prod). One
@@ -279,6 +289,23 @@ build_configs_for_experiment <- function(exp) {
       model_type      = "sir_multisite",
       n_sites = multisite_n_sites, site_icc = multisite_icc,
       allocation_seed = alloc_seed))
+  }
+
+  # Heterogeneous vaccine effect: alpha varies BY INDIVIDUAL, as a fixed
+  # population attribute; the allocation decides which alpha_i are expressed.
+  # The optimiser fits the population MEAN alpha; the spread alpha_kappa is a
+  # fixed scenario knob, swept as its own axis. It has to be fixed rather than
+  # fitted: the target is two numbers (mean C1, mean C2 at t*), which pins
+  # down beta and mean-alpha and nothing further.
+  for (kap in ve_hetero_kappas) {
+    for (alloc_seed in seq_len(n_allocations_frailty)) {
+      cs[[length(cs)+1]] <- modifyList(base, list(
+        name            = glue("{exp$id}__sir_ve_hetero_k{100*kap}_a{alloc_seed}"),
+        model_type      = paste0("sir_ve_hetero_k", round(100 * kap)),
+        sim_type        = "sir_ve_hetero",
+        alpha_kappa     = kap, n_alpha = ve_hetero_n_alpha,
+        allocation_seed = alloc_seed))
+    }
   }
 
   # Frailty models: allocation matters (which bins get vaccinated).
@@ -401,6 +428,20 @@ build_simulator <- function(cfg) {
       sdB <- if (is.null(seed)) NULL else as.integer(seed) + 1L
       rbindlist(list(run_b(1L, nA, seed), run_b(3L, n_sim - nA, sdB)))
     },
+    sir_ve_hetero = function(beta, alpha, n_sim, seed = NULL) {
+      # alpha is the population MEAN vaccine effect; alpha_kappa spreads it
+      # across individuals. cfg$.vac_counts is the frozen allocation (which
+      # members of each alpha bin are vaccinated) -- see materialise_cfg.
+      at_tstar(run_stoch_ve_hetero_cd(
+        beta = beta, susceptibility = c(1, alpha),
+        alpha_kappa = cfg$alpha_kappa, n_alpha = cfg$n_alpha,
+        N = N_total / 2, t = cfg$t_star, gamma = cfg$gamma,
+        I_ini_total = sum(cfg$I_ini_2g),
+        vac_counts = cfg$.vac_counts,
+        timepoints = seq(1, cfg$t_star, 1),
+        n_sim = n_sim, cores = cfg$inner_cores,
+        dt = cfg$dt, f = 0.5, seed = seed), cfg$t_star)
+    },
     sir_sus_frailty = function(beta, alpha, n_sim, seed = NULL) {
       at_tstar(run_stoch_frailty_cd(
         sd = cfg$sd, sd_trans = cfg$sd_trans,
@@ -467,6 +508,19 @@ materialise_cfg <- function(cfg) {
     set.seed(NULL)
     set.seed(cfg$allocation_seed)
     cfg$.vac <- sample(seq_len(cfg$N_cont + cfg$N_vac), cfg$N_vac)
+    set.seed(NULL)
+  } else if (identical(cfg$sim_type %||% cfg$model_type, "sir_ve_hetero")) {
+    # Frozen allocation: which members of each alpha bin are vaccinated,
+    # drawn once from allocation_seed and held for the whole fit. Bins carry
+    # equal probability by construction, so the bin SIZES -- and hence this
+    # allocation -- do not depend on alpha; only the bin values do. That is
+    # what keeps the loss surface smooth as the optimiser moves alpha.
+    n_tot_k <- .ve_bin_sizes(cfg$N_cont + cfg$N_vac,
+                             rep(1 / cfg$n_alpha, cfg$n_alpha))
+    bin     <- rep(seq_along(n_tot_k), n_tot_k)
+    set.seed(cfg$allocation_seed)
+    cfg$.vac_counts <- tabulate(bin[sample(length(bin), cfg$N_vac)],
+                                nbins = length(n_tot_k))
     set.seed(NULL)
   } else if (cfg$model_type %in% c("sir_sus_frailty", "sir_trans_frailty")) {
     # Per-bin vac counts from the allocation_seed; matches build_frailty_mod
@@ -909,6 +963,12 @@ compute_ve <- function(cfg, beta, alpha) {
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
+    sir_ve_hetero = get_stoch_eate_ve_hetero(
+      alpha = alpha, alpha_kappa = cfg$alpha_kappa, n_alpha = cfg$n_alpha,
+      beta = beta, f = vac_frac, N = N_total / 2, t = cfg$t_star,
+      gamma = cfg$gamma, I_ini_total = sum(cfg$I_ini_2g),
+      n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
+      dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
     sir_multisite = get_stoch_eate_sir_multisite(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
@@ -1140,6 +1200,10 @@ run_one_job <- function(cfg) {
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
     split_frac       = cfg$split_frac       %||% NA_real_,
     split_alpha_prod = cfg$split_alpha_prod %||% NA_real_,
+    # Heterogeneous-VE knobs: the spread the alpha_i were drawn with, and how
+    # many bins it was discretised into. NA for every other model.
+    alpha_kappa      = cfg$alpha_kappa      %||% NA_real_,
+    n_alpha          = cfg$n_alpha          %||% NA_integer_,
     fit             = fit,
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),
