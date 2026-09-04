@@ -2263,7 +2263,7 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
 }
 
 # Per-node susceptibility for the contact-dependent vaccine effect:
-#     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
+#     alpha_eff[i] = 1 - (f[i] / vac_frac_ref)^vac_frac_power * (1 - alpha)
 # with f[i] = (vac[i] + #vaccinated contacts) / (1 + degree[i]), i.e. the
 # fraction vaccinated in i's local neighbourhood INCLUDING i itself, and 1 for
 # unvaccinated nodes. Counting self is what lets a lone vaccinated person get
@@ -2275,7 +2275,8 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
 # That is what lets this model use the event-driven simulator (and makes the
 # bespoke odin model optional rather than necessary).
 vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
-                                   vac_frac_ref = 0.5, vac_frac_power = 1) {
+                                   vac_frac_ref = 1, vac_frac_power = 1,
+                                   vac_frac_thresh = 0) {
   if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
   n   <- ncol(adj$neighbors)
   vi  <- integer(n); vi[vac] <- 1L
@@ -2283,7 +2284,10 @@ vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
   nv  <- colSums(adj$mask * matrix(vi[adj$neighbors], nrow(adj$neighbors), n))
   f   <- (vi + nv) / (deg + 1)
   sus <- rep(1, n)
-  sus[vac] <- alpha^((f[vac] / vac_frac_ref)^vac_frac_power)
+  sus[vac] <- if (vac_frac_thresh > 0)
+    ifelse(f[vac] >= vac_frac_thresh, alpha, 1)      # hard threshold
+  else
+    1 - (f[vac] / vac_frac_ref)^vac_frac_power * (1 - alpha)
   sus
 }
 
@@ -2429,7 +2433,7 @@ run_stoch_network_vacfrac <- function(beta=1, N=100, pl_alpha=3, alpha=0.5,
 get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
                                            N = 200, t = 15, pl_alpha = 3,
                                            c_ij = NULL, vac_frac_power = 1,
-                                           vac_frac_ref = 0.5,
+                                           vac_frac_ref = 1, vac_frac_thresh = 0,
                                            n_vac = 10, n_rep = 20, n_flip = 20,
                                            k_mean = 6, gamma = 1 / 3, dt = 0.1,
                                            timepoints = NULL, init_I = 2,
@@ -2461,7 +2465,8 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
     sim_v <- if (engine == "events") function(v) {
       sus <- vacfrac_susceptibility(v, alpha, adj = adj,
                                     vac_frac_ref = vac_frac_ref,
-                                    vac_frac_power = vac_frac_power)
+                                    vac_frac_power = vac_frac_power,
+                                    vac_frac_thresh = vac_frac_thresh)
       inf <- run_stoch_network_events(
         beta = beta, N = N, susceptibility = sus, t = t, vac = v, csr = csr,
         gamma = gamma, timepoints = timepoints, I_ini = init_I, n_sim = n_rep,

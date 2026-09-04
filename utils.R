@@ -125,9 +125,21 @@ get_conact_matrix_pl <- function(N, alpha, mean_k=6){
 # subtle bias in the directed accept ratio and gave systematically wrong
 # CIR curves — see the fix commit. This version uses the row-fixed p_max
 # variant from the MH 2011 paper, which is provably unbiased.
+# symmetric = TRUE (default) draws each unordered pair ONCE and mirrors it, so
+# the contact graph is undirected: if i can infect j then j can infect i. The
+# original code drew every row independently, so p_ij and p_ji were separate
+# Bernoulli trials of the same probability and agreed only by chance --
+# reciprocity came out at ~1.3%, i.e. an almost fully one-directional graph.
+# That silently suppresses any feedback effect (measured: the indirect effect
+# of vaccinating i back onto i was +0.0001 directed vs -0.0254 symmetric).
+#
+# The construction is the standard Chung-Lu one: sample only the upper triangle
+# in sorted order and mirror. Same skip-sampling, same O(N + m) cost, same
+# expected mean_k and power-law degrees -- unlike post-hoc symmetrisation with
+# max(A, A') which doubles the degree, or A & A' which collapses it.
 sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
                               allow_self_loops = TRUE,
-                              oversample = 1.5) {
+                              oversample = 1.5, symmetric = TRUE) {
   if (!is.null(seed)) {
     old_seed <- if (exists(".Random.seed", envir = .GlobalEnv))
       get(".Random.seed", envir = .GlobalEnv) else NULL
@@ -143,7 +155,13 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
   max_s  <- s_sort[1]
 
   neigh <- vector("list", N)
-  for (i in seq_len(N)) {
+  # Symmetric: walk in SORTED order and only consider partners of higher rank,
+  # so each unordered pair is offered exactly once. `start` is that rank floor
+  # (0 in the directed case, where every row scans all N candidates).
+  rank_seq <- if (symmetric) seq_len(N) else seq_len(N)
+  for (r in rank_seq) {
+    i     <- if (symmetric) ord[r] else r
+    start <- if (symmetric) r else 0L
     si    <- s[i]
     p_max <- min(c_const * si * max_s, 1)
 
@@ -152,14 +170,21 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
     if (p_max >= 1) {
       # Envelope saturated — no advantage to skipping. Fall back to
       # direct Bernoulli. Only affects the top few rows for heavy tails.
-      p_vec <- pmin(c_const * si * s, 1)
-      out   <- which(rbinom(N, 1L, p_vec) == 1L)
+      if (symmetric) {
+        cand  <- if (start < N) (start + 1L):N else integer(0L)
+        p_vec <- pmin(c_const * si * s_sort[cand], 1)
+        out   <- if (length(cand)) ord[cand[rbinom(length(cand), 1L, p_vec) == 1L]]
+                 else integer(0L)
+      } else {
+        p_vec <- pmin(c_const * si * s, 1)
+        out   <- which(rbinom(N, 1L, p_vec) == 1L)
+      }
     } else {
       # Vectorised Geom(p_max) skip + cumsum to enumerate candidate
       # positions in sorted order. Pre-allocate `oversample * expected`
       # gaps; refill loop kicks in the rare cases we underestimate.
       pos_out <- integer(0L)
-      last_pos <- 0L
+      last_pos <- start
       repeat {
         n_batch <- max(64L, ceiling(oversample * p_max * (N - last_pos)))
         gaps    <- rgeom(n_batch, p_max)
@@ -181,7 +206,14 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
     }
 
     if (!allow_self_loops) out <- out[out != i]
-    neigh[[i]] <- out
+    if (symmetric) {
+      # Mirror: record the edge on both endpoints.
+      out <- out[out != i]
+      neigh[[i]] <- c(neigh[[i]], out)
+      for (j in out) neigh[[j]] <- c(neigh[[j]], i)
+    } else {
+      neigh[[i]] <- out
+    }
   }
 
   if (!is.null(seed)) {

@@ -5,15 +5,17 @@
 # vaccinated. Writing f[i] for the fraction vaccinated in i's local
 # neighbourhood -- i itself plus its contacts --
 #
-#     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
+#     alpha_eff[i] = 1 - (f[i] / vac_frac_ref) ^ vac_frac_power * (1 - alpha)
 #
-# normalised so the model AGREES WITH THE PLAIN NETWORK MODEL at the reference
-# coverage (default 0.5, the coverage these runs use):
-#     f -> 0           -> alpha_eff -> 1      (no vaccine effect at all)
-#     f = vac_frac_ref -> alpha_eff = alpha   (as in stoch_mod_adj.R)
-#     f = 1 (ref 0.5)  -> alpha_eff = alpha^2
-# A lone vaccinated person has f = 1/(1+degree), not 0, so still gets some
-# protection -- see the frac_vac definition below.
+# i.e. the vaccine EFFECT (1 - alpha) is scaled by the local coverage, reaching
+# its full value when the neighbourhood is fully vaccinated:
+#     f -> 0            -> alpha_eff -> 1        (no vaccine effect at all)
+#     f = 1/(1+degree)  -> 1/(1+degree) of the effect (a lone vaccinated person)
+#     f = 1             -> alpha_eff = alpha     (the full effect)
+# With vac_frac_ref = 1 (the default) and f in [0, 1], alpha_eff stays in
+# [alpha, 1]: it can never overshoot the full effect nor go negative. Setting
+# vac_frac_ref < 1 reaches the full effect earlier, but then f > vac_frac_ref
+# would overshoot, so keep it at 1 unless you mean that.
 #
 # Unvaccinated nodes always have susceptibility 1.
 #
@@ -28,7 +30,8 @@ waning     <- parameter(0)
 
 alpha           <- parameter()
 vac_frac_power  <- parameter(1)
-vac_frac_ref    <- parameter(0.5)   # coverage at which alpha_eff == alpha
+vac_frac_ref    <- parameter(1)     # local coverage at which the FULL effect is reached
+vac_frac_thresh <- parameter(0)     # >0: hard threshold at this local coverage
 
 dim(neighbors) <- c(max_degree, n)
 neighbors <- parameter(type = "integer")
@@ -72,25 +75,21 @@ dim(frac_vac) <- n
 
 # Vaccinated nodes get the coverage-scaled effect; unvaccinated get none.
 #
-#     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
+#     alpha_eff[i] = 1 - (f[i] / vac_frac_ref)^vac_frac_power * (1 - alpha)
 #
-# Normalised so that AT THE REFERENCE COVERAGE the model reproduces the plain
-# network model: a node whose contacts are vac_frac_ref vaccinated gets exactly
-# alpha, and with vac_frac_power = 1 the exponent is linear in f, so the
-# geometric mean of alpha_eff over vaccinated nodes is exactly alpha whenever
-# mean(f) = vac_frac_ref (which is the case at that coverage). Set
-# vac_frac_ref = 0.5 to match the usual 50% coverage runs.
-#
-#   f = 0            -> alpha^0 = 1        (no vaccine effect)
-#   f = vac_frac_ref -> alpha              (the standard model's effect)
-#   f = 1 (ref 0.5)  -> alpha^2            (stronger where contacts are all vaccinated)
-#
-# Multiplicative rather than the linear 1 - (f/ref)(1-alpha): the linear form
-# goes NEGATIVE once f > ref/(1-alpha) (at ref=0.5, alpha=0.3 that is f > 0.71,
-# which happens for a few percent of nodes at mean degree 6), and clamping
-# there would distort the very average we are trying to fix.
-susceptibility[] <- if (vac[i] == 1)
-                      alpha^((frac_vac[i] / vac_frac_ref)^vac_frac_power) else 1
+# The vaccine EFFECT (1 - alpha) is scaled by local coverage: a lone vaccinated
+# person (f = 1/(1+degree)) gets 1/(1+degree) of the effect, a fully vaccinated
+# neighbourhood (f = 1) gets all of it. Linear in f with vac_frac_ref = 1 and
+# f in [0, 1] keeps alpha_eff in [alpha, 1] -- it cannot overshoot the full
+# effect, and cannot go negative (which is what ruled the linear form out when
+# the reference was 0.5 rather than 1).
+# vac_frac_thresh > 0 switches from the smooth ramp to a HARD THRESHOLD:
+# full effect (alpha) once local coverage reaches vac_frac_thresh, none below.
+# A step makes a single flip able to push a neighbour ACROSS the threshold, so
+# one vaccination can discontinuously change someone else's protection.
+susceptibility[] <- if (vac[i] == 0) 1 else if (vac_frac_thresh > 0)
+                     (if (frac_vac[i] >= vac_frac_thresh) alpha else 1) else
+                     1 - (frac_vac[i] / vac_frac_ref)^vac_frac_power * (1 - alpha)
 dim(susceptibility) <- n
 
 # --- transmission (unchanged from stoch_mod_adj.R) --------------------------
