@@ -18,6 +18,7 @@ if (requireNamespace("cpp11", quietly = TRUE)) {
 stoch_model_cd         <- odin_cached("stoch_sir.R")
 stoch_model_adj        <- odin_cached("stoch_mod_adj.R")
 stoch_model_adj_sparse <- odin_cached("stoch_mod_adj_sparse.R")
+stoch_model_adj_vacfrac<- odin_cached("stoch_mod_adj_vacfrac.R")
 stoch_model_linear     <- odin_cached("stoch_linear.R")
 stoch_model_ind        <- odin_cached("stoch_ind.R")
 
@@ -2259,4 +2260,212 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
                             function(i) run_one_allocation(),
                             mc.cores = mc.cores)
   rbindlist(res, fill = TRUE)
+}
+
+# ---------------------------------------------------------------------------
+# Network SIR with a CONTACT-DEPENDENT vaccine effect (stoch_mod_adj_vacfrac.R)
+# ---------------------------------------------------------------------------
+# Same individual-level network model as run_stoch_adj, but a vaccinated node's
+# susceptibility depends on the fraction f of ITS OWN contacts that are
+# vaccinated:
+#     alpha_eff = 1 - f^vac_frac_power * (1 - alpha)
+# so f = 0 gives no vaccine effect, f = 1 the full alpha, and vac_frac_power
+# bends the interpolation. susceptibility is computed inside the model, so pass
+# `vac` (node indices) and the scalar `alpha` rather than a susceptibility
+# vector. `adj` may be supplied to skip rebuilding the adjacency list.
+run_stoch_adj_vacfrac <- function(contact_matrix, beta, t, I_ini, vac, alpha,
+                                  N=NULL, transmissibility=NULL,
+                                  vac_frac_power=1, vac_frac_ref=0.5,
+                                  gamma=1/3, waning=0, dt=0.1,
+                                  timepoints=seq(0, t, 1), n_sim=100, cores=10,
+                                  seed=NULL, adj=NULL) {
+  adj <- if (is.null(adj)) contact_matrix_to_adj(contact_matrix) else adj
+  n   <- if (is.null(contact_matrix)) ncol(adj$neighbors) else nrow(contact_matrix)
+
+  if (is.null(N))                N                <- rep(1L, n)
+  if (is.null(transmissibility)) transmissibility <- rep(1, n)
+  vac_ind      <- integer(n); vac_ind[vac] <- 1L
+
+  beta_scalar <- if (length(beta) == 1L) beta else mean(beta)
+
+  params <- list(
+    n               = as.integer(n),
+    max_degree      = as.integer(adj$max_degree),
+    beta            = beta_scalar,
+    gamma           = gamma,
+    waning          = waning,
+    alpha           = alpha,
+    vac_frac_power  = vac_frac_power,
+    vac_frac_ref    = vac_frac_ref,
+    neighbors       = adj$neighbors,
+    mask            = adj$mask,
+    vac             = vac_ind,
+    transmisibility = transmissibility,
+    S_ini           = N - I_ini,
+    I_ini           = I_ini
+  )
+
+  sys <- dust2::dust_system_create(stoch_model_adj_vacfrac, params,
+                                   n_particles = n_sim,
+                                   n_threads   = cores,
+                                   dt          = dt,
+                                   time        = 0,
+                                   seed        = seed)
+  dust2::dust_system_set_state_initial(sys)
+  raw <- dust2::dust_system_simulate(sys, timepoints)
+  if (length(dim(raw)) == 2L) {
+    raw <- array(raw, dim = c(dim(raw)[1L], 1L, dim(raw)[2L]))
+  }
+  n_t <- length(timepoints)
+  out <- data.table(
+    time = rep(timepoints,     each  = n_sim),
+    sim  = rep(seq_len(n_sim), times = n_t)
+  )
+  offsets <- c(S=0L, I=n, R=2L*n, C=3L*n)
+  for (comp in names(offsets)) {
+    for (k in seq_len(n)) {
+      out[[paste0(comp, k)]] <- as.vector(raw[offsets[[comp]] + k, , ])
+    }
+  }
+  out[]
+}
+
+
+# run_stoch_network counterpart: returns (time, sim, C1 unvaccinated cases,
+# C2 vaccinated cases). beta is on the user scale (multiplied by N/k_mean
+# internally, as in run_stoch_network).
+run_stoch_network_vacfrac <- function(beta=1, N=100, pl_alpha=3, alpha=0.5,
+                                      t=100, vac_frac=0.5, vac=NULL,
+                                      vac_frac_power=1, vac_frac_ref=0.5,
+                                      gamma=1/3,
+                                      c_ij=NULL, k_mean=6,
+                                      dt=0.1, timepoints=seq(0, t, 1), I_ini=2,
+                                      n_sim=100, cores=10, seed=NULL, adj=NULL) {
+  if (is.null(c_ij) && is.null(adj))
+    c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
+  if (is.null(vac)) vac <- sample(seq_len(N), vac_frac * N)
+  non_vac <- setdiff(seq_len(N), vac)
+
+  I_ini <- c(rep(1, I_ini), rep(0L, N - I_ini))
+
+  full <- run_stoch_adj_vacfrac(c_ij, beta = N * beta / k_mean, t = t,
+                                I_ini = I_ini, vac = vac, alpha = alpha,
+                                vac_frac_power = vac_frac_power,
+                                vac_frac_ref = vac_frac_ref,
+                                gamma = gamma, dt = dt, timepoints = timepoints,
+                                n_sim = n_sim, cores = cores, seed = seed,
+                                adj = adj)
+
+  vac_cols   <- paste0("C", vac)
+  unvac_cols <- paste0("C", non_vac)
+  full[, .(time, sim,
+           C2 = rowSums(.SD[, vac_cols,   with=FALSE]),
+           C1 = rowSums(.SD[, unvac_cols, with=FALSE]))]
+}
+
+# ---------------------------------------------------------------------------
+# Interference-aware EATE for the contact-dependent-vaccine-effect network
+# ---------------------------------------------------------------------------
+# get_stoch_eate_network uses a FROZEN FIELD: the counterfactual is obtained by
+# re-weighting the realised force of infection, which assumes flipping one
+# person does not change the epidemic. That fails here -- flipping i changes
+# f[j] for every neighbour j (by 1/degree(j), ~0.17 at mean degree 6), hence
+# their protection, hence the FOI. So the counterfactual arm is obtained by
+# RE-SIMULATING the model with i's status flipped, which captures that
+# feedback (including back onto i).
+#
+# Only the flipped arm needs simulating: the factual run already supplies each
+# individual's observed outcome. Cost is therefore 1 + n_flip runs per
+# allocation, not 2 * n_flip.
+#
+# All runs share a seed (common random numbers), so the factual and flipped
+# runs are coupled and the difference is not swamped by simulation noise.
+#
+# n_flip individuals are sampled per allocation (stratified across the
+# vaccinated and unvaccinated arms) and their group means scaled to the group
+# sizes, so n_flip trades accuracy against cost; n_flip = N is exact.
+get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
+                                           N = 200, t = 15, pl_alpha = 3,
+                                           c_ij = NULL, vac_frac_power = 1,
+                                           vac_frac_ref = 0.5,
+                                           n_vac = 10, n_rep = 20, n_flip = 20,
+                                           k_mean = 6, gamma = 1 / 3, dt = 0.1,
+                                           timepoints = NULL, init_I = 2,
+                                           mc.cores = 10, inner_cores = 1,
+                                           vac_list = NULL, adj = NULL,
+                                           crn_seed = 1L) {
+  if (is.null(c_ij) && is.null(adj))
+    c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
+  if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t <- length(timepoints)
+  if (!is.null(vac_list)) n_vac <- length(vac_list)
+  I_ini_vec <- c(rep(1L, init_I), rep(0L, N - init_I))
+
+  run_one_allocation <- function(a) {
+    vac     <- if (!is.null(vac_list)) vac_list[[a]]
+               else sample(seq_len(N), round(f * N))
+    non_vac <- setdiff(seq_len(N), vac)
+    sim_id  <- runif(1)
+    seed_a  <- as.integer(crn_seed) + a          # CRN: shared by all runs here
+
+    sim_v <- function(v) {
+      r <- run_stoch_adj_vacfrac(c_ij, beta = N * beta / k_mean, t = t,
+                                 I_ini = I_ini_vec, vac = v, alpha = alpha,
+                                 vac_frac_power = vac_frac_power,
+                                 vac_frac_ref = vac_frac_ref,
+                                 gamma = gamma, dt = dt, timepoints = timepoints,
+                                 n_sim = n_rep, cores = inner_cores,
+                                 seed = seed_a, adj = adj)
+      setDT(r); r
+    }
+    p_of <- function(r, k)                       # P(individual k infected)
+      rowMeans(.dt_col_to_t_rep_matrix(r[[paste0("C", k)]], n_t, n_rep))
+
+    fac   <- sim_v(vac)
+    P_fac <- vapply(seq_len(N), function(k) p_of(fac, k), numeric(n_t))  # [n_t, N]
+
+    # Sample individuals to flip, stratified across the two arms.
+    n_fv   <- max(1L, round(n_flip * length(vac) / N))
+    n_fu   <- max(1L, n_flip - n_fv)
+    flip_v <- if (length(vac))     sample(vac,     min(n_fv, length(vac)))     else integer(0)
+    flip_u <- if (length(non_vac)) sample(non_vac, min(n_fu, length(non_vac))) else integer(0)
+
+    # Counterfactual by RE-SIMULATION: flip i, take that run's mean for i.
+    cf <- function(i, vaccinate) {
+      v2 <- if (vaccinate) sort(c(vac, i)) else setdiff(vac, i)
+      p_of(sim_v(v2), i)
+    }
+    P_cf_u <- if (length(flip_u))                 # unvaccinated, if vaccinated
+      vapply(flip_u, function(i) cf(i, TRUE),  numeric(n_t)) else NULL
+    P_cf_v <- if (length(flip_v))                 # vaccinated, if unvaccinated
+      vapply(flip_v, function(i) cf(i, FALSE), numeric(n_t)) else NULL
+
+    mrow <- function(m) if (is.null(m)) rep(NA_real_, n_t) else
+      if (is.matrix(m)) rowMeans(m) else m
+
+    # Same hybrid contrast as get_stoch_eate_network: factual for the matching
+    # arm, counterfactual for the flipped arm -- but re-simulated, and the
+    # sampled group means scaled up to the group sizes.
+    num_t   <- rowSums(P_fac[, vac,     drop = FALSE]) + length(non_vac) * mrow(P_cf_u)
+    denom_t <- rowSums(P_fac[, non_vac, drop = FALSE]) + length(vac)     * mrow(P_cf_v)
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N
+
+    ar_fac_vac   <- rowSums(P_fac[, vac,     drop = FALSE]) / max(length(vac), 1)
+    ar_fac_unvac <- rowSums(P_fac[, non_vac, drop = FALSE]) / max(length(non_vac), 1)
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = ar_fac_vac / ar_fac_unvac,
+                 ave = ar_fac_unvac - ar_fac_vac,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  rbindlist(parallel::mclapply(seq_len(n_vac), run_one_allocation,
+                               mc.cores = mc.cores), fill = TRUE)
 }

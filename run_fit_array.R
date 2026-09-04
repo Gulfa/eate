@@ -197,6 +197,22 @@ multisite_icc     <- 0
 ve_hetero_kappas  <- c(0, 0.3, 0.6)
 ve_hetero_n_alpha <- 10L
 
+# Network with a CONTACT-DEPENDENT vaccine effect (stoch_mod_adj_vacfrac.R):
+# a vaccinated node's susceptibility is alpha^((f/vac_frac_ref)^vac_frac_power)
+# with f the fraction of its contacts vaccinated, so vac_frac_ref = 0.5 makes
+# it agree with the plain network model at 50% coverage.
+#
+# COST WARNING: its EATE re-simulates the counterfactual arm (the frozen field
+# is invalid here), costing 1 + ve_n_flip runs per allocation instead of 1. It
+# is roughly ve_n_flip times more expensive than the plain network model, so
+# keep n_networks_vf / n_allocations_vf / K_post_samples modest.
+vacfrac_power     <- 1
+vacfrac_ref       <- 0.5
+ve_n_flip         <- 15    # individuals re-simulated per allocation
+n_networks_vf     <- 3     # network seeds for the vacfrac model
+n_allocations_vf  <- 3     # allocations per network seed
+pl_alphas_vf      <- c(3)  # Pareto exponents for the vacfrac model
+
 # Two-block effect-modification model. split_frac = fraction of the population
 # in compartment A; the vaccinated susceptibility is alpha in A and
 # split_alpha_prod/alpha in B (so alpha_A*alpha_B = split_alpha_prod). One
@@ -223,6 +239,8 @@ base_common <- list(
   grid_post_span = grid_post_span, grid_post_max_expand = grid_post_max_expand,
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
+  vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
+  ve_n_flip = ve_n_flip,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
   network_engine = net_engine
@@ -333,6 +351,21 @@ build_configs_for_experiment <- function(exp) {
         cs[[length(cs)+1]] <- modifyList(base, list(
           name            = glue("{exp$id}__network_pa{pa}_n{network_seed}_a{alloc_seed}"),
           model_type      = "network",
+          pl_alpha        = pa, mean_k = mean_k,
+          network_seed    = network_seed,
+          allocation_seed = alloc_seed))
+      }
+    }
+  }
+
+  # Same network model but with the contact-dependent vaccine effect. Kept on
+  # its own (smaller) sweep because its EATE re-simulates the counterfactual.
+  for (pa in pl_alphas_vf) {
+    for (network_seed in seq_len(n_networks_vf)) {
+      for (alloc_seed in seq_len(n_allocations_vf)) {
+        cs[[length(cs)+1]] <- modifyList(base, list(
+          name            = glue("{exp$id}__netvf_pa{pa}_n{network_seed}_a{alloc_seed}"),
+          model_type      = "network_vacfrac",
           pl_alpha        = pa, mean_k = mean_k,
           network_seed    = network_seed,
           allocation_seed = alloc_seed))
@@ -482,13 +515,25 @@ build_simulator <- function(cfg) {
         engine = cfg$network_engine %||% "events",
         csr = cfg$.csr), cfg$t_star)
     },
+    network_vacfrac = function(beta, alpha, n_sim, seed = NULL) {
+      # Contact-dependent vaccine effect: susceptibility is computed inside the
+      # model from vac[] and scalar alpha, so no susceptibility vector here.
+      at_tstar(run_stoch_network_vacfrac(
+        beta = beta, N = N_total, alpha = alpha,
+        t = cfg$t_star, c_ij = cfg$.c_ij, vac = cfg$.vac, adj = cfg$.adj,
+        vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
+        k_mean = cfg$mean_k, gamma = cfg$gamma,
+        dt = cfg$dt, timepoints = seq(1, cfg$t_star, 1),
+        n_sim = n_sim, cores = cfg$inner_cores,
+        I_ini = cfg$init_I_nw, seed = seed), cfg$t_star)
+    },
     stop("Unknown model_type: ", cfg$model_type))
 }
 
 # Materialise per-config side state (network c_ij + vac allocation) so
 # everything else can be configs of scalars.
 materialise_cfg <- function(cfg) {
-  if (cfg$model_type == "network") {
+  if (cfg$model_type %in% c("network", "network_vacfrac")) {
     set.seed(cfg$network_seed)
     cfg$.c_ij <- get_conact_matrix_pl(cfg$N_cont + cfg$N_vac,
                                        alpha = cfg$pl_alpha,
@@ -995,6 +1040,13 @@ compute_ve <- function(cfg, beta, alpha) {
       t = cfg$t_star, c_ij = cfg$.c_ij, k_mean = cfg$mean_k, adj = cfg$.adj,
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       timepoints = tp, init_I = cfg$init_I_nw,
+      mc.cores = cfg$inner_cores),
+    network_vacfrac = get_stoch_eate_network_vacfrac(
+      beta = beta, alpha = alpha, f = vac_frac, N = N_total,
+      t = cfg$t_star, c_ij = cfg$.c_ij, adj = cfg$.adj, k_mean = cfg$mean_k,
+      vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
+      gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
+      n_flip = cfg$ve_n_flip, timepoints = tp, init_I = cfg$init_I_nw,
       mc.cores = cfg$inner_cores),
     stop("Unknown model_type: ", cfg$model_type))
   setDT(ve)
