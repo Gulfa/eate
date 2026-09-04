@@ -24,6 +24,7 @@ testthat::test_file("tests/testthat/test-stacking.R")
 
 - `tests/testthat/test-model.R` — tests for `get_frailty`, `cij_NGM`, `get_beta`, `run_det_cd`, `run_det_ncd`. Requires `odin` and the odin model files; must be run from the project root (`chdir=TRUE` is set automatically).
 - `tests/testthat/test-net-sir-events.R` — the event-driven network simulator and the `run_stoch_network()` engine switch (needs `cpp11`; compiles `net_sir_events.cpp` on first use).
+- `tests/testthat/test-ve-hetero.R` — per-individual vaccine effect: `alpha_ve_bins()` mean-exactness, `κ=0` reproducing the homogeneous SIR, and how α heterogeneity moves the level and spread of the CIR across realisations (~1 min).
 - `tests/testthat/test-stacking.R` — tests for `regularise`, `generate_contacts`, `generate_linear_event_times`, `run_events_linear`, `run_stacking`, plus a validation test comparing the custom linear simulator against `adaptivetau`. Does **not** require odin.
 
 **Note:** `stacking.R` contains several informal test/validation functions (`test()`, `test_nl()`, `test_linear_implementation()`, `test_sir_implementation()`) that print comparison output but have no assertions. `def_run_test_linear()` is currently broken — it references `res$stacked` which was commented out of `compare_cf`.
