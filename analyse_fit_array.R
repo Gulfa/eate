@@ -87,20 +87,30 @@ dark2_pal <- function(n) {
 }
 
 # For sir_split_effect the FITTED alpha is compartment A's vaccinated
-# susceptibility; B's is split_alpha_prod / alpha. Report the population-
-# average instead: split_frac * alpha_A + (1 - split_frac) * alpha_B.
-# Applied elementwise to the posterior DRAWS (not just the point estimate),
-# so intervals reflect the non-linear transform rather than being mapped
-# through it after the fact. Identity for every other model.
+# susceptibility; B's is split_alpha_prod / alpha. Report a population average
+# over the two compartments, applied elementwise to the posterior DRAWS (not to
+# the point estimate afterwards) so intervals reflect the transform. Identity
+# for every other model.
 #
-# NB the map is non-monotonic in alpha (minimum at sqrt((1-f)*p/f)), so two
-# fitted alphas can give the same average; near that minimum the transform
-# compresses the interval.
+# GEOMETRIC, not arithmetic. alpha is a rate multiplier and alpha_B is the
+# RECIPROCAL of alpha_A (their product is fixed), so the arithmetic mean
+# f*a + (1-f)*p/a is degenerate:
+#   * it has a MINIMUM at sqrt((1-f)p/f) -- 0.408 at the defaults -- so it is
+#     bounded below by 0.612 and can never express a strongly protective
+#     vaccine;
+#   * fitted alphas land right at that minimum, where the map is flattest, so
+#     the reported average was ~0.61 almost regardless of alpha;
+#   * it FOLDS: alphas either side of the minimum map to the same value, so the
+#     posterior piled up against the floor with a long right tail.
+# The geometric mean exp(f*log(alpha_A) + (1-f)*log(alpha_B)) is monotone in
+# alpha over the whole range and is the natural average for a multiplier
+# (equivalently, the population mean on the log-hazard scale).
 alpha_report <- function(a, r) {
   if (!identical(as.character(r$model_type), "sir_split_effect")) return(a)
   f <- r$split_frac       %||% 0.75
   p <- r$split_alpha_prod %||% 0.5
-  f * a + (1 - f) * (p / a)
+  a <- pmax(a, 1e-12)
+  exp(f * log(a) + (1 - f) * log(pmax(p / a, 1e-12)))
 }
 
 labels_L1_all_splits <- function(r) {
