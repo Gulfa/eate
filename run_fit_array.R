@@ -235,6 +235,15 @@ split_init_I     <- 1
 # every observable -- untouched, which is the point: without a constraint on how
 # the effect may depend on the allocation, the causal quantity is not pinned
 # down by any amount of trial data. See parity_ve_unbounded.R.
+# Coverage-effect panel: infections averted by raising coverage by cov_effect_d
+# at the fitted parameters. Its own simulations (a population contrast, not a
+# functional of the VE draws).
+cov_effect_d     <- 0.10
+cov_effect_n_sim <- 1000L
+cov_effect_K     <- 200L   # posterior draws propagated into the coverage effect
+                           # (capped below K_post_samples: each draw costs two
+                           # extra simulations)
+
 parity_alpha_alt <- 1.0    # susceptibility in the unobserved parity
 parity_alphas    <- c(0.5, 1.0, 2.0)   # sweep it as separate models
 
@@ -257,6 +266,8 @@ base_common <- list(
   split_init_I = split_init_I,
   vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
   ve_n_flip = ve_n_flip, parity_alpha_alt = parity_alpha_alt,
+  cov_effect_d = cov_effect_d, cov_effect_n_sim = cov_effect_n_sim,
+  cov_effect_K = cov_effect_K,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
   network_engine = net_engine
@@ -1033,6 +1044,62 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
 # VE at the fitted (beta, alpha)
 # ---------------------------------------------------------------------------
 
+# Infections averted by raising vaccine coverage, at the FITTED parameters.
+#
+# This is a POPULATION contrast between two coverage levels -- not a functional
+# of the per-individual VE draws -- so it needs its own simulations: the whole
+# epidemic differs between the two worlds. Coverage enters only through the
+# N_cont / N_vac split at fixed N_total, so each level is the same simulator on
+# a reallocated config.
+#
+# Reported per 1000 population so models with different N are comparable, and
+# as a fraction of the baseline burden. Both arms share a seed (CRN) so the
+# difference is not swamped by simulation noise.
+#
+# NB this is the TOTAL effect of a coverage change -- it includes the indirect
+# protection of the unvaccinated -- unlike VE/alpha, which are per-individual
+# direct effects. That is exactly why it separates models that the direct
+# effect does not: measured earlier, one vaccination averts ~5-6x more
+# infections in others than in the vaccinee.
+# `samples` (a [K, 2] matrix of beta/alpha posterior draws) propagates
+# parameter uncertainty: the contrast is recomputed at each draw, so panel B
+# gets a band comparable to the VE and AVE panels rather than a point. Each
+# draw uses its own seed, so the reported spread is parameter uncertainty plus
+# simulation noise, not one shared realisation.
+compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
+                                    n_sim = NULL, seed = 4242L,
+                                    samples = NULL, K_cores = 1L) {
+  if (!is.null(samples) && nrow(samples)) {
+    K <- nrow(samples)
+    return(data.table::rbindlist(parallel::mclapply(seq_len(K), function(k) {
+      r <- compute_coverage_effect(cfg, samples[k, "beta"], samples[k, "alpha"],
+                                   d_cov = d_cov, n_sim = n_sim,
+                                   seed = seed + k)
+      r[, `:=`(param_sample = k,
+               beta_k = samples[k, "beta"], alpha_k = samples[k, "alpha"])][]
+    }, mc.cores = K_cores), fill = TRUE))
+  }
+  N_total <- cfg$N_cont + cfg$N_vac
+  n_sim   <- n_sim %||% cfg$cov_effect_n_sim %||% 1000L
+  at_cov <- function(cv) {
+    n_v <- round(cv * N_total)
+    cfg2 <- modifyList(cfg, list(N_vac = n_v, N_cont = N_total - n_v))
+    cfg2 <- materialise_cfg(cfg2)          # re-draw the allocation at this size
+    out  <- build_simulator(cfg2)(beta, alpha, n_sim, seed = seed)
+    mean(out$C1 + out$C2)                  # total infections in the population
+  }
+  cov0 <- cfg$N_vac / N_total
+  cov1 <- min(cov0 + d_cov, 1)
+  inf0 <- at_cov(cov0); inf1 <- at_cov(cov1)
+  data.table::data.table(
+    cov_from = cov0, cov_to = cov1,
+    inf_from = inf0, inf_to = inf1,
+    averted        = inf0 - inf1,
+    averted_per1k  = (inf0 - inf1) / N_total * 1000,
+    averted_frac   = if (inf0 > 0) (inf0 - inf1) / inf0 else NA_real_)
+}
+
+
 compute_ve <- function(cfg, beta, alpha) {
   N_total  <- cfg$N_cont + cfg$N_vac
   vac_frac <- cfg$N_vac / N_total
@@ -1273,6 +1340,20 @@ run_one_job <- function(cfg) {
   message(glue("[{cfg$name}] VE..."))
   ve <- compute_ve(cfg_fit, fit$beta, fit$alpha)
 
+  # Total effect of a coverage change, at the fitted parameters (own sims).
+  message(glue("[{cfg$name}] coverage effect (+{100 * (cfg$cov_effect_d %||% 0.10)}%)..."))
+  # Same posterior draws the VE uncertainty uses, so the panels are comparable.
+  cov_draws <- if (!is.null(post_draws)) post_draws else
+    sample_posterior(fit$beta, fit$alpha, pcov$cov,
+                     min(cfg$K_post_samples, cfg$cov_effect_K %||% 200L))
+  if (!is.null(cov_draws) && nrow(cov_draws) > (cfg$cov_effect_K %||% 200L))
+    cov_draws <- cov_draws[seq_len(cfg$cov_effect_K %||% 200L), , drop = FALSE]
+  cov_eff <- tryCatch(
+    compute_coverage_effect(cfg_fit, fit$beta, fit$alpha,
+                            d_cov = cfg$cov_effect_d %||% 0.10,
+                            samples = cov_draws, K_cores = cores_per_node),
+    error = function(e) { message("  coverage effect failed: ", conditionMessage(e)); NULL })
+
   # VE with uncertainty: K sequential compute_ve calls dominate the
   # total time. Run them in parallel across cores_per_node; each K
   # worker uses inner_cores = 1 (set inside the helper).
@@ -1328,6 +1409,7 @@ run_one_job <- function(cfg) {
     data_C1         = cfg$data_C1,
     data_C2         = cfg$data_C2,
     ve              = ve,
+    coverage_effect = cov_eff,
     ve_uncertainty  = ve_unc
   )
 }

@@ -967,6 +967,33 @@ if (nrow(ve_unc_long) > 0) {
     g4_alpha <- summarise_param(ok,  labels_L3_pool_nets, "alpha")
     g4_ave   <- summarise_ave_by(ok, labels_L3_pool_nets, t_star_ve)
 
+    # Panel B: infections averted per 1000 by raising coverage by cov_effect_d,
+    # at the fitted parameters. Unlike VE/alpha this is a POPULATION contrast
+    # (its own simulations, stored per job by run_fit_array), so it includes the
+    # indirect protection of the unvaccinated -- which is where the models
+    # actually differ. Interval is the spread across jobs in the group.
+    # One row per posterior draw per job, so the band is mean +/- z*sd over the
+    # pooled draws -- the same construction as the VE and AVE panels. Results
+    # predating the posterior propagation carry a single row per job, which
+    # still works (the spread is then across jobs only).
+    g4_cov <- rbindlist(lapply(ok, function(r) {
+      ce <- r$coverage_effect
+      if (is.null(ce) || !nrow(ce)) return(NULL)
+      data.table(group = labels_L3_pool_nets(r),
+                 value = ce$averted_per1k, d_cov = ce$cov_to - ce$cov_from)
+    }))
+    if (nrow(g4_cov)) {
+      d_cov_lab <- round(100 * median(g4_cov$d_cov))
+      g4_cov <- g4_cov[, .(estimate = mean(value, na.rm = TRUE),
+                           lo = mean(value, na.rm = TRUE) -
+                                z_ci * sd(value, na.rm = TRUE),
+                           hi = mean(value, na.rm = TRUE) +
+                                z_ci * sd(value, na.rm = TRUE),
+                           n = .N), by = group]
+      g4_cov[!is.finite(lo), `:=`(lo = estimate, hi = estimate)]
+      fwrite(g4_cov, file.path(out_dir, "coverage_effect_pool_nets.csv"))
+    }
+
     if (nrow(g4_ve) && nrow(g4_alpha) && nrow(g4_ave)) {
       # One shared y ordering across A/B/C, so rows line up in the grid even
       # if a model is missing from one metric (scale_y_discrete(drop = FALSE)
@@ -1000,7 +1027,14 @@ if (nrow(ve_unc_long) > 0) {
       # so the labels in A serve both and alpha gets the width back.
       pA <- forest_panel(g4_ve,    glue("VE = 1 - EATE  (t = {t_star_ve})"),
                          "A. VE")
-      pB <- forest_panel(g4_alpha, "alpha", "B. alpha", show_y = FALSE)
+      # B shows the coverage effect when available (the policy-relevant total
+      # effect); falls back to alpha for results predating it.
+      pB <- if (nrow(g4_cov))
+        forest_panel(g4_cov,
+                     glue("infections averted per 1000  (+{d_cov_lab}% coverage)"),
+                     glue("B. Effect of +{d_cov_lab}% coverage"), show_y = FALSE)
+      else
+        forest_panel(g4_alpha, "alpha", "B. alpha", show_y = FALSE)
       pC <- forest_panel(g4_ave,   glue("AVE = (denom - num) / N  (t = {t_star_ve})"),
                          "C. Absolute difference")
 
