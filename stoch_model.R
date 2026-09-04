@@ -2262,6 +2262,29 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
   rbindlist(res, fill = TRUE)
 }
 
+# Per-node susceptibility for the contact-dependent vaccine effect:
+#     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
+# with f[i] the fraction of i's contacts vaccinated (0 for isolated nodes),
+# and 1 for unvaccinated nodes.
+#
+# This is a pure function of the parameters -- nothing state-dependent -- so it
+# can be precomputed and handed to ANY engine as a plain susceptibility vector.
+# That is what lets this model use the event-driven simulator (and makes the
+# bespoke odin model optional rather than necessary).
+vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
+                                   vac_frac_ref = 0.5, vac_frac_power = 1) {
+  if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
+  n   <- ncol(adj$neighbors)
+  vi  <- integer(n); vi[vac] <- 1L
+  deg <- colSums(adj$mask)
+  nv  <- colSums(adj$mask * matrix(vi[adj$neighbors], nrow(adj$neighbors), n))
+  f   <- ifelse(deg > 0, nv / deg, 0)
+  sus <- rep(1, n)
+  sus[vac] <- alpha^((f[vac] / vac_frac_ref)^vac_frac_power)
+  sus
+}
+
+
 # ---------------------------------------------------------------------------
 # Network SIR with a CONTACT-DEPENDENT vaccine effect (stoch_mod_adj_vacfrac.R)
 # ---------------------------------------------------------------------------
@@ -2340,11 +2363,27 @@ run_stoch_network_vacfrac <- function(beta=1, N=100, pl_alpha=3, alpha=0.5,
                                       gamma=1/3,
                                       c_ij=NULL, k_mean=6,
                                       dt=0.1, timepoints=seq(0, t, 1), I_ini=2,
-                                      n_sim=100, cores=10, seed=NULL, adj=NULL) {
-  if (is.null(c_ij) && is.null(adj))
+                                      n_sim=100, cores=10, seed=NULL, adj=NULL,
+                                      engine=c("dust", "events"), csr=NULL) {
+  engine <- match.arg(engine)
+  if (is.null(c_ij) && is.null(adj) && is.null(csr))
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
   if (is.null(vac)) vac <- sample(seq_len(N), vac_frac * N)
   non_vac <- setdiff(seq_len(N), vac)
+
+  # alpha_eff is a precomputable per-node vector, so the exact event-driven
+  # engine can run this model unchanged -- ~137x faster than tau-leaping, and
+  # without dust's dt bias.
+  if (engine == "events") {
+    if (is.null(csr)) csr <- adj_to_csr(contact_matrix = c_ij, adj = adj)
+    sus <- vacfrac_susceptibility(vac, alpha, adj = adj, c_ij = c_ij,
+                                  vac_frac_ref = vac_frac_ref,
+                                  vac_frac_power = vac_frac_power)
+    return(run_stoch_network_events(
+      beta = beta, N = N, susceptibility = sus, t = t, vac = vac, csr = csr,
+      gamma = gamma, timepoints = timepoints, I_ini = I_ini, n_sim = n_sim,
+      seed = seed, k_mean = k_mean, cores = cores))
+  }
 
   I_ini <- c(rep(1, I_ini), rep(0L, N - I_ini))
 
@@ -2393,10 +2432,15 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
                                            timepoints = NULL, init_I = 2,
                                            mc.cores = 10, inner_cores = 1,
                                            vac_list = NULL, adj = NULL,
-                                           crn_seed = 1L) {
+                                           crn_seed = 1L,
+                                           engine = c("dust", "events"),
+                                           csr = NULL) {
+  engine <- match.arg(engine)
   if (is.null(c_ij) && is.null(adj))
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
   if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
+  if (engine == "events" && is.null(csr))
+    csr <- adj_to_csr(contact_matrix = c_ij, adj = adj)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
   if (!is.null(vac_list)) n_vac <- length(vac_list)
@@ -2409,7 +2453,19 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
     sim_id  <- runif(1)
     seed_a  <- as.integer(crn_seed) + a          # CRN: shared by all runs here
 
-    sim_v <- function(v) {
+    # Both engines return a [n_t, N] matrix of per-individual P(infected by t),
+    # which is what the counterfactual contrast needs.
+    sim_v <- if (engine == "events") function(v) {
+      sus <- vacfrac_susceptibility(v, alpha, adj = adj,
+                                    vac_frac_ref = vac_frac_ref,
+                                    vac_frac_power = vac_frac_power)
+      inf <- run_stoch_network_events(
+        beta = beta, N = N, susceptibility = sus, t = t, vac = v, csr = csr,
+        gamma = gamma, timepoints = timepoints, I_ini = init_I, n_sim = n_rep,
+        seed = seed_a, k_mean = k_mean, cores = inner_cores,
+        return_times = TRUE)                     # [n_rep, N] infection times
+      vapply(timepoints, function(tp) colMeans(inf <= tp), numeric(N)) |> t()
+    } else function(v) {
       r <- run_stoch_adj_vacfrac(c_ij, beta = N * beta / k_mean, t = t,
                                  I_ini = I_ini_vec, vac = v, alpha = alpha,
                                  vac_frac_power = vac_frac_power,
@@ -2417,13 +2473,13 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
                                  gamma = gamma, dt = dt, timepoints = timepoints,
                                  n_sim = n_rep, cores = inner_cores,
                                  seed = seed_a, adj = adj)
-      setDT(r); r
+      setDT(r)
+      vapply(seq_len(N), function(k)
+        rowMeans(.dt_col_to_t_rep_matrix(r[[paste0("C", k)]], n_t, n_rep)),
+        numeric(n_t))
     }
-    p_of <- function(r, k)                       # P(individual k infected)
-      rowMeans(.dt_col_to_t_rep_matrix(r[[paste0("C", k)]], n_t, n_rep))
 
-    fac   <- sim_v(vac)
-    P_fac <- vapply(seq_len(N), function(k) p_of(fac, k), numeric(n_t))  # [n_t, N]
+    P_fac <- sim_v(vac)                          # [n_t, N]
 
     # Sample individuals to flip, stratified across the two arms.
     n_fv   <- max(1L, round(n_flip * length(vac) / N))
@@ -2434,7 +2490,7 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
     # Counterfactual by RE-SIMULATION: flip i, take that run's mean for i.
     cf <- function(i, vaccinate) {
       v2 <- if (vaccinate) sort(c(vac, i)) else setdiff(vac, i)
-      p_of(sim_v(v2), i)
+      sim_v(v2)[, i]
     }
     P_cf_u <- if (length(flip_u))                 # unvaccinated, if vaccinated
       vapply(flip_u, function(i) cf(i, TRUE),  numeric(n_t)) else NULL

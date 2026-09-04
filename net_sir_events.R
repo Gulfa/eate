@@ -97,7 +97,8 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
                                      transmissibility = NULL,
                                      n_sim = 100, seed = NULL, k_mean = 6,
                                      cores = 1L, adj = NULL, c_ij = NULL,
-                                     count_seeds = FALSE) {
+                                     count_seeds = FALSE,
+                                     return_times = FALSE) {
   net_sir_compile()
   if (is.null(csr)) {
     if (is.null(adj) && is.null(c_ij))
@@ -106,7 +107,12 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
   }
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n <- csr$n
-  sus <- rep(susceptibility[1], n); sus[vac] <- susceptibility[2]
+  # A length-n vector is used as the per-node susceptibility directly; the
+  # 2-vector form is the usual (control, vaccinated) shorthand. The per-node
+  # form is what lets the contact-dependent-vaccine-effect model run on this
+  # engine, since its alpha_eff is just a precomputable vector.
+  sus <- if (length(susceptibility) == n) as.numeric(susceptibility) else {
+    s0 <- rep(susceptibility[1], n); s0[vac] <- susceptibility[2]; s0 }
   tr  <- if (is.null(transmissibility)) rep(1, n) else transmissibility
   seeds <- seq_len(min(I_ini, n)) - 1L        # matches run_stoch_network's I_ini
   # An unset seed must still move with the ambient RNG, or every call in a
@@ -123,6 +129,11 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
 
   if (!count_seeds && length(seeds))
     inf[, seeds + 1L] <- Inf
+
+  # Raw [n_sim, n] infection times: what a per-individual analysis (the EATE)
+  # needs, since P_i(t) = mean(inf[, i] <= t). Aggregating to C1/C2 here would
+  # throw that away.
+  if (return_times) return(inf)
 
   is_vac <- logical(n); is_vac[vac] <- TRUE
   data.table::rbindlist(lapply(timepoints, function(tp) {

@@ -208,7 +208,9 @@ ve_hetero_n_alpha <- 10L
 # keep n_networks_vf / n_allocations_vf / K_post_samples modest.
 vacfrac_power     <- 1
 vacfrac_ref       <- 0.5
-ve_n_flip         <- 15    # individuals re-simulated per allocation
+ve_n_flip         <- 100   # individuals re-simulated per allocation. n_flip=10
+                           # is noise-dominated (VE swung 0.29 vs 0.48 at 100);
+                           # the event engine makes 100 cheap.
 n_networks_vf     <- 3     # network seeds for the vacfrac model
 n_allocations_vf  <- 3     # allocations per network seed
 pl_alphas_vf      <- c(3)  # Pareto exponents for the vacfrac model
@@ -525,7 +527,8 @@ build_simulator <- function(cfg) {
         k_mean = cfg$mean_k, gamma = cfg$gamma,
         dt = cfg$dt, timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
-        I_ini = cfg$init_I_nw, seed = seed), cfg$t_star)
+        I_ini = cfg$init_I_nw, seed = seed,
+        engine = cfg$network_engine %||% "events", csr = cfg$.csr), cfg$t_star)
     },
     stop("Unknown model_type: ", cfg$model_type))
 }
@@ -1047,7 +1050,8 @@ compute_ve <- function(cfg, beta, alpha) {
       vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       n_flip = cfg$ve_n_flip, timepoints = tp, init_I = cfg$init_I_nw,
-      mc.cores = cfg$inner_cores),
+      mc.cores = cfg$inner_cores,
+      engine = cfg$network_engine %||% "events", csr = cfg$.csr),
     stop("Unknown model_type: ", cfg$model_type))
   setDT(ve)
   ve[, model := cfg$model_type]
