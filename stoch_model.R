@@ -2264,8 +2264,11 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
 
 # Per-node susceptibility for the contact-dependent vaccine effect:
 #     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
-# with f[i] the fraction of i's contacts vaccinated (0 for isolated nodes),
-# and 1 for unvaccinated nodes.
+# with f[i] = (vac[i] + #vaccinated contacts) / (1 + degree[i]), i.e. the
+# fraction vaccinated in i's local neighbourhood INCLUDING i itself, and 1 for
+# unvaccinated nodes. Counting self is what lets a lone vaccinated person get
+# some protection (f = 1/(1+degree) rather than 0). Must match the frac_vac
+# definition in stoch_mod_adj_vacfrac.R.
 #
 # This is a pure function of the parameters -- nothing state-dependent -- so it
 # can be precomputed and handed to ANY engine as a plain susceptibility vector.
@@ -2278,7 +2281,7 @@ vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
   vi  <- integer(n); vi[vac] <- 1L
   deg <- colSums(adj$mask)
   nv  <- colSums(adj$mask * matrix(vi[adj$neighbors], nrow(adj$neighbors), n))
-  f   <- ifelse(deg > 0, nv / deg, 0)
+  f   <- (vi + nv) / (deg + 1)
   sus <- rep(1, n)
   sus[vac] <- alpha^((f[vac] / vac_frac_ref)^vac_frac_power)
   sus

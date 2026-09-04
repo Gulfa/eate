@@ -2,16 +2,18 @@
 #
 # Identical to stoch_mod_adj.R except that a vaccinated node's susceptibility
 # is not a fixed alpha: it depends on how many of that node's CONTACTS are
-# vaccinated. Writing f[i] for the fraction of i's contacts that are
-# vaccinated,
+# vaccinated. Writing f[i] for the fraction vaccinated in i's local
+# neighbourhood -- i itself plus its contacts --
 #
 #     alpha_eff[i] = alpha ^ ((f[i] / vac_frac_ref) ^ vac_frac_power)
 #
 # normalised so the model AGREES WITH THE PLAIN NETWORK MODEL at the reference
 # coverage (default 0.5, the coverage these runs use):
-#     f = 0            -> alpha_eff = 1       (no vaccine effect at all)
+#     f -> 0           -> alpha_eff -> 1      (no vaccine effect at all)
 #     f = vac_frac_ref -> alpha_eff = alpha   (as in stoch_mod_adj.R)
 #     f = 1 (ref 0.5)  -> alpha_eff = alpha^2
+# A lone vaccinated person has f = 1/(1+degree), not 0, so still gets some
+# protection -- see the frac_vac definition below.
 #
 # Unvaccinated nodes always have susceptibility 1.
 #
@@ -58,8 +60,14 @@ dim(degree) <- n
 vac_contrib[, ] <- mask[i, j] * vac[neighbors[i, j]]
 dim(vac_contrib) <- c(max_degree, n)
 
-# Fraction of i's contacts that are vaccinated (0 for isolated nodes).
-frac_vac[] <- if (degree[i] > 0) sum(vac_contrib[, i]) / degree[i] else 0
+# Fraction vaccinated in i's LOCAL NEIGHBOURHOOD, counting i itself:
+#     f[i] = (vac[i] + #vaccinated contacts) / (1 + degree[i])
+# Including self is what gives a lone vaccinated person some protection: with
+# no vaccinated contacts f = 1/(1+degree) rather than 0, so alpha_eff < 1. It
+# also means f[i] depends on i's OWN status, so flipping i changes i's own
+# effect -- the local effect a sparse trial should still see. The denominator
+# is >= 1, so isolated nodes need no special case.
+frac_vac[] <- (vac[i] + sum(vac_contrib[, i])) / (degree[i] + 1)
 dim(frac_vac) <- n
 
 # Vaccinated nodes get the coverage-scaled effect; unvaccinated get none.
