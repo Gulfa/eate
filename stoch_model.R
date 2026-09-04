@@ -2556,3 +2556,78 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
   rbindlist(parallel::mclapply(seq_len(n_vac), run_one_allocation,
                                mc.cores = mc.cores), fill = TRUE)
 }
+
+# ---------------------------------------------------------------------------
+# Parity model: alpha depends on the PARITY of the number vaccinated
+# ---------------------------------------------------------------------------
+# alpha_i = alpha       if the number vaccinated is odd
+#           alpha_alt   if it is even
+# (whichever parity the factual allocation has, that one uses `alpha`.)
+#
+# Flipping any single individual changes the count by one, so it flips the
+# parity and changes EVERYONE's susceptibility: every counterfactual is
+# evaluated in a different epidemic from the factual one. The trial only ever
+# observes one parity, so a fit to (C1, C2) identifies `alpha` alone --
+# alpha_alt is asserted, not estimated, and moving it changes the EATE while
+# leaving every observable untouched.
+#
+# This is deliberately not a plausible biology. It is the extreme case of
+# alpha_i = g(V_1, ..., V_N) for arbitrary g: with no restriction on g, a trial
+# constrains only the realised allocation and the causal quantity is free
+# elsewhere. Contrast get_stoch_eate_network_vacfrac, where g depends only on a
+# node's own neighbourhood.
+get_stoch_eate_sir_parity <- function(beta = 1, susceptibility = c(1, 1),
+                                      alpha_alt = 1, f = 0.5, N = 200, t = 30,
+                                      gamma = 1, I_ini = c(2, 2),
+                                      n_vac = 10, n_rep = 20, dt = 0.1,
+                                      timepoints = NULL, mc.cores = 10,
+                                      inner_cores = 1, seed = NULL) {
+  alpha <- susceptibility[2]
+  if (is.null(timepoints)) timepoints <- seq(1, t, 1)
+  n_t     <- length(timepoints)
+  N_unvac <- round(N * (1 - f)); N_vac <- N - N_unvac
+  mm      <- matrix(1, 2, 2)
+
+  # alpha for a given vaccinated count: the FACTUAL parity keeps `alpha`.
+  par_fac <- N_vac %% 2
+  a_of <- function(n_v) if (n_v %% 2 == par_fac) alpha else alpha_alt
+
+  arms <- function(n_v, a, sd) {
+    n_u <- N - n_v
+    raw <- run_stoch_cd_dust(mm, beta = beta, N = c(n_u, n_v), t = t,
+                             I_ini = I_ini, susceptibility = c(1, a),
+                             gamma = gamma, dt = dt, timepoints = timepoints,
+                             n_sim = n_rep, cores = inner_cores, seed = sd)
+    setDT(raw)
+    list(unvac = rowMeans(.dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)) / n_u,
+         vac   = rowMeans(.dt_col_to_t_rep_matrix(raw$C2, n_t, n_rep)) / n_v)
+  }
+
+  run_one_allocation <- function(i) {
+    sim_id <- runif(1)
+    fac <- arms(N_vac,     a_of(N_vac),     seed)
+    up  <- arms(N_vac + 1, a_of(N_vac + 1), seed)   # an unvaccinated i, vaccinated
+    dn  <- arms(N_vac - 1, a_of(N_vac - 1), seed)   # a vaccinated i, unvaccinated
+
+    # EATE = E_i[Y_i(1)] / E_i[Y_i(0)]: every individual in both arms, factual
+    # where their status matches, counterfactual where it does not.
+    num_t   <- N_vac   * fac$vac   + N_unvac * up$vac
+    denom_t <- N_unvac * fac$unvac + N_vac   * dn$unvac
+    eate_t  <- num_t / denom_t
+    crr_t   <- fac$vac / fac$unvac
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t,
+                 ave = (denom_t - num_t) / N,
+                 num = num_t, denom = denom_t,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = crr_t,
+                 ave = fac$unvac - fac$vac,
+                 num = NA_real_, denom = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  rbindlist(parallel::mclapply(seq_len(n_vac), run_one_allocation,
+                               mc.cores = mc.cores), fill = TRUE)
+}

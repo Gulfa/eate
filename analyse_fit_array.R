@@ -145,6 +145,7 @@ labels_L3_pool_nets <- function(r) {
 
 order_key <- function(label) {
   if (label %in% c("linear", "sir", "sir_multisite", "sir_split_effect")) return(paste0("0_", label))
+  if (grepl("^sir_parity_a", label)) return(paste0("0_zz_", label))
   # SIR I_ini sweep: sort NUMERICALLY by the seed total, not lexically, so
   # I_ini = 2, 10, 100 come out in that order regardless of the tag's padding.
   if (grepl("^sir_i[0-9]+$", label))
@@ -170,6 +171,8 @@ display_name <- function(x) {
     if (g == "linear")           return("Linear")
     if (g == "sir")              return("SIR (homogeneous)")
     if (g == "sir_split_effect") return("SIR (two-block effect mod.)")
+    if (grepl("^sir_parity_a", g))
+      return(sprintf("SIR parity (alt alpha = %s)", sub("^sir_parity_a", "", g)))
     if (grepl("^sir_i[0-9]+$", g)) return(sprintf("SIR (I_ini = %s)", sub("^sir_i0*", "", g)))
     # Raw model_type codes: the facets/legends keyed on model_type (VE
     # trajectories, outcome distributions) pass these rather than the

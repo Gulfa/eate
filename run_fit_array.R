@@ -207,7 +207,8 @@ ve_hetero_n_alpha <- 10L
 # is roughly ve_n_flip times more expensive than the plain network model, so
 # keep n_networks_vf / n_allocations_vf / K_post_samples modest.
 vacfrac_power     <- 1
-vacfrac_ref       <- 0.5
+vacfrac_ref       <- 1     # local coverage at which the FULL effect is reached;
+                           # was 0.5 before alpha_eff was made linear in f
 ve_n_flip         <- 100   # individuals re-simulated per allocation. n_flip=10
                            # is noise-dominated (VE swung 0.29 vs 0.48 at 100);
                            # the event engine makes 100 cheap.
@@ -223,6 +224,19 @@ pl_alphas_vf      <- c(3)  # Pareto exponents for the vacfrac model
 split_frac       <- 0.75
 split_alpha_prod <- 0.5
 split_init_I     <- 1
+
+# Parity model: alpha_i = alpha (the FITTED value) when the number vaccinated is
+# odd, and parity_alpha_alt when it is even. Flipping any one person changes the
+# count by one, so it flips the parity and changes EVERYONE's susceptibility.
+#
+# The trial only ever sees ONE parity, so the fit identifies only the alpha of
+# the realised world; parity_alpha_alt is unidentifiable from the data and is
+# simply asserted here. Varying it moves the EATE while leaving the fit -- and
+# every observable -- untouched, which is the point: without a constraint on how
+# the effect may depend on the allocation, the causal quantity is not pinned
+# down by any amount of trial data. See parity_ve_unbounded.R.
+parity_alpha_alt <- 1.0    # susceptibility in the unobserved parity
+parity_alphas    <- c(0.5, 1.0, 2.0)   # sweep it as separate models
 
 base_common <- list(
   gamma = gamma, dt = dt,
@@ -242,7 +256,7 @@ base_common <- list(
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
   vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
-  ve_n_flip = ve_n_flip,
+  ve_n_flip = ve_n_flip, parity_alpha_alt = parity_alpha_alt,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
   network_engine = net_engine
@@ -298,6 +312,17 @@ build_configs_for_experiment <- function(exp) {
     name = glue("{exp$id}__sir_split_effect"),
     model_type = "sir_split_effect", ve_n_vac = 1,
     fit_method = "kernel"))
+  # Parity model: identical data-generating process to `sir` (so the fit and
+  # every observable match it exactly), but the counterfactual arm runs at
+  # parity_alpha_alt. Sweeping that value shows the EATE moving while the fit
+  # stays put -- the causal quantity is not identified by the trial.
+  for (aa in parity_alphas) {
+    cs[[length(cs)+1]] <- modifyList(base, list(
+      name = glue("{exp$id}__sir_parity_a{aa}"),
+      model_type = paste0("sir_parity_a", aa), sim_type = "sir_parity",
+      parity_alpha_alt = aa, ve_n_vac = 1))
+  }
+
   # Multi-site RCT: n_sites locations, per-site vaccine fraction dispersion
   # set by site_icc (0 = individually randomised / max within-site
   # cancellation, 1 = cluster randomised / fully separated). The allocation
@@ -406,6 +431,19 @@ build_simulator <- function(cfg) {
         n_sim = n_sim, cores = cfg$inner_cores, seed = seed), cfg$t_star)
     },
     sir = function(beta, alpha, n_sim, seed = NULL) {
+      at_tstar(run_stoch_cd_dust(
+        matrix(rep(1, 4), nrow = 2),
+        beta = beta, N = c(cfg$N_cont, cfg$N_vac),
+        t = cfg$t_star, I_ini = cfg$I_ini_2g,
+        susceptibility = c(1, alpha),
+        gamma = cfg$gamma, dt = cfg$dt,
+        timepoints = seq(1, cfg$t_star, 1),
+        n_sim = n_sim, cores = cfg$inner_cores, seed = seed), cfg$t_star)
+    },
+    sir_parity = function(beta, alpha, n_sim, seed = NULL) {
+      # The trial observes ONE parity, so the fit is the plain 2-group SIR at
+      # the fitted alpha. parity_alpha_alt affects only the counterfactual arm
+      # (see compute_ve) and is therefore unidentifiable from (C1, C2).
       at_tstar(run_stoch_cd_dust(
         matrix(rep(1, 4), nrow = 2),
         beta = beta, N = c(cfg$N_cont, cfg$N_vac),
@@ -1017,6 +1055,12 @@ compute_ve <- function(cfg, beta, alpha) {
       gamma = cfg$gamma, I_ini_total = sum(cfg$I_ini_2g),
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
+    sir_parity = get_stoch_eate_sir_parity(
+      beta = beta, susceptibility = sus, alpha_alt = cfg$parity_alpha_alt,
+      f = vac_frac, N = N_total, t = cfg$t_star, gamma = cfg$gamma,
+      I_ini = cfg$I_ini_2g, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
+      dt = cfg$dt, timepoints = tp, inner_cores = cfg$inner_cores,
+      mc.cores = 1),
     sir_multisite = get_stoch_eate_sir_multisite(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, gamma = cfg$gamma, I_ini = cfg$I_ini_2g,
@@ -1254,6 +1298,7 @@ run_one_job <- function(cfg) {
                         (cfg$network_engine %||% "events") else NA_character_,
     # Needed by the analysis to report the population-average alpha for
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
+    parity_alpha_alt = cfg$parity_alpha_alt %||% NA_real_,
     split_frac       = cfg$split_frac       %||% NA_real_,
     split_alpha_prod = cfg$split_alpha_prod %||% NA_real_,
     # Heterogeneous-VE knobs: the spread the alpha_i were drawn with, and how
