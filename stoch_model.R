@@ -2276,18 +2276,41 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
 # bespoke odin model optional rather than necessary).
 vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
                                    vac_frac_ref = 1, vac_frac_power = 1,
-                                   vac_frac_thresh = 0) {
+                                   vac_frac_thresh = 0, spill = 0,
+                                   trans_tau = 1) {
   if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
   n   <- ncol(adj$neighbors)
   vi  <- integer(n); vi[vac] <- 1L
   deg <- colSums(adj$mask)
   nv  <- colSums(adj$mask * matrix(vi[adj$neighbors], nrow(adj$neighbors), n))
   f   <- (vi + nv) / (deg + 1)
+
+  # Protection as a fraction of the full effect (1 - alpha), by local coverage.
+  prot <- if (vac_frac_thresh > 0) as.numeric(f >= vac_frac_thresh)
+          else (f / vac_frac_ref)^vac_frac_power
   sus <- rep(1, n)
-  sus[vac] <- if (vac_frac_thresh > 0)
-    ifelse(f[vac] >= vac_frac_thresh, alpha, 1)      # hard threshold
-  else
-    1 - (f[vac] / vac_frac_ref)^vac_frac_power * (1 - alpha)
+  sus[vac] <- 1 - prot[vac] * (1 - alpha)
+
+  # `spill` (mechanism B): UNVACCINATED people also get protection from living
+  # in a well-vaccinated neighbourhood, at fraction `spill` of the vaccinated
+  # effect. This is what contaminates a trial's control arm -- a control's
+  # outcome now depends on OTHER people's treatment -- so the observed CIR is
+  # biased toward 1 while the causal flip-VE is not. spill = 0 recovers the
+  # earlier behaviour (unvaccinated susceptibility exactly 1).
+  if (spill > 0) {
+    unvac <- setdiff(seq_len(n), vac)
+    sus[unvac] <- 1 - spill * prot[unvac] * (1 - alpha)
+  }
+
+  # `trans_tau` (mechanism A): coverage-dependent TRANSMISSIBILITY. A
+  # vaccinated person in a well-vaccinated neighbourhood is also less
+  # infectious, trans = 1 - prot * (1 - trans_tau). Flipping i then directly
+  # lowers the risk i poses to its contacts -- a spillover that lands inside
+  # i's own flip. trans_tau = 1 means no transmissibility effect.
+  trans <- rep(1, n)
+  if (trans_tau < 1) trans[vac] <- 1 - prot[vac] * (1 - trans_tau)
+
+  attr(sus, "trans") <- trans
   sus
 }
 

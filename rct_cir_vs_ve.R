@@ -35,7 +35,7 @@ net_sir_compile()
 N         <- 1000
 pl_alpha  <- 3
 mean_k    <- 6
-alpha_vac <- 0.4          # fixed effect; VE = 0.6 in the no-saturation limit
+alpha_vac <- 0.1          # full effect VE = 0.9 at f = 1
 beta      <- 2.0          # starting point for the per-coverage calibration
 target_ar <- 0.5          # unvaccinated attack rate to hold fixed
 gamma     <- 1
@@ -46,6 +46,7 @@ n_rep_ve  <- 400          # replicates per re-simulated counterfactual
 n_flip    <- 150          # individuals flipped per coverage
 cores     <- 8
 coverages <- seq(0.05, 0.95, by = 0.10)
+n_reps    <- 5            # independent trials (fresh allocation + RNG) per coverage
 thresh    <- 0.5          # 0 = smooth ramp; >0 = hard cutoff at this local coverage
 
 set.seed(1)
@@ -56,8 +57,8 @@ cat(sprintf("N=%d mean_deg=%.1f alpha=%.2f beta=%.1f t*=%d  effect=%s\n\n",
             N, mean(adj$degree), alpha_vac, beta, t_star,
             if (thresh > 0) sprintf("hard cutoff at f=%.2f", thresh) else "smooth ramp"))
 
-run_cov <- function(cov) {
-  set.seed(2000 + round(1000 * cov))
+run_cov <- function(cov, rep = 1L) {
+  set.seed(2000 + round(1000 * cov) + 100000L * rep)
   n_v   <- max(1L, round(cov * N))
   vac   <- sample.int(N, n_v)
   unvac <- setdiff(seq_len(N), vac)
@@ -70,7 +71,8 @@ run_cov <- function(cov) {
   ar_unvac_at <- function(b, nsim, sd) {
     inf <- run_stoch_network_events(
       beta = b, N = N, susceptibility = sus, t = t_star, vac = vac, csr = csr,
-      gamma = gamma, timepoints = tp, I_ini = init_I, n_sim = nsim, seed = sd,
+      gamma = gamma, timepoints = tp, I_ini = init_I, n_sim = nsim,
+      seed = sd + 1000L * rep,
       k_mean = mean_k, cores = cores, return_times = TRUE)
     mean(rowMeans((inf <= t_star)[, unvac, drop = FALSE]))
   }
@@ -85,7 +87,8 @@ run_cov <- function(cov) {
 
   inf <- run_stoch_network_events(
     beta = beta_c, N = N, susceptibility = sus, t = t_star, vac = vac, csr = csr,
-    gamma = gamma, timepoints = tp, I_ini = init_I, n_sim = n_rep, seed = 7,
+    gamma = gamma, timepoints = tp, I_ini = init_I, n_sim = n_rep,
+    seed = 7L + 1000L * rep,
     k_mean = mean_k, cores = cores, return_times = TRUE)
   hit  <- inf <= t_star
   ar_v <- mean(rowMeans(hit[, vac,   drop = FALSE]))
@@ -98,22 +101,33 @@ run_cov <- function(cov) {
     k_mean = mean_k, gamma = gamma,
     n_rep = n_rep_ve, n_flip = n_flip, timepoints = tp, init_I = init_I,
     mc.cores = 1, inner_cores = cores, vac_list = list(vac),
-    engine = "events", crn_seed = 13)
+    engine = "events", crn_seed = 13L + 100L * rep)
   setDT(ve)
 
   vi <- integer(N); vi[vac] <- 1L
   nv <- colSums(adj$mask * matrix(vi[adj$neighbors], nrow(adj$neighbors), N))
   f_bar <- mean(((vi + nv) / (colSums(adj$mask) + 1))[vac])
 
-  data.table(coverage = cov, beta = beta_c, f_bar = f_bar,
+  data.table(coverage = cov, rep = rep, beta = beta_c, f_bar = f_bar,
              mean_alpha_eff = mean(sus[vac]),
              AR_vac = ar_v, AR_unvac = ar_u,
              CIR = ar_v / ar_u, VE_trial = 1 - ar_v / ar_u,
              VE_flip = 1 - ve[method == "full_stoch" & t == t_star, eate])
 }
 
-res <- rbindlist(lapply(coverages, run_cov))
-res[, gap := VE_flip - VE_trial]
+raw <- rbindlist(lapply(coverages, function(cv)
+  rbindlist(lapply(seq_len(n_reps), function(rp) run_cov(cv, rp)))))
+raw[, gap := VE_flip - VE_trial]
+fwrite(raw, "output/rct_cir_vs_ve_reps.csv")
+
+# Average over reps; se_gap is the standard error of the mean gap, i.e. the
+# yardstick for whether a gap is real or just allocation/simulation noise.
+res <- raw[, .(beta = mean(beta), f_bar = mean(f_bar),
+               mean_alpha_eff = mean(mean_alpha_eff),
+               AR_unvac = mean(AR_unvac), AR_vac = mean(AR_vac),
+               CIR = mean(CIR),
+               VE_trial = mean(VE_trial), VE_flip = mean(VE_flip),
+               gap = mean(gap), se_gap = sd(gap) / sqrt(.N)), by = coverage]
 
 cat("=== trial contrast vs causal flip-VE, by coverage ===\n")
 print(res[, .(coverage, beta = round(beta, 2), f_bar = round(f_bar, 3),
@@ -122,9 +136,12 @@ print(res[, .(coverage, beta = round(beta, 2), f_bar = round(f_bar, 3),
               CIR      = round(CIR, 3),
               VE_trial = round(VE_trial, 3),
               VE_flip  = round(VE_flip, 3),
-              gap      = round(gap, 3))])
-cat(sprintf("\nmean |gap| = %.3f   (alpha = %.2f, full effect VE = %.2f at f = 1)\n",
-            mean(abs(res$gap)), alpha_vac, 1 - alpha_vac))
+              gap      = round(gap, 3),
+              se_gap   = round(se_gap, 3),
+              t        = round(gap / se_gap, 1))])
+cat(sprintf("\nmean gap = %+.4f  (pooled se %.4f, %d reps x %d coverages)\n",
+            mean(res$gap), sd(raw$gap)/sqrt(nrow(raw)), n_reps, length(coverages)))
+cat(sprintf("alpha = %.2f, full effect VE = %.2f at f = 1\n", alpha_vac, 1 - alpha_vac))
 
 dir.create("output", showWarnings = FALSE)
 fwrite(res, "output/rct_cir_vs_ve.csv")
