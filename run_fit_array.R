@@ -238,8 +238,12 @@ split_init_I     <- 1
 # Coverage-effect panel: infections averted by raising coverage by cov_effect_d
 # at the fitted parameters. Its own simulations (a population contrast, not a
 # functional of the VE draws).
-cov_effect_d     <- 0.10
-cov_effect_n_sim <- 1000L
+cov_effect_d      <- 0.10
+cov_effect_n_alloc <- 5L    # allocations averaged over at EACH coverage level:
+                            # the estimand is E_alloc E_sto[sum_i Y_i] differenced
+                            # between levels, and allocation carries most of the
+                            # variance, so the budget goes here
+cov_effect_n_sim  <- 200L   # realisations per allocation
 cov_effect_K     <- 200L   # posterior draws propagated into the coverage effect
                            # (capped below K_post_samples: each draw costs two
                            # extra simulations)
@@ -267,6 +271,7 @@ base_common <- list(
   vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
   ve_n_flip = ve_n_flip, parity_alpha_alt = parity_alpha_alt,
   cov_effect_d = cov_effect_d, cov_effect_n_sim = cov_effect_n_sim,
+  cov_effect_n_alloc = cov_effect_n_alloc,
   cov_effect_K = cov_effect_K,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
@@ -1068,7 +1073,8 @@ kernel_posterior_cov <- function(simulator, cfg, beta, alpha) {
 # simulation noise, not one shared realisation.
 compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
                                     n_sim = NULL, seed = 4242L,
-                                    samples = NULL, K_cores = 1L) {
+                                    samples = NULL, K_cores = 1L,
+                                    n_alloc = NULL, alloc_seed0 = 90000L) {
   if (!is.null(samples) && nrow(samples)) {
     K <- nrow(samples)
     # inner_cores = 1 inside the K loop: K_cores already spends the whole CPU
@@ -1079,33 +1085,47 @@ compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
     return(data.table::rbindlist(parallel::mclapply(seq_len(K), function(k) {
       r <- compute_coverage_effect(cfg, samples[k, "beta"], samples[k, "alpha"],
                                    d_cov = d_cov, n_sim = n_sim,
-                                   seed = seed + k)
+                                   seed = seed + k, n_alloc = n_alloc,
+                                   alloc_seed0 = alloc_seed0 + 1000L * k)
       r[, `:=`(param_sample = k,
                beta_k = samples[k, "beta"], alpha_k = samples[k, "alpha"])][]
     }, mc.cores = K_cores), fill = TRUE))
   }
   N_total <- cfg$N_cont + cfg$N_vac
-  n_sim   <- n_sim %||% cfg$cov_effect_n_sim %||% 1000L
-  # Only the ALLOCATION changes with coverage: the contact network is fixed.
-  # Calling materialise_cfg here would rebuild c_ij, the adjacency list and the
-  # CSR on every call -- O(N^2) plus a 1.8 s adjacency build at N = 5000, twice
-  # per posterior draw (400 rebuilds at cov_effect_K = 200), which dominated
-  # everything else. Carry the network side-state over and redraw only what
-  # depends on coverage.
+  n_sim   <- n_sim   %||% cfg$cov_effect_n_sim %||% 200L
+  n_alloc <- n_alloc %||% cfg$cov_effect_n_alloc %||% 5L
+  # E_alloc E_sto [ sum_i Y_i ] at one coverage: average over n_alloc INDEPENDENT
+  # allocations, each over n_sim stochastic realisations. The two coverage
+  # levels draw their allocations independently -- this is the contrast between
+  # two programmes, E_alloc[Y | 60%] - E_alloc[Y | 50%], NOT the nested
+  # "vaccinate 10% more of the same people", which is a different estimand with
+  # a different mean (its increment is drawn only from the currently
+  # unvaccinated) as well as a lower variance.
+  #
+  # Allocation is the axis that carries the variance here -- on a heavy-tailed
+  # network it matters a great deal whether the extra 10% are hubs -- so the
+  # budget goes on n_alloc, not on particles per allocation.
+  #
+  # The contact network is FIXED across all of this: only the allocation
+  # changes. Calling materialise_cfg per allocation would rebuild c_ij, the
+  # adjacency list and the CSR -- O(N^2) plus a 1.8 s adjacency build at
+  # N = 5000 -- so the network side-state is carried over and only the
+  # vaccinated set is redrawn.
   at_cov <- function(cv) {
-    n_v  <- round(cv * N_total)
-    cfg2 <- modifyList(cfg, list(N_vac = n_v, N_cont = N_total - n_v))
-    if (!is.null(cfg$.c_ij)) {                       # network family
-      cfg2$.c_ij <- cfg$.c_ij; cfg2$.adj <- cfg$.adj; cfg2$.csr <- cfg$.csr
-      set.seed(cfg$allocation_seed %||% 1L)
-      cfg2$.vac <- sample.int(N_total, n_v)
-    } else if (!is.null(cfg$.vac_counts)) {          # frailty: per-bin counts
-      cfg2 <- materialise_cfg(cfg2)                  # cheap, no graph to rebuild
-    } else if (!is.null(cfg$.vac_sites)) {           # multisite
-      cfg2 <- materialise_cfg(cfg2)
-    }
-    out <- build_simulator(cfg2)(beta, alpha, n_sim, seed = seed)
-    mean(out$C1 + out$C2)                            # total infections
+    n_v <- round(cv * N_total)
+    mean(vapply(seq_len(n_alloc), function(a) {
+      cfg2 <- modifyList(cfg, list(N_vac = n_v, N_cont = N_total - n_v))
+      if (!is.null(cfg$.c_ij)) {                     # network family
+        cfg2$.c_ij <- cfg$.c_ij; cfg2$.adj <- cfg$.adj; cfg2$.csr <- cfg$.csr
+        set.seed(alloc_seed0 + a)
+        cfg2$.vac <- sample.int(N_total, n_v)
+      } else {                                       # frailty / multisite
+        cfg2$allocation_seed <- alloc_seed0 + a
+        cfg2 <- materialise_cfg(cfg2)                # cheap: no graph to rebuild
+      }
+      out <- build_simulator(cfg2)(beta, alpha, n_sim, seed = seed + a)
+      mean(out$C1 + out$C2)                          # total infections
+    }, numeric(1)))
   }
   cov0 <- cfg$N_vac / N_total
   cov1 <- min(cov0 + d_cov, 1)
