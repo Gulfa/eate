@@ -1071,6 +1071,11 @@ compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
                                     samples = NULL, K_cores = 1L) {
   if (!is.null(samples) && nrow(samples)) {
     K <- nrow(samples)
+    # inner_cores = 1 inside the K loop: K_cores already spends the whole CPU
+    # budget on the fork, so leaving cfg's inner_cores (= cores_per_node) would
+    # ask dust for that many threads in EACH of K workers -- 80 x 80 threads on
+    # 80 cores. Same rule as compute_ve_with_uncertainty.
+    cfg <- modifyList(cfg, list(inner_cores = 1L))
     return(data.table::rbindlist(parallel::mclapply(seq_len(K), function(k) {
       r <- compute_coverage_effect(cfg, samples[k, "beta"], samples[k, "alpha"],
                                    d_cov = d_cov, n_sim = n_sim,
@@ -1081,12 +1086,26 @@ compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
   }
   N_total <- cfg$N_cont + cfg$N_vac
   n_sim   <- n_sim %||% cfg$cov_effect_n_sim %||% 1000L
+  # Only the ALLOCATION changes with coverage: the contact network is fixed.
+  # Calling materialise_cfg here would rebuild c_ij, the adjacency list and the
+  # CSR on every call -- O(N^2) plus a 1.8 s adjacency build at N = 5000, twice
+  # per posterior draw (400 rebuilds at cov_effect_K = 200), which dominated
+  # everything else. Carry the network side-state over and redraw only what
+  # depends on coverage.
   at_cov <- function(cv) {
-    n_v <- round(cv * N_total)
+    n_v  <- round(cv * N_total)
     cfg2 <- modifyList(cfg, list(N_vac = n_v, N_cont = N_total - n_v))
-    cfg2 <- materialise_cfg(cfg2)          # re-draw the allocation at this size
-    out  <- build_simulator(cfg2)(beta, alpha, n_sim, seed = seed)
-    mean(out$C1 + out$C2)                  # total infections in the population
+    if (!is.null(cfg$.c_ij)) {                       # network family
+      cfg2$.c_ij <- cfg$.c_ij; cfg2$.adj <- cfg$.adj; cfg2$.csr <- cfg$.csr
+      set.seed(cfg$allocation_seed %||% 1L)
+      cfg2$.vac <- sample.int(N_total, n_v)
+    } else if (!is.null(cfg$.vac_counts)) {          # frailty: per-bin counts
+      cfg2 <- materialise_cfg(cfg2)                  # cheap, no graph to rebuild
+    } else if (!is.null(cfg$.vac_sites)) {           # multisite
+      cfg2 <- materialise_cfg(cfg2)
+    }
+    out <- build_simulator(cfg2)(beta, alpha, n_sim, seed = seed)
+    mean(out$C1 + out$C2)                            # total infections
   }
   cov0 <- cfg$N_vac / N_total
   cov1 <- min(cov0 + d_cov, 1)
