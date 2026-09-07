@@ -415,6 +415,24 @@ build_configs_for_experiment <- function(exp) {
       }
     }
   }
+
+  # Same again, but with protection DECAYING as the neighbourhood fills up:
+  # the full effect for a lone vaccinated person, none once every contact is
+  # vaccinated. The antagonistic counterpart to network_vacfrac, so the two
+  # bracket the plausible directions of a local interference effect.
+  for (pa in pl_alphas_vf) {
+    for (network_seed in seq_len(n_networks_vf)) {
+      for (alloc_seed in seq_len(n_allocations_vf)) {
+        cs[[length(cs)+1]] <- modifyList(base, list(
+          name            = glue("{exp$id}__netdec_pa{pa}_n{network_seed}_a{alloc_seed}"),
+          model_type      = "network_vacdecay", sim_type = "network_vacfrac",
+          vac_frac_decay  = TRUE,
+          pl_alpha        = pa, mean_k = mean_k,
+          network_seed    = network_seed,
+          allocation_seed = alloc_seed))
+      }
+    }
+  }
   cs
 }
 
@@ -578,6 +596,7 @@ build_simulator <- function(cfg) {
         beta = beta, N = N_total, alpha = alpha,
         t = cfg$t_star, c_ij = cfg$.c_ij, vac = cfg$.vac, adj = cfg$.adj,
         vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
+        vac_frac_decay = isTRUE(cfg$vac_frac_decay),
         k_mean = cfg$mean_k, gamma = cfg$gamma,
         dt = cfg$dt, timepoints = seq(1, cfg$t_star, 1),
         n_sim = n_sim, cores = cfg$inner_cores,
@@ -590,7 +609,8 @@ build_simulator <- function(cfg) {
 # Materialise per-config side state (network c_ij + vac allocation) so
 # everything else can be configs of scalars.
 materialise_cfg <- function(cfg) {
-  if (cfg$model_type %in% c("network", "network_vacfrac")) {
+  mt <- cfg$sim_type %||% cfg$model_type   # display variants share a simulator
+  if (mt %in% c("network", "network_vacfrac")) {
     set.seed(cfg$network_seed)
     cfg$.c_ij <- get_conact_matrix_pl(cfg$N_cont + cfg$N_vac,
                                        alpha = cfg$pl_alpha,
@@ -624,7 +644,7 @@ materialise_cfg <- function(cfg) {
     cfg$.vac_counts <- tabulate(bin[sample(length(bin), cfg$N_vac)],
                                 nbins = length(n_tot_k))
     set.seed(NULL)
-  } else if (cfg$model_type %in% c("sir_sus_frailty", "sir_trans_frailty")) {
+  } else if (mt %in% c("sir_sus_frailty", "sir_trans_frailty")) {
     # Per-bin vac counts from the allocation_seed; matches build_frailty_mod
     # in estimate_from_data.R. Without this, run_stoch_frailty_cd would
     # default to round(f*n_total) per bin (no allocation variability).
@@ -636,7 +656,7 @@ materialise_cfg <- function(cfg) {
     cfg$.vac_counts <- tabulate(bin[sample(length(bin), cfg$N_vac)],
                                 nbins = length(n_total))
     set.seed(NULL)
-  } else if (cfg$model_type == "sir_multisite") {
+  } else if (mt == "sir_multisite") {
     # Per-site vaccinated counts from the allocation_seed (fixed for the fit;
     # the EATE draws fresh site allocations). site_icc sets the dispersion.
     N_site_vec <- multisite_site_sizes(cfg$N_cont + cfg$N_vac, cfg$n_sites)
@@ -1198,6 +1218,7 @@ compute_ve <- function(cfg, beta, alpha) {
       beta = beta, alpha = alpha, f = vac_frac, N = N_total,
       t = cfg$t_star, c_ij = cfg$.c_ij, adj = cfg$.adj, k_mean = cfg$mean_k,
       vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
+      vac_frac_decay = isTRUE(cfg$vac_frac_decay),
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       n_flip = cfg$ve_n_flip, timepoints = tp, init_I = cfg$init_I_nw,
       mc.cores = cfg$inner_cores,

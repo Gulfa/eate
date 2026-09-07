@@ -119,6 +119,8 @@ labels_L1_all_splits <- function(r) {
                                      .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
          network_vacfrac   = sprintf("netvf_%s_n%02d_a%02d",
                                      .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
+         network_vacdecay   = sprintf("netdec_%s_n%02d_a%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed, r$allocation_seed),
          sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
          sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
          sir_multisite     = sprintf("sir_multisite_a%02d", r$allocation_seed),
@@ -130,6 +132,8 @@ labels_L2_pool_allocs <- function(r) {
                                      .pa_str(r$pl_alpha), r$network_seed),
          network_vacfrac   = sprintf("netvf_%s_n%02d",
                                      .pa_str(r$pl_alpha), r$network_seed),
+         network_vacdecay   = sprintf("netdec_%s_n%02d",
+                                     .pa_str(r$pl_alpha), r$network_seed),
          sir_sus_frailty   = "sus_frailty",
          sir_trans_frailty = "trans_frailty",
          r$model_type)
@@ -138,6 +142,7 @@ labels_L3_pool_nets <- function(r) {
   switch(r$model_type,
          network           = sprintf("network_%s_all", .pa_str(r$pl_alpha)),
          network_vacfrac   = sprintf("netvf_%s_all", .pa_str(r$pl_alpha)),
+         network_vacdecay   = sprintf("netdec_%s_all", .pa_str(r$pl_alpha)),
          sir_sus_frailty   = "sus_frailty",
          sir_trans_frailty = "trans_frailty",
          r$model_type)
@@ -160,6 +165,7 @@ order_key <- function(label) {
   if (grepl("multisite", label))     return(paste0("1_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
   if (grepl("^netvf_pa", label))         return(paste0("2z_", label))
+  if (grepl("^netdec_pa", label))        return(paste0("2zz_", label))
   paste0("3_", label)
 }
 
@@ -181,6 +187,16 @@ display_name <- function(x) {
     if (g == "sir_trans_frailty") return("SIR + trans. frailty")
     if (g == "network")           return("Network")
     if (g == "network_vacfrac")   return("Network + contact-dep. VE")
+    if (g == "network_vacdecay")  return("Network + decaying VE")
+    m3 <- regmatches(g, regexec("^netdec_pa([0-9.]+)(_n([0-9]+))?(_a([0-9]+))?(_all)?$", g))[[1]]
+    if (length(m3) >= 2 && nzchar(m3[2])) {
+      b3 <- sprintf("Network decaying VE (Pareto exp. = %s)", m3[2])
+      if (nzchar(m3[7]) || (!nzchar(m3[4]) && !nzchar(m3[6]))) return(b3)
+      if (nzchar(m3[4]) && nzchar(m3[6]))
+        return(sprintf("%s, seed %s, alloc %s", b3, m3[4], m3[6]))
+      if (nzchar(m3[4])) return(sprintf("%s, seed %s", b3, m3[4]))
+      return(sprintf("%s, alloc %s", b3, m3[6]))
+    }
     m2 <- regmatches(g, regexec("^netvf_pa([0-9.]+)(_n([0-9]+))?(_a([0-9]+))?(_all)?$", g))[[1]]
     if (length(m2) >= 2 && nzchar(m2[2])) {
       base2 <- sprintf("Network contact-dep. VE (Pareto exp. = %s)", m2[2])

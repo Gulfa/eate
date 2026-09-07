@@ -2277,7 +2277,7 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
 vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
                                    vac_frac_ref = 1, vac_frac_power = 1,
                                    vac_frac_thresh = 0, spill = 0,
-                                   trans_tau = 1) {
+                                   trans_tau = 1, vac_frac_decay = FALSE) {
   if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
   n   <- ncol(adj$neighbors)
   vi  <- integer(n); vi[vac] <- 1L
@@ -2286,7 +2286,22 @@ vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
   f   <- (vi + nv) / (deg + 1)
 
   # Protection as a fraction of the full effect (1 - alpha), by local coverage.
+  # vac_frac_decay = TRUE reverses the dependence: protection DECAYS as the
+  # neighbourhood fills up, from the full effect for a lone vaccinated person
+  # (f at its minimum, 1/(1+degree)) to none when every contact is vaccinated
+  # (f = 1 -> alpha_eff = 1). The antagonistic counterpart to the default,
+  # where protection accumulates with local coverage. Motivated by e.g. reduced
+  # natural boosting, or behavioural compensation, in well-vaccinated
+  # neighbourhoods -- and useful because it should push the coverage effect the
+  # other way: expanding coverage partly undermines those already vaccinated.
   prot <- if (vac_frac_thresh > 0) as.numeric(f >= vac_frac_thresh)
+          else if (isTRUE(vac_frac_decay)) {
+            # Rescale so a LONE vaccinee (f = 1/(1+degree)) gets the full effect
+            # and f = 1 gets none, rather than keying off f = 0 which no
+            # vaccinated node can have.
+            f_lone <- 1 / (deg + 1)
+            pmax(0, (1 - f) / pmax(1 - f_lone, 1e-12))^vac_frac_power
+          }
           else (f / vac_frac_ref)^vac_frac_power
   sus <- rep(1, n)
   sus[vac] <- 1 - prot[vac] * (1 - alpha)
@@ -2394,7 +2409,8 @@ run_stoch_network_vacfrac <- function(beta=1, N=100, pl_alpha=3, alpha=0.5,
                                       c_ij=NULL, k_mean=6,
                                       dt=0.1, timepoints=seq(0, t, 1), I_ini=2,
                                       n_sim=100, cores=10, seed=NULL, adj=NULL,
-                                      engine=c("dust", "events"), csr=NULL) {
+                                      engine=c("dust", "events"), csr=NULL,
+                                      vac_frac_decay=FALSE) {
   engine <- match.arg(engine)
   if (is.null(c_ij) && is.null(adj) && is.null(csr))
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k=k_mean)
@@ -2408,7 +2424,8 @@ run_stoch_network_vacfrac <- function(beta=1, N=100, pl_alpha=3, alpha=0.5,
     if (is.null(csr)) csr <- adj_to_csr(contact_matrix = c_ij, adj = adj)
     sus <- vacfrac_susceptibility(vac, alpha, adj = adj, c_ij = c_ij,
                                   vac_frac_ref = vac_frac_ref,
-                                  vac_frac_power = vac_frac_power)
+                                  vac_frac_power = vac_frac_power,
+                                  vac_frac_decay = vac_frac_decay)
     return(run_stoch_network_events(
       beta = beta, N = N, susceptibility = sus, t = t, vac = vac, csr = csr,
       gamma = gamma, timepoints = timepoints, I_ini = I_ini, n_sim = n_sim,
@@ -2457,6 +2474,7 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
                                            N = 200, t = 15, pl_alpha = 3,
                                            c_ij = NULL, vac_frac_power = 1,
                                            vac_frac_ref = 1, vac_frac_thresh = 0,
+                                           vac_frac_decay = FALSE,
                                            n_vac = 10, n_rep = 20, n_flip = 20,
                                            k_mean = 6, gamma = 1 / 3, dt = 0.1,
                                            timepoints = NULL, init_I = 2,
@@ -2489,7 +2507,8 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
       sus <- vacfrac_susceptibility(v, alpha, adj = adj,
                                     vac_frac_ref = vac_frac_ref,
                                     vac_frac_power = vac_frac_power,
-                                    vac_frac_thresh = vac_frac_thresh)
+                                    vac_frac_thresh = vac_frac_thresh,
+                                    vac_frac_decay = vac_frac_decay)
       inf <- run_stoch_network_events(
         beta = beta, N = N, susceptibility = sus, t = t, vac = v, csr = csr,
         gamma = gamma, timepoints = timepoints, I_ini = init_I, n_sim = n_rep,
