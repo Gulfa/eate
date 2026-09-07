@@ -2294,17 +2294,42 @@ vacfrac_susceptibility <- function(vac, alpha, adj = NULL, c_ij = NULL,
   # natural boosting, or behavioural compensation, in well-vaccinated
   # neighbourhoods -- and useful because it should push the coverage effect the
   # other way: expanding coverage partly undermines those already vaccinated.
-  prot <- if (vac_frac_thresh > 0) as.numeric(f >= vac_frac_thresh)
-          else if (isTRUE(vac_frac_decay)) {
-            # Rescale so a LONE vaccinee (f = 1/(1+degree)) gets the full effect
-            # and f = 1 gets none, rather than keying off f = 0 which no
-            # vaccinated node can have.
-            f_lone <- 1 / (deg + 1)
-            pmax(0, (1 - f) / pmax(1 - f_lone, 1e-12))^vac_frac_power
-          }
-          else (f / vac_frac_ref)^vac_frac_power
   sus <- rep(1, n)
-  sus[vac] <- 1 - prot[vac] * (1 - alpha)
+  if (isTRUE(vac_frac_decay)) {
+    # DECAY arm, parameterised by the SLOPE rather than by an endpoint:
+    #     alpha_eff = max(0, 1 - (1 - f) / alpha)
+    # so alpha_eff = 1 (no protection at all) when every contact is vaccinated
+    # (f = 1), and protection rises linearly as the neighbourhood empties, with
+    # slope 1/alpha, clamping at alpha_eff = 0 (complete protection). Smaller
+    # alpha means a steeper rise, i.e. a stronger vaccine, which keeps alpha
+    # reading the same way as everywhere else.
+    #
+    # Slope-parameterised because the earlier endpoint form
+    # (full effect for a lone vaccinee, none at f = 1) had slope at most
+    # ~1/(1-f_lone) ~ 1.25, so at the realised f ~ 0.58 it could not push
+    # alpha_eff below ~0.48 for ANY alpha. Both interference arms therefore
+    # pinned at the alpha bound and were flagged misfits (loss_chisq 8.6 and
+    # 9.7) rather than being fitted -- which is why they both came out below
+    # the naive VE instead of straddling it.
+    sus[vac] <- pmax(0, 1 - (1 - f[vac]) / max(alpha, 1e-12))
+  } else if (vac_frac_thresh > 0) {
+    sus[vac] <- ifelse(f[vac] >= vac_frac_thresh, alpha, 1)
+  } else {
+    # ACCUMULATE arm, the mirror of the decay arm and parameterised the same
+    # way, by the SLOPE:
+    #     alpha_eff = max(0, 1 - f / alpha)
+    # so alpha_eff = 1 (no protection) when no contact is vaccinated, and
+    # protection rises linearly as the neighbourhood fills up, with slope
+    # 1/alpha, clamping at alpha_eff = 0. Smaller alpha = steeper = stronger.
+    #
+    # The previous endpoint form, alpha_eff = 1 - (f/ref)^power * (1 - alpha),
+    # had slope at most 1, so at the realised f ~ 0.58 it could not push
+    # alpha_eff below ~0.42 for ANY alpha -- the arm pinned at the alpha bound
+    # and was flagged a misfit (loss_chisq 8.6) rather than fitted.
+    # vac_frac_power still bends the response; vac_frac_ref is unused here.
+    sus[vac] <- pmax(0, 1 - (f[vac] / max(alpha, 1e-12))^vac_frac_power)
+  }
+  prot <- 1 - sus                      # used by the spill / trans_tau options
 
   # `spill` (mechanism B): UNVACCINATED people also get protection from living
   # in a well-vaccinated neighbourhood, at fraction `spill` of the vaccinated
