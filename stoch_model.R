@@ -2621,7 +2621,9 @@ get_stoch_eate_network_vacfrac <- function(beta = 1, alpha = 0.5, f = 0.5,
 # elsewhere. Contrast get_stoch_eate_network_vacfrac, where g depends only on a
 # node's own neighbourhood.
 get_stoch_eate_sir_parity <- function(beta = 1, susceptibility = c(1, 1),
-                                      alpha_alt = 1, f = 0.5, N = 200, t = 30,
+                                      alpha_alt = 1, parity_mod = 2,
+                                      alpha_up = NULL, alpha_down = NULL,
+                                      f = 0.5, N = 200, t = 30,
                                       gamma = 1, I_ini = c(2, 2),
                                       n_vac = 10, n_rep = 20, dt = 0.1,
                                       timepoints = NULL, mc.cores = 10,
@@ -2632,9 +2634,33 @@ get_stoch_eate_sir_parity <- function(beta = 1, susceptibility = c(1, 1),
   N_unvac <- round(N * (1 - f)); N_vac <- N - N_unvac
   mm      <- matrix(1, 2, 2)
 
-  # alpha for a given vaccinated count: the FACTUAL parity keeps `alpha`.
-  par_fac <- N_vac %% 2
-  a_of <- function(n_v) if (n_v %% 2 == par_fac) alpha else alpha_alt
+  # alpha by residue class mod parity_mod, relative to the FACTUAL count
+  # (which always keeps the fitted `alpha`). The two counterfactual worlds are
+  # offset +1 (an unvaccinated person becomes vaccinated) and -1 (a vaccinated
+  # person becomes unvaccinated).
+  #
+  # With parity_mod = 2 those offsets COLLIDE -- (-1) %% 2 == 1 -- so both
+  # counterfactuals live in the same alternative world and one parameter drives
+  # both. That is what caps the reachable VE: alpha_alt = 0 empties the
+  # numerator's flipped term but simultaneously shrinks the denominator's, so
+  # VE stalls near 0.6.
+  #
+  # With parity_mod >= 3 the offsets are distinct residues, so alpha_up (which
+  # enters the NUMERATOR, via unvaccinated people counterfactually vaccinated)
+  # and alpha_down (which enters the DENOMINATOR, via vaccinated people
+  # counterfactually unvaccinated) are set independently, and VE can be pushed
+  # across essentially its whole achievable range.
+  #
+  # The ceiling is set by the DATA, not the mechanism: the factual vaccinated
+  # contribute their observed outcome to the numerator, so
+  #     VE <= 1 - N_vac * AR_vac_observed / N
+  # (0.875 for C2 = 25 of N = 200), whatever the asserted alphas.
+  if (is.null(alpha_up))   alpha_up   <- alpha_alt
+  if (is.null(alpha_down)) alpha_down <- alpha_alt
+  a_of <- function(n_v) {
+    o <- (n_v - N_vac) %% parity_mod
+    if (o == 0) alpha else if (o == 1) alpha_up else alpha_down
+  }
 
   arms <- function(n_v, a, sd) {
     n_u <- N - n_v

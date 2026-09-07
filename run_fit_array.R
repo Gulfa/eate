@@ -248,8 +248,23 @@ cov_effect_K     <- 200L   # posterior draws propagated into the coverage effect
                            # (capped below K_post_samples: each draw costs two
                            # extra simulations)
 
-parity_alpha_alt <- 1.0    # susceptibility in the unobserved parity
-parity_alphas    <- c(0.5, 1.0, 2.0)   # sweep it as separate models
+# Each spec becomes its own model. `mod` is the modulus of the residue class
+# the alpha depends on; `up` and `down` are the asserted susceptibilities in
+# the two counterfactual worlds (an unvaccinated person vaccinated, and a
+# vaccinated person unvaccinated).
+#
+# mod = 2 collides the two -- (-1) %% 2 == 1 -- so `up` drives both and VE is
+# capped near 0.6. mod = 3 separates them: `up` alone sets the numerator and
+# `down` alone the denominator, so VE can be pushed across nearly the whole
+# achievable range. The ceiling is fixed by the DATA
+# (VE <= 1 - N_vac * AR_vac_obs / N, i.e. 0.875 at C2 = 25 of N = 200), because
+# the factual vaccinated contribute their observed outcome to the numerator.
+parity_alpha_alt <- 1.0     # default for specs that omit up/down
+parity_specs <- list(
+  list(tag = "m2_lo",  mod = 2, up = 0.20, down = 0.20),
+  list(tag = "m2_hi",  mod = 2, up = 2.00, down = 2.00),
+  list(tag = "m3_max", mod = 3, up = 0.01, down = 2.00),   # push VE up
+  list(tag = "m3_min", mod = 3, up = 2.00, down = 0.01))   # push VE down
 
 base_common <- list(
   gamma = gamma, dt = dt,
@@ -332,11 +347,12 @@ build_configs_for_experiment <- function(exp) {
   # every observable match it exactly), but the counterfactual arm runs at
   # parity_alpha_alt. Sweeping that value shows the EATE moving while the fit
   # stays put -- the causal quantity is not identified by the trial.
-  for (aa in parity_alphas) {
+  for (ps in parity_specs) {
     cs[[length(cs)+1]] <- modifyList(base, list(
-      name = glue("{exp$id}__sir_parity_a{aa}"),
-      model_type = paste0("sir_parity_a", aa), sim_type = "sir_parity",
-      parity_alpha_alt = aa, ve_n_vac = 1))
+      name = glue("{exp$id}__sir_parity_{ps$tag}"),
+      model_type = paste0("sir_parity_", ps$tag), sim_type = "sir_parity",
+      parity_mod = ps$mod, parity_alpha_up = ps$up, parity_alpha_down = ps$down,
+      ve_n_vac = 1))
   }
 
   # Multi-site RCT: n_sites locations, per-site vaccine fraction dispersion
@@ -1183,6 +1199,8 @@ compute_ve <- function(cfg, beta, alpha) {
       dt = cfg$dt, timepoints = tp, mc.cores = cfg$inner_cores),
     sir_parity = get_stoch_eate_sir_parity(
       beta = beta, susceptibility = sus, alpha_alt = cfg$parity_alpha_alt,
+      parity_mod = cfg$parity_mod %||% 2,
+      alpha_up = cfg$parity_alpha_up, alpha_down = cfg$parity_alpha_down,
       f = vac_frac, N = N_total, t = cfg$t_star, gamma = cfg$gamma,
       I_ini = cfg$I_ini_2g, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       dt = cfg$dt, timepoints = tp, inner_cores = cfg$inner_cores,
@@ -1439,7 +1457,10 @@ run_one_job <- function(cfg) {
                         (cfg$network_engine %||% "events") else NA_character_,
     # Needed by the analysis to report the population-average alpha for
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
-    parity_alpha_alt = cfg$parity_alpha_alt %||% NA_real_,
+    parity_alpha_alt  = cfg$parity_alpha_alt  %||% NA_real_,
+    parity_mod        = cfg$parity_mod        %||% NA_integer_,
+    parity_alpha_up   = cfg$parity_alpha_up   %||% NA_real_,
+    parity_alpha_down = cfg$parity_alpha_down %||% NA_real_,
     split_frac       = cfg$split_frac       %||% NA_real_,
     split_alpha_prod = cfg$split_alpha_prod %||% NA_real_,
     # Heterogeneous-VE knobs: the spread the alpha_i were drawn with, and how
