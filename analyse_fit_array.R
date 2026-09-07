@@ -1021,17 +1021,37 @@ if (nrow(ve_unc_long) > 0) {
       g4_lev    <- rev(g4_groups)
       g4_labs   <- setNames(display_name(g4_lev), g4_lev)
 
+      # Compact display names for THIS figure only: the full names
+      # ("Network contact-dep. VE (Pareto exp. = 3)") are wider than the panel
+      # can give them and were being clipped at the left edge.
+      short_name <- function(x) {
+        x <- as.character(x)
+        x <- sub("^Network contact-dep\\. VE \\(Pareto exp\\. = ([0-9.]+)\\)$",
+                 "Network cd-VE (pa=\\1)", x)
+        x <- sub("^Network decaying VE \\(Pareto exp\\. = ([0-9.]+)\\)$",
+                 "Network dec-VE (pa=\\1)", x)
+        x <- sub("^Network \\(Pareto exp\\. = ([0-9.]+)\\)$", "Network (pa=\\1)", x)
+        x <- sub("^SIR \\(two-block effect mod\\.\\)$", "SIR (two-block)", x)
+        x <- sub("^SIR parity \\(alt alpha = ([0-9.]+)\\)$", "SIR parity (a2=\\1)", x)
+        x <- sub("^SIR \\(homogeneous\\)$", "SIR", x)
+        x <- sub("^SIR \\+ ", "SIR + ", x)
+        x
+      }
+
       forest_panel <- function(df, xlab, title, show_y = TRUE) {
         d <- copy(df)
         d[, group := factor(as.character(group), levels = g4_lev,
-                            labels = g4_labs[g4_lev])]
+                            labels = short_name(g4_labs[g4_lev]))]
         p <- ggplot(d, aes(y = group, x = estimate)) +
           geom_point(size = 2.4) +
           geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
           scale_y_discrete(drop = FALSE) +
-          theme_bw(base_size = 12) +
+          theme_bw(base_size = 11) +
           theme(panel.grid.minor = element_blank(),
-                plot.title = element_text(size = 12, face = "bold")) +
+                axis.text.y = element_text(size = 9),
+                axis.title.x = element_text(size = 9),
+                plot.title = element_text(size = 11, face = "bold"),
+                plot.margin = margin(4, 8, 4, 4)) +
           labs(x = xlab, y = NULL, title = title)
         if (!show_y)
           p <- p + theme(axis.text.y = element_blank(),
@@ -1047,11 +1067,11 @@ if (nrow(ve_unc_long) > 0) {
       # effect); falls back to alpha for results predating it.
       pB <- if (nrow(g4_cov))
         forest_panel(g4_cov,
-                     glue("infections averted per 1000  (+{d_cov_lab}% coverage)"),
+                     "infections averted per 1000",
                      glue("B. Effect of +{d_cov_lab}% coverage"), show_y = FALSE)
       else
         forest_panel(g4_alpha, "alpha", "B. alpha", show_y = FALSE)
-      pC <- forest_panel(g4_ave,   glue("AVE = (denom - num) / N  (t = {t_star_ve})"),
+      pC <- forest_panel(g4_ave,   glue("AVE  (t = {t_star_ve})"),
                          "C. Absolute difference")
 
       # D: built once with a horizontal bottom legend purely so that legend
@@ -1073,46 +1093,32 @@ if (nrow(ve_unc_long) > 0) {
               legend.key.size  = unit(0.8, "lines"),
               legend.text      = element_text(size = 9)) +
         labs(x = "t", y = "VE(t)",
-             title = glue("D. VE(t) ({ci_pct}% interval)"))
+             title = glue("D. VE(t) ({ci_pct}% interval)")) +
+        theme_bw(base_size = 11) +
+        theme(legend.position = "right",
+              legend.key.height = unit(0.8, "lines"),
+              legend.text = element_text(size = 8),
+              legend.title = element_blank(),
+              panel.grid.minor = element_blank(),
+              plot.title = element_text(size = 11, face = "bold"),
+              plot.margin = margin(4, 4, 4, 4))
 
       # align = "hv" keeps A/B row-aligned (so B can borrow A's labels) and
       # A/C column-aligned; D has its own y scale and just fills its cell.
-      grid4 <- cowplot::plot_grid(pA, pB, pC,
-                                  pD + theme(legend.position = "none"),
+      # A/C carry the y labels, so they need more width than B/D.
+      grid4 <- cowplot::plot_grid(pA, pB, pC, pD,
                                   nrow = 2, ncol = 2,
-                                  align = "hv", axis = "tblr",
-                                  rel_widths = c(1.35, 1))
+                                  align = "h", axis = "tb",
+                                  rel_widths = c(1.15, 1))
 
-      # Full-width legend strip beneath the grid. If the harvest ever comes
-      # back empty (grob name changes across ggplot2 versions), fall back to
-      # D keeping its own legend rather than shipping a figure with none.
-      leg <- tryCatch(
-        cowplot::get_plot_component(pD, "guide-box-bottom", return_all = FALSE),
-        error = function(e) NULL)
-      have_leg <- !is.null(leg) && !inherits(leg, "zeroGrob")
-
-      h4 <- max(8, 0.45 * length(g4_groups) + 4)
-
-      if (have_leg) {
-        # Measure the legend rather than guessing rows from the key count:
-        # ggplot picks its own wrapping, so a count-based estimate clips the
-        # strip as soon as the model list grows. Clamped in case the grob
-        # reports something absurd.
-        leg_in <- tryCatch(
-          grid::convertHeight(sum(leg$heights), "in", valueOnly = TRUE),
-          error = function(e) 0.7)
-        leg_in <- min(max(leg_in, 0.3), 0.35 * h4)
-        fig4   <- cowplot::plot_grid(grid4, leg, ncol = 1,
-                                     rel_heights = c(h4 - leg_in, leg_in))
-      } else {
-        message("  (legend harvest came back empty; leaving it inside panel D)")
-        fig4 <- cowplot::plot_grid(pA, pB, pC, pD, nrow = 2, ncol = 2,
-                                   align = "hv", axis = "tblr",
-                                   rel_widths = c(1.35, 1))
-      }
+      # No separate legend strip: A and C already name every model on their
+      # shared y-axis, so a full-width key just repeated them and its labels
+      # collided with the swatches. D is labelled directly instead.
+      h4   <- max(6, 0.34 * length(g4_groups) + 3)
+      fig4 <- grid4
 
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
-             fig4, width = 14, height = h4, dpi = 130, limitsize = FALSE)
+             fig4, width = 11, height = h4, dpi = 150, limitsize = FALSE)
 
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
