@@ -389,6 +389,7 @@ summarise_param <- function(ok, group_fn, param) {
   s <- merge(s, decomp, by = "group")
   s[, lo := estimate - z_ci * sd_total]
   s[, hi := estimate + z_ci * sd_total]
+  s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
   s[order(sapply(group, order_key))]
 }
 
@@ -441,6 +442,11 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
                  lo       = mean(VE, na.rm = TRUE) - z_ci * sd(VE, na.rm = TRUE),
                  hi       = mean(VE, na.rm = TRUE) + z_ci * sd(VE, na.rm = TRUE)),
              by = group]
+  # sd() is NA for a single draw -- which happens when a job's ve_uncertainty
+  # came back empty and it contributes only a point estimate. Leaving the
+  # interval NA makes geom_errorbarh drop the row silently, so the model
+  # appears to have no estimate at all; show the point instead.
+  s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
   s[order(sapply(group, order_key))]
 }
 
@@ -462,6 +468,11 @@ summarise_ave_by <- function(ok, group_fn, t_target) {
                  lo       = mean(AVE, na.rm = TRUE) - z_ci * sd(AVE, na.rm = TRUE),
                  hi       = mean(AVE, na.rm = TRUE) + z_ci * sd(AVE, na.rm = TRUE)),
              by = group]
+  # sd() is NA for a single draw -- which happens when a job's ve_uncertainty
+  # came back empty and it contributes only a point estimate. Leaving the
+  # interval NA makes geom_errorbarh drop the row silently, so the model
+  # appears to have no estimate at all; show the point instead.
+  s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
   s[order(sapply(group, order_key))]
 }
 
@@ -647,8 +658,13 @@ if (!nrow(draws_dt)) {
                             beta  = mean(beta,  na.rm = TRUE)),
                         by = .(model_type, pl_alpha, job)]
   between_tbl <- job_means[, {
-    has_var <- .N > 1
-    fit_ok  <- .N > 2 && sd(alpha) > 0 && sd(VE) > 0
+    # isTRUE throughout: sd() is NA for a single value, and a job whose
+    # ve_uncertainty came back empty (e.g. grid_posterior returned NULL for a
+    # misfitting config) contributes one point estimate rather than K draws.
+    # `NA > 0` is NA, so a bare `if (fit_ok)` then fails with
+    # "missing value where TRUE/FALSE needed" and kills the whole experiment.
+    has_var <- isTRUE(.N > 1)
+    fit_ok  <- isTRUE(.N > 2) && isTRUE(sd(alpha) > 0) && isTRUE(sd(VE) > 0)
     list(n_alloc          = .N,
          sd_between_beta  = if (has_var) sd(beta)  else 0,
          sd_between_alpha = if (has_var) sd(alpha) else 0,
