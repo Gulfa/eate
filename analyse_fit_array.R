@@ -1033,6 +1033,7 @@ if (nrow(ve_unc_long) > 0) {
         x <- sub("^Network \\(Pareto exp\\. = ([0-9.]+)\\)$", "Network (pa=\\1)", x)
         x <- sub("^SIR \\(two-block effect mod\\.\\)$", "SIR (two-block)", x)
         x <- sub("^SIR parity \\(alt alpha = ([0-9.]+)\\)$", "SIR parity (a2=\\1)", x)
+        x <- sub("^SIR parity \\(([^)]+)\\)$", "SIR parity \\1", x)
         x <- sub("^SIR \\(homogeneous\\)$", "SIR", x)
         x <- sub("^SIR \\+ ", "SIR + ", x)
         x
@@ -1045,13 +1046,20 @@ if (nrow(ve_unc_long) > 0) {
         p <- ggplot(d, aes(y = group, x = estimate)) +
           geom_point(size = 2.4) +
           geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
-          scale_y_discrete(drop = FALSE) +
+          # expand: a little space above the top row and below the bottom one,
+          # so the outer error bars are not flush against the panel edge.
+          scale_y_discrete(drop = FALSE, expand = expansion(add = 0.6)) +
+          scale_x_continuous(expand = expansion(mult = 0.06)) +
           theme_bw(base_size = 11) +
           theme(panel.grid.minor = element_blank(),
-                axis.text.y = element_text(size = 9),
-                axis.title.x = element_text(size = 9),
-                plot.title = element_text(size = 11, face = "bold"),
-                plot.margin = margin(4, 8, 4, 4)) +
+                # margin on the y text is the actual gap between a label and
+                # the axis line; the plot.margin only pads outside the labels.
+                axis.text.y = element_text(size = 9, margin = margin(r = 6)),
+                axis.text.x = element_text(size = 9),
+                axis.title.x = element_text(size = 9, margin = margin(t = 6)),
+                plot.title = element_text(size = 11, face = "bold",
+                                          margin = margin(b = 6)),
+                plot.margin = margin(6, 12, 6, 10)) +
           labs(x = xlab, y = NULL, title = title)
         if (!show_y)
           p <- p + theme(axis.text.y = element_blank(),
@@ -1109,16 +1117,17 @@ if (nrow(ve_unc_long) > 0) {
       grid4 <- cowplot::plot_grid(pA, pB, pC, pD,
                                   nrow = 2, ncol = 2,
                                   align = "h", axis = "tb",
-                                  rel_widths = c(1.15, 1))
+                                  rel_widths = c(1.3, 1))
 
       # No separate legend strip: A and C already name every model on their
       # shared y-axis, so a full-width key just repeated them and its labels
       # collided with the swatches. D is labelled directly instead.
-      h4   <- max(6, 0.34 * length(g4_groups) + 3)
+      # Row pitch generous enough that the y labels are not crowded vertically.
+      h4   <- max(6.5, 0.42 * length(g4_groups) + 3)
       fig4 <- grid4
 
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
-             fig4, width = 11, height = h4, dpi = 150, limitsize = FALSE)
+             fig4, width = 12, height = h4, dpi = 150, limitsize = FALSE)
 
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
