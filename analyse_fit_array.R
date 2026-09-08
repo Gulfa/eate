@@ -661,12 +661,21 @@ if (!nrow(draws_dt)) {
   # spread is genuinely across allocations.
   # -------------------------------------------------------------------------
   # AVE and the coverage effect are carried through so the table can show WHERE
-  # allocation variance lands. VE is a RATIO, so an allocation that makes the
-  # epidemic worse hurts both arms in proportion and largely cancels -- which is
-  # why network configs show almost no between-allocation VE spread even at
-  # heavy tails. The absolute-scale quantities keep that variation (measured
-  # elsewhere in this repo: per-allocation sd of 7.2 on a mean of 17.8 for the
-  # coverage effect, i.e. 40%, on the same networks).
+  # allocation variance lands -- and empirically it is NOT on the absolute
+  # scale. Network configs show almost no between-allocation spread in VE even
+  # at heavy tails, and AVE is no wider than the linear model's either.
+  #
+  # The dividing line is not ratio vs difference, it is INDIVIDUAL DIRECT
+  # EFFECT vs POPULATION CONTRAST. VE and AVE are both per-individual flip
+  # effects: each flip is evaluated against a fixed environment, so whatever
+  # the allocation does to the epidemic is common to both arms of the flip and
+  # cancels, on either scale. The coverage effect is a contrast between two
+  # coverage levels with the allocation REDRAWN at each, so which people are
+  # vaccinated genuinely changes it -- measured at a per-allocation sd of 7.2
+  # on a mean of 17.8 (40%) on these same networks.
+  #
+  # So sd_between_avert should dwarf sd_between_VE and sd_between_AVE; if it
+  # does not, that is worth knowing too.
   job_means <- draws_dt[, .(VE    = mean(VE,    na.rm = TRUE),
                             AVE   = mean(AVE,   na.rm = TRUE),
                             averted = mean(averted_per1k, na.rm = TRUE),
@@ -696,8 +705,9 @@ if (!nrow(draws_dt)) {
   }, by = .(model_type, pl_alpha)][order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
   message("\n=== Between-allocation spread (sd of per-allocation means) ===")
-  message("  cv_VE vs cv_avert: VE is a ratio, so the allocation's effect on the")
-  message("  epidemic cancels between arms; the absolute scale keeps it.")
+  message("  cv_VE / cv_avert: VE and AVE are per-individual flip effects, so the")
+  message("  allocation cancels between the arms of each flip on either scale;")
+  message("  the coverage effect redraws the allocation, so it should not cancel.")
   print(between_tbl[, lapply(.SD, function(x)
                              if (is.numeric(x)) round(x, 4) else x)])
 }
