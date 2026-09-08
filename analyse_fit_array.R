@@ -568,6 +568,7 @@ draws_dt <- rbindlist(lapply(seq_along(ok), function(i) {
   # One row per posterior draw: beta_k / alpha_k are constant within a
   # param_sample; VE averaged over the draw's inner sims -> K per job.
   agg <- v[, .(VE    = mean(1 - eate, na.rm = TRUE),
+               AVE   = if ("ave" %in% names(v)) mean(ave, na.rm = TRUE) else NA_real_,
                beta  = if (has_bk) beta_k[1]  else r$fit$beta,
                alpha = if (has_bk) alpha_k[1] else r$fit$alpha),
            by = param_sample]
@@ -576,7 +577,13 @@ draws_dt <- rbindlist(lapply(seq_along(ok), function(i) {
              allocation_seed = r$allocation_seed %||% NA_integer_,
              network_seed    = r$network_seed    %||% NA_integer_,
              pl_alpha        = r$pl_alpha        %||% NA_real_,
-             VE = agg$VE, alpha = alpha_report(agg$alpha, r), beta = agg$beta)
+             VE = agg$VE, alpha = alpha_report(agg$alpha, r), beta = agg$beta,
+             AVE = agg$AVE,
+             # one value per job, recycled across its draws
+             averted_per1k = if (!is.null(r$coverage_effect) &&
+                                 nrow(r$coverage_effect))
+                               mean(r$coverage_effect$averted_per1k, na.rm = TRUE)
+                             else NA_real_)
 }))
 
 if (!nrow(draws_dt)) {
@@ -653,7 +660,16 @@ if (!nrow(draws_dt)) {
   # splits by Pareto exponent; for non-network models pl_alpha is NA and the
   # spread is genuinely across allocations.
   # -------------------------------------------------------------------------
+  # AVE and the coverage effect are carried through so the table can show WHERE
+  # allocation variance lands. VE is a RATIO, so an allocation that makes the
+  # epidemic worse hurts both arms in proportion and largely cancels -- which is
+  # why network configs show almost no between-allocation VE spread even at
+  # heavy tails. The absolute-scale quantities keep that variation (measured
+  # elsewhere in this repo: per-allocation sd of 7.2 on a mean of 17.8 for the
+  # coverage effect, i.e. 40%, on the same networks).
   job_means <- draws_dt[, .(VE    = mean(VE,    na.rm = TRUE),
+                            AVE   = mean(AVE,   na.rm = TRUE),
+                            averted = mean(averted_per1k, na.rm = TRUE),
                             alpha = mean(alpha, na.rm = TRUE),
                             beta  = mean(beta,  na.rm = TRUE)),
                         by = .(model_type, pl_alpha, job)]
@@ -669,11 +685,19 @@ if (!nrow(draws_dt)) {
          sd_between_beta  = if (has_var) sd(beta)  else 0,
          sd_between_alpha = if (has_var) sd(alpha) else 0,
          sd_between_VE    = if (has_var) sd(VE)    else 0,
+         # absolute scale: where the allocation variance actually shows up
+         sd_between_AVE   = if (has_var) sd(AVE, na.rm = TRUE) else 0,
+         sd_between_avert = if (has_var) sd(averted, na.rm = TRUE) else 0,
+         cv_VE            = if (has_var) sd(VE) / abs(mean(VE)) else 0,
+         cv_avert         = if (has_var) sd(averted, na.rm = TRUE) /
+                                         abs(mean(averted, na.rm = TRUE)) else 0,
          cor_alpha_VE     = if (fit_ok) cor(alpha, VE) else NA_real_,
          dVE_dalpha       = if (fit_ok) unname(coef(lm(VE ~ alpha))[2]) else NA_real_)
   }, by = .(model_type, pl_alpha)][order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
   message("\n=== Between-allocation spread (sd of per-allocation means) ===")
+  message("  cv_VE vs cv_avert: VE is a ratio, so the allocation's effect on the")
+  message("  epidemic cancels between arms; the absolute scale keeps it.")
   print(between_tbl[, lapply(.SD, function(x)
                              if (is.numeric(x)) round(x, 4) else x)])
 }
