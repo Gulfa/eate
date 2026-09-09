@@ -661,21 +661,32 @@ if (!nrow(draws_dt)) {
   # spread is genuinely across allocations.
   # -------------------------------------------------------------------------
   # AVE and the coverage effect are carried through so the table can show WHERE
-  # allocation variance lands -- and empirically it is NOT on the absolute
-  # scale. Network configs show almost no between-allocation spread in VE even
-  # at heavy tails, and AVE is no wider than the linear model's either.
+  # allocation variance lands. It lands on the ABSOLUTE scale, not the ratio.
   #
-  # The dividing line is not ratio vs difference, it is INDIVIDUAL DIRECT
-  # EFFECT vs POPULATION CONTRAST. VE and AVE are both per-individual flip
-  # effects: each flip is evaluated against a fixed environment, so whatever
-  # the allocation does to the epidemic is common to both arms of the flip and
-  # cancels, on either scale. The coverage effect is a contrast between two
-  # coverage levels with the allocation REDRAWN at each, so which people are
-  # vaccinated genuinely changes it -- measured at a per-allocation sd of 7.2
-  # on a mean of 17.8 (40%) on these same networks.
+  # The dividing line IS ratio vs difference. Both VE and AVE are per-individual
+  # flip effects evaluated against a fixed environment, but that alone only makes
+  # the allocation cancel on the RATIO scale. To first order the allocation scales
+  # everyone's infection probability by a common factor c -- a "good" allocation
+  # vaccinates hubs and shrinks the whole epidemic -- so num -> c*num and
+  # denom -> c*denom:
+  #     VE  = 1 - num/denom       c cancels
+  #     AVE = c*(denom - num)/N   c does NOT cancel
+  # Measured at pl_alpha = 1.4 with the parameters held fixed (diag_ave_refit.R):
+  # VE sd 0.004 across allocations, AVE cv 0.177 -- and that 0.177 matches the cv
+  # of the epidemic size itself (0.18, diag_alloc_spread.R), which is c.
   #
-  # So sd_between_avert should dwarf sd_between_VE and sd_between_AVE; if it
-  # does not, that is worth knowing too.
+  # The coverage effect is a third case: a contrast between two coverage levels
+  # with the allocation REDRAWN at each, so it cancels on neither scale --
+  # measured at a per-allocation sd of 7.2 on a mean of 17.8 (40%) on these
+  # same networks.
+  #
+  # NOTE on what sd_between_AVE measures. draws_dt already averaged `ave` over
+  # the ve_n_vac inner allocations (line ~571) and job_means averages again over
+  # the K draws, so this is the BETWEEN-JOB component only. The AVE forest
+  # (summarise_ave_by) pools the raw per-sim draws instead and so also carries
+  # the within-job allocation spread; it is legitimately wider, by ~1.5x on
+  # these networks. The two are not in conflict -- they answer different
+  # questions -- but do not read one as a check on the other.
   job_means <- draws_dt[, .(VE    = mean(VE,    na.rm = TRUE),
                             AVE   = mean(AVE,   na.rm = TRUE),
                             averted = mean(averted_per1k, na.rm = TRUE),
@@ -705,9 +716,9 @@ if (!nrow(draws_dt)) {
   }, by = .(model_type, pl_alpha)][order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
   message("\n=== Between-allocation spread (sd of per-allocation means) ===")
-  message("  cv_VE / cv_avert: VE and AVE are per-individual flip effects, so the")
-  message("  allocation cancels between the arms of each flip on either scale;")
-  message("  the coverage effect redraws the allocation, so it should not cancel.")
+  message("  The allocation scales the whole epidemic by a common factor, which")
+  message("  cancels in the RATIO (VE) but not in the DIFFERENCE (AVE); the")
+  message("  coverage effect redraws the allocation, so it cancels in neither.")
   print(between_tbl[, lapply(.SD, function(x)
                              if (is.numeric(x)) round(x, 4) else x)])
 }
