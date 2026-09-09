@@ -476,6 +476,43 @@ summarise_ave_by <- function(ok, group_fn, t_target) {
   s[order(sapply(group, order_key))]
 }
 
+# FULL predictive interval. summarise_ve_by / summarise_ave_by already pool the
+# raw (param_sample, sim) draws, so their intervals span parameter x allocation.
+# What they cannot span is the stochastic realisations, which the EATE functions
+# integrate out before forming the contrast. Those that can supply it report the
+# within-allocation spread across replicates as eate_sd_rep / ave_sd_rep, and
+# the two combine in quadrature:
+#   sd_predfull^2 = sd(pooled draws)^2 + mean(sd_rep^2)
+# Variances average, SDs do not, hence the root-mean-square on the rep term.
+# Returns an empty table when no result carries the columns, so the caller can
+# drop the panel rather than draw one identical to the posterior panel.
+summarise_pred_by <- function(ok, group_fn, t_target, what = c("VE", "AVE")) {
+  what  <- match.arg(what)
+  draws <- rbindlist(lapply(ok, function(r) {
+    if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+    v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
+    if (!nrow(v)) return(NULL)
+    hr <- all(c("eate_sd_rep", "ave_sd_rep") %in% names(v))
+    data.table(group = group_fn(r),
+               value = if (what == "VE") 1 - v$eate
+                       else if ("ave" %in% names(v)) v$ave else NA_real_,
+               rep   = if (!hr) NA_real_
+                       else if (what == "VE") v$eate_sd_rep else v$ave_sd_rep)
+  }), fill = TRUE)
+  if (!nrow(draws) || !any(is.finite(draws$rep))) return(data.table())
+  s <- draws[, {
+    sp <- sd(value, na.rm = TRUE)
+    mr <- mean(rep^2, na.rm = TRUE)
+    sr <- if (is.finite(mr)) sqrt(mr) else 0
+    sf <- sqrt(ifelse(is.finite(sp), sp, 0)^2 + sr^2)
+    m  <- mean(value, na.rm = TRUE)
+    .(n = .N, estimate = m, lo = m - z_ci * sf, hi = m + z_ci * sf,
+      sd_pred = sp, sd_rep = sr)
+  }, by = group]
+  s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
+  s[order(sapply(group, order_key))]
+}
+
 # ---------------------------------------------------------------------------
 # Level-driven forest plots for beta, alpha, VE at t*
 # ---------------------------------------------------------------------------
@@ -1140,8 +1177,17 @@ if (nrow(ve_unc_long) > 0) {
   # -------------------------------------------------------------------------
   # Combined 2x2 summary figure (the L3 "everything pooled per model" level)
   # -------------------------------------------------------------------------
-  #   A  VE at t*   (forest)      B  alpha  (forest)
-  #   C  AVE at t*  (forest)      D  VE(t)  (trajectory)
+  #   A  VE at t*            B  AVE at t*            C  +d% coverage effect
+  #   D  VE, predictive      E  AVE, predictive      -
+  #
+  # Columns pair each effect measure with its predictive version, sharing an x
+  # range so the extra width is legible. A/B/C pool the raw (param_sample, sim)
+  # draws, so they already span parameter x allocation; D/E add the
+  # stochastic-realisation term (eate_sd_rep / ave_sd_rep) in quadrature. D/E
+  # are omitted, and the figure falls back to a single row, when no result
+  # carries those columns -- otherwise they would duplicate A and B exactly.
+  # The coverage effect has no realisation decomposition stored, so its column
+  # has only the top cell.
   #
   # A/B/C are three quantities on one shared y-axis of model groups: the risk
   # ratio (VE), the fitted susceptibility multiplier (alpha), and the risk
@@ -1149,23 +1195,16 @@ if (nrow(ve_unc_long) > 0) {
   # (ve_uncertainty), which is why this block lives inside the uncertainty
   # section rather than next to the plain VE(t) trajectories.
   #
-  # D uses total_band, NOT the ve_comb min/max ribbon from
-  # ve_trajectory_combined.png: that ribbon spans outer ALLOCATIONS, and
-  # every model except network has a single allocation, so its band collapsed
-  # to a bare line for most of the figure. total_band is the SD-based
-  # interval over the pooled param x allocation x sim draws, so every model
-  # gets a real band -- and it is the same band as
-  # ve_trajectory_with_uncertainty.png, so the two figures agree.
+  # The VE(t) trajectory that used to occupy the fourth cell has been dropped.
+  # It is still produced on its own as ve_trajectory_with_uncertainty.png, and
+  # it was the one panel here with a different geometry and its own legend --
+  # which had to be harvested out of its cell and laid along the foot of the
+  # figure to stop it eating that quadrant. With every panel now a forest on
+  # the shared model-group axis, the grid needs no legend at all: A and D name
+  # every model directly.
   #
-  # The four panels have two different geometries (three forests + one
-  # trajectory), so this is a cowplot grid, not a facet_wrap.
-  #
-  # D's legend is lifted out of its cell and laid along the foot of the WHOLE
-  # figure, where it has the full 14in to spread over; left inside D's own
-  # quadrant it stacked into several rows and ate most of that panel's
-  # height. The extraction uses get_plot_component("guide-box-bottom") and
-  # NOT cowplot::get_legend(), which returns a zeroGrob under ggplot2 >= 3.5
-  # (i.e. a silently blank legend strip rather than an error).
+  # Panels still differ in whether they carry y labels, so this remains a
+  # cowplot grid rather than a facet_wrap.
   # -------------------------------------------------------------------------
 
   if (requireNamespace("cowplot", quietly = TRUE)) {
@@ -1271,54 +1310,74 @@ if (nrow(ve_unc_long) > 0) {
       else
         forest_panel(g4_alpha, "alpha", "B. alpha", show_y = FALSE)
       pC <- forest_panel(g4_ave,   glue("AVE  (t = {t_star_ve})"),
-                         "C. Absolute difference")
+                         "C. Absolute difference", show_y = FALSE)
 
-      # D: built once with a horizontal bottom legend purely so that legend
-      # can be harvested for the figure-wide strip; the copy that goes INTO
-      # the grid has it switched off.
-      d4 <- copy(total_band)
-      d4[, model := factor(display_name(model_type), levels = mod_lvl)]
-      pD <- ggplot(d4, aes(x = t, y = VE_med, group = model,
-                           colour = model, fill = model)) +
-        geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.18, colour = NA) +
-        geom_line(linewidth = 0.9) +
-        scale_colour_manual(name = NULL, values = dark2_pal(nlevels(d4$model))) +
-        scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(d4$model))) +
-        theme_bw(base_size = 12) +
-        theme(panel.grid.minor = element_blank(),
-              plot.title       = element_text(size = 12, face = "bold"),
-              legend.position  = "bottom",
-              legend.direction = "horizontal",
-              legend.key.size  = unit(0.8, "lines"),
-              legend.text      = element_text(size = 9)) +
-        labs(x = "t", y = "VE(t)",
-             title = glue("D. VE(t) ({ci_pct}% interval)")) +
-        theme_bw(base_size = 11) +
-        theme(legend.position = "right",
-              legend.key.height = unit(0.8, "lines"),
-              legend.text = element_text(size = 8),
-              legend.title = element_blank(),
-              panel.grid.minor = element_blank(),
-              plot.title = element_text(size = 11, face = "bold"),
-              plot.margin = margin(4, 4, 4, 4))
+      # Bottom row: the same two effect measures with the FULL predictive
+      # interval, i.e. with the stochastic-realisation term folded in. Only
+      # drawn when some result carries eate_sd_rep / ave_sd_rep; without it the
+      # panels would be pixel-identical to A and C and say nothing.
+      g4_ve_p  <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "VE")
+      g4_ave_p <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "AVE")
+      have_pred <- nrow(g4_ve_p) > 0 && nrow(g4_ave_p) > 0
 
-      # align = "hv" keeps A/B row-aligned (so B can borrow A's labels) and
-      # A/C column-aligned; D has its own y scale and just fills its cell.
-      # A/C carry the y labels, so they need more width than B/D.
-      grid4 <- cowplot::plot_grid(pA, pB, pC, pD,
-                                  nrow = 2, ncol = 2,
-                                  align = "h", axis = "tb",
-                                  rel_widths = c(1.3, 1))
+      # Share the x range down each column so the widening from adding the
+      # realisation term is legible as a change in bar length, not hidden by
+      # each panel rescaling to fit.
+      common_x <- function(p, ...) {
+        rs <- range(unlist(lapply(list(...), function(d)
+                c(d$lo, d$hi, d$estimate))), na.rm = TRUE)
+        pad <- 0.06 * diff(rs); if (!is.finite(pad) || pad == 0) pad <- 0.01
+        # coord_cartesian, not scale_x_continuous(limits=): forest_panel has
+        # already set an x scale, and adding a second one replaces it and warns
+        # once per panel. This zooms instead, and clips nothing.
+        p + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
+      }
 
-      # No separate legend strip: A and C already name every model on their
-      # shared y-axis, so a full-width key just repeated them and its labels
-      # collided with the swatches. D is labelled directly instead.
+      if (have_pred) {
+        pD <- forest_panel(g4_ve_p,  glue("VE = 1 - EATE  (t = {t_star_ve})"),
+                           "D. VE, predictive")
+        pE <- forest_panel(g4_ave_p, glue("AVE  (t = {t_star_ve})"),
+                           "E. Absolute difference, predictive", show_y = FALSE)
+        pA <- common_x(pA, g4_ve,  g4_ve_p)
+        pD <- common_x(pD, g4_ve,  g4_ve_p)
+        pC <- common_x(pC, g4_ave, g4_ave_p)
+        pE <- common_x(pE, g4_ave, g4_ave_p)
+        # Columns pair a quantity with its predictive version (VE left, AVE
+        # middle); the coverage effect has no realisation decomposition stored,
+        # so its column has only the top cell. A and D carry the y labels for
+        # their row, hence the wider first column.
+        grid4 <- cowplot::plot_grid(pA, pC, pB, pD, pE, NULL,
+                                    nrow = 2, ncol = 3,
+                                    align = "hv", axis = "tblr",
+                                    rel_widths = c(1.45, 1, 1))
+        w4 <- 15
+      } else {
+        message("  combined figure: no eate_sd_rep / ave_sd_rep in these ",
+                "results, so the predictive panels are omitted (re-run the ",
+                "array to populate them).")
+        grid4 <- cowplot::plot_grid(pA, pC, pB, nrow = 1, ncol = 3,
+                                    align = "h", axis = "tb",
+                                    rel_widths = c(1.45, 1, 1))
+        w4 <- 15
+      }
+
+      # No separate legend strip: A and D already name every model on their
+      # shared y-axis, so a full-width key just repeated them.
       # Row pitch generous enough that the y labels are not crowded vertically.
       h4   <- max(6.5, 0.42 * length(g4_groups) + 3)
+      if (have_pred) h4 <- h4 * 1.75
       fig4 <- grid4
 
+      # Filename kept stable even though the panel count changed, so existing
+      # references to it (paper pipeline, earlier runs) still resolve.
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
-             fig4, width = 12, height = h4, dpi = 150, limitsize = FALSE)
+             fig4, width = w4, height = h4, dpi = 150, limitsize = FALSE)
+      if (have_pred) {
+        fwrite(g4_ve_p,  file.path(out_dir,
+               glue("forest_VE_pred_t{t_star_ve}_pool_nets.csv")))
+        fwrite(g4_ave_p, file.path(out_dir,
+               glue("forest_AVE_pred_t{t_star_ve}_pool_nets.csv")))
+      }
 
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
