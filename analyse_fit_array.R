@@ -680,47 +680,114 @@ if (!nrow(draws_dt)) {
   # measured at a per-allocation sd of 7.2 on a mean of 17.8 (40%) on these
   # same networks.
   #
-  # NOTE on what sd_between_AVE measures. draws_dt already averaged `ave` over
-  # the ve_n_vac inner allocations (line ~571) and job_means averages again over
-  # the K draws, so this is the BETWEEN-JOB component only. The AVE forest
-  # (summarise_ave_by) pools the raw per-sim draws instead and so also carries
-  # the within-job allocation spread; it is legitimately wider, by ~1.5x on
-  # these networks. The two are not in conflict -- they answer different
-  # questions -- but do not read one as a check on the other.
-  job_means <- draws_dt[, .(VE    = mean(VE,    na.rm = TRUE),
-                            AVE   = mean(AVE,   na.rm = TRUE),
-                            averted = mean(averted_per1k, na.rm = TRUE),
-                            alpha = mean(alpha, na.rm = TRUE),
-                            beta  = mean(beta,  na.rm = TRUE)),
+  # NOTE on what the AVE columns here still miss. draws_dt averaged `ave` over
+  # the ve_n_vac inner allocations (line ~571) before any of this, so every
+  # column below is blind to the WITHIN-job allocation spread -- which for AVE
+  # is the large component (cv 0.177 at pl_alpha 1.4, diag_ave_refit.R), not a
+  # rounding detail. sd_within_AVE is therefore posterior-only. The AVE forest
+  # (summarise_ave_by) pools the raw per-sim draws instead and does carry it, so
+  # it is legitimately wider, by ~1.5x on these networks. The two are not in
+  # conflict -- they answer different questions -- but do not read one as a
+  # check on the other.
+  # The K draws per job are the parameter sampling distribution from that job's
+  # fit -- they ARE the uncertainty, so they must not be averaged away before a
+  # spread is taken. Collapsing each job to its posterior mean first (as this
+  # block used to) reports only how the JOB means scatter and silently discards
+  # the parameter uncertainty inside each one. So decompose instead, per
+  # quantity:
+  #
+  #   sd_within_X   sqrt of the mean within-job variance across the K draws
+  #                 -- the parameter uncertainty from one fit
+  #   sd_between_X  sd of the per-job means -- the allocation/network axis.
+  #                 Note this is inflated by roughly sd_within/sqrt(K), since
+  #                 each job mean is itself estimated from K draws
+  #   sd_total_X    sd over every pooled (job, draw) row -- the spread an
+  #                 interval built from all draws actually has
+  #
+  # cv_VE / cv_avert are on the TOTAL, since that is the width that reaches a
+  # reported interval. cor_alpha_VE / dVE_dalpha stay on the job means: they
+  # describe how the allocation-induced shift in fitted alpha moves VE (the
+  # ridge the fit slides along), which is a between-job relationship.
+  job_stats <- draws_dt[, .(n_draw  = .N,
+                            VE_m    = mean(VE,  na.rm = TRUE),
+                            VE_v    = var(VE,   na.rm = TRUE),
+                            AVE_m   = mean(AVE, na.rm = TRUE),
+                            AVE_v   = var(AVE,  na.rm = TRUE),
+                            av_m    = mean(averted_per1k, na.rm = TRUE),
+                            av_v    = var(averted_per1k,  na.rm = TRUE),
+                            alpha_m = mean(alpha, na.rm = TRUE),
+                            beta_m  = mean(beta,  na.rm = TRUE)),
                         by = .(model_type, pl_alpha, job)]
-  between_tbl <- job_means[, {
+
+  # sd over all pooled (job, draw) rows -- computed directly rather than from
+  # the components, so it needs no assumption about how they combine.
+  pooled_tbl <- draws_dt[, .(n_draws      = .N,
+                             sd_total_VE  = sd(VE,  na.rm = TRUE),
+                             sd_total_AVE = sd(AVE, na.rm = TRUE),
+                             sd_total_avert = sd(averted_per1k, na.rm = TRUE),
+                             mean_VE      = mean(VE, na.rm = TRUE),
+                             mean_avert   = mean(averted_per1k, na.rm = TRUE)),
+                         by = .(model_type, pl_alpha)]
+
+  between_tbl <- job_stats[, {
     # isTRUE throughout: sd() is NA for a single value, and a job whose
     # ve_uncertainty came back empty (e.g. grid_posterior returned NULL for a
     # misfitting config) contributes one point estimate rather than K draws.
     # `NA > 0` is NA, so a bare `if (fit_ok)` then fails with
     # "missing value where TRUE/FALSE needed" and kills the whole experiment.
+    # var() is likewise NA for a single draw, hence na.rm on the within means.
     has_var <- isTRUE(.N > 1)
-    fit_ok  <- isTRUE(.N > 2) && isTRUE(sd(alpha) > 0) && isTRUE(sd(VE) > 0)
+    fit_ok  <- isTRUE(.N > 2) && isTRUE(sd(alpha_m) > 0) && isTRUE(sd(VE_m) > 0)
+    within  <- function(v) { w <- mean(v, na.rm = TRUE)
+                             if (is.finite(w)) sqrt(w) else 0 }
+    betw    <- function(m) if (has_var) sd(m, na.rm = TRUE) else 0
     list(n_alloc          = .N,
-         sd_between_beta  = if (has_var) sd(beta)  else 0,
-         sd_between_alpha = if (has_var) sd(alpha) else 0,
-         sd_between_VE    = if (has_var) sd(VE)    else 0,
+         K_med            = median(n_draw),
+         sd_between_beta  = betw(beta_m),
+         sd_between_alpha = betw(alpha_m),
+         sd_within_VE     = within(VE_v),
+         sd_between_VE    = betw(VE_m),
          # absolute scale: where the allocation variance actually shows up
-         sd_between_AVE   = if (has_var) sd(AVE, na.rm = TRUE) else 0,
-         sd_between_avert = if (has_var) sd(averted, na.rm = TRUE) else 0,
-         cv_VE            = if (has_var) sd(VE) / abs(mean(VE)) else 0,
-         cv_avert         = if (has_var) sd(averted, na.rm = TRUE) /
-                                         abs(mean(averted, na.rm = TRUE)) else 0,
-         cor_alpha_VE     = if (fit_ok) cor(alpha, VE) else NA_real_,
-         dVE_dalpha       = if (fit_ok) unname(coef(lm(VE ~ alpha))[2]) else NA_real_)
-  }, by = .(model_type, pl_alpha)][order(sapply(model_type, order_key), pl_alpha)]
+         sd_within_AVE    = within(AVE_v),
+         sd_between_AVE   = betw(AVE_m),
+         sd_within_avert  = within(av_v),
+         sd_between_avert = betw(av_m),
+         cor_alpha_VE     = if (fit_ok) cor(alpha_m, VE_m) else NA_real_,
+         dVE_dalpha       = if (fit_ok) unname(coef(lm(VE_m ~ alpha_m))[2])
+                            else NA_real_)
+  }, by = .(model_type, pl_alpha)]
+
+  between_tbl <- merge(between_tbl, pooled_tbl,
+                       by = c("model_type", "pl_alpha"), all.x = TRUE)
+  between_tbl[, `:=`(cv_VE    = sd_total_VE    / abs(mean_VE),
+                     cv_avert = sd_total_avert / abs(mean_avert))]
+  between_tbl[, `:=`(mean_VE = NULL, mean_avert = NULL)]
+  setcolorder(between_tbl,
+    c("model_type", "pl_alpha", "n_alloc", "K_med", "n_draws",
+      "sd_between_beta", "sd_between_alpha",
+      "sd_within_VE",    "sd_between_VE",    "sd_total_VE",
+      "sd_within_AVE",   "sd_between_AVE",   "sd_total_AVE",
+      "sd_within_avert", "sd_between_avert", "sd_total_avert",
+      "cv_VE", "cv_avert", "cor_alpha_VE", "dVE_dalpha"))
+  between_tbl <- between_tbl[order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
-  message("\n=== Between-allocation spread (sd of per-allocation means) ===")
+  message("\n=== Allocation vs parameter spread (within / between / total) ===")
+  message("  within = parameter uncertainty from one fit (the K draws);")
+  message("  between = across allocations/networks; total = pooled draws.")
   message("  The allocation scales the whole epidemic by a common factor, which")
   message("  cancels in the RATIO (VE) but not in the DIFFERENCE (AVE); the")
   message("  coverage effect redraws the allocation, so it cancels in neither.")
-  print(between_tbl[, lapply(.SD, function(x)
-                             if (is.numeric(x)) round(x, 4) else x)])
+  print(between_tbl[, .(model_type, pl_alpha, n_alloc, K_med,
+                        w_VE  = round(sd_within_VE,  4),
+                        b_VE  = round(sd_between_VE, 4),
+                        t_VE  = round(sd_total_VE,   4),
+                        w_AVE = round(sd_within_AVE, 4),
+                        b_AVE = round(sd_between_AVE, 4),
+                        t_AVE = round(sd_total_AVE,  4),
+                        cv_VE = round(cv_VE, 4),
+                        cv_av = round(cv_avert, 4))])
+  message("  (full table, incl. beta/alpha and the averted-effect columns, in ",
+          "between_allocation_spread.csv)")
 }
 
 # ---------------------------------------------------------------------------
