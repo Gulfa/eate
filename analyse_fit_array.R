@@ -431,7 +431,29 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
     if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
     v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
     if (!nrow(v)) return(NULL)
-    data.table(group = group_fn(r), VE = 1 - v$eate)
+    # Two different allocation axes here, handled oppositely.
+    #
+    #   INNER (`sim`): the ve_n_vac FRESH allocations drawn inside each
+    #     compute_ve call. The estimand is an average over allocations,
+    #       VE = 1 - E_alloc E_sto[Y_i(1)] / E_alloc E_sto[Y_i(0)],
+    #     so these are collapsed within each posterior draw. Their scatter is
+    #     Monte-Carlo error in estimating that expectation, not uncertainty
+    #     about it -- more inner allocations would shrink it away, so leaving it
+    #     in the interval would just be noise.
+    #
+    #   OUTER (one per job): the allocation the FIT conditioned on. Different
+    #     outer allocations give genuinely different parameter estimates, so
+    #     these are POOLED, not averaged. That happens in the rbindlist over
+    #     `ok`, outside this per-job aggregation, which is why the `by =
+    #     param_sample` below can only ever touch the inner axis.
+    #
+    # What survives: parameter uncertainty across the K draws, plus the
+    # between-outer-allocation (and network) spread once jobs are pooled.
+    # summarise_pred_by keeps the inner scatter deliberately.
+    a <- if ("param_sample" %in% names(v))
+           v[, .(VE = mean(1 - eate, na.rm = TRUE)), by = param_sample]
+         else data.table(VE = mean(1 - v$eate, na.rm = TRUE))
+    data.table(group = group_fn(r), VE = a$VE)
   }))
   if (!nrow(draws)) return(data.table())
   # SD-based CI: mean +/- z_ci * SD(pooled). Consistent with the Laplace/
@@ -460,7 +482,16 @@ summarise_ave_by <- function(ok, group_fn, t_target) {
     if (!("ave" %in% names(r$ve_uncertainty))) return(NULL)   # legacy results
     v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
     if (!nrow(v)) return(NULL)
-    data.table(group = group_fn(r), AVE = v$ave)
+    # Same handling as summarise_ve_by: collapse the INNER (fresh) allocations
+    # within each posterior draw, pool the OUTER (per-job, fitted) ones. The
+    # collapse matters more here than for VE -- the allocation scales the whole
+    # epidemic by a common factor, which cancels in the ratio but not in the
+    # difference, so the un-collapsed AVE scatter is large and would otherwise
+    # dominate this interval as pure MC noise.
+    a <- if ("param_sample" %in% names(v))
+           v[, .(AVE = mean(ave, na.rm = TRUE)), by = param_sample]
+         else data.table(AVE = mean(v$ave, na.rm = TRUE))
+    data.table(group = group_fn(r), AVE = a$AVE)
   }))
   if (!nrow(draws)) return(data.table())
   s <- draws[, .(n        = .N,
@@ -476,10 +507,13 @@ summarise_ave_by <- function(ok, group_fn, t_target) {
   s[order(sapply(group, order_key))]
 }
 
-# FULL predictive interval. summarise_ve_by / summarise_ave_by already pool the
-# raw (param_sample, sim) draws, so their intervals span parameter x allocation.
-# What they cannot span is the stochastic realisations, which the EATE functions
-# integrate out before forming the contrast. Those that can supply it report the
+# PREDICTIVE interval -- the deliberately un-collapsed counterpart to
+# summarise_ve_by / summarise_ave_by. Those estimate an expectation over
+# allocations, so they average the INNER (fresh) allocations away and keep only
+# the OUTER ones pooled. This one keeps the inner scatter too, because the
+# question is not "how well do we know E_alloc[VE]" but "how spread out is the
+# VE we would actually see". On top of that it adds the stochastic realisations,
+# which the EATE functions integrate out before forming the contrast. Those that can supply it report the
 # within-allocation spread across replicates as eate_sd_rep / ave_sd_rep, and
 # the two combine in quadrature:
 #   sd_predfull^2 = sd(pooled draws)^2 + mean(sd_rep^2)
@@ -721,11 +755,11 @@ if (!nrow(draws_dt)) {
   # the ve_n_vac inner allocations (line ~571) before any of this, so every
   # column below is blind to the WITHIN-job allocation spread -- which for AVE
   # is the large component (cv 0.177 at pl_alpha 1.4, diag_ave_refit.R), not a
-  # rounding detail. sd_within_AVE is therefore posterior-only. The AVE forest
-  # (summarise_ave_by) pools the raw per-sim draws instead and does carry it, so
-  # it is legitimately wider, by ~1.5x on these networks. The two are not in
-  # conflict -- they answer different questions -- but do not read one as a
-  # check on the other.
+  # rounding detail. sd_within_AVE is therefore posterior-only. That is the right
+  # convention for an estimand defined as an average over allocations, and it
+  # matches the AVE forest, which collapses the inner allocations the same way.
+  # The quantity that deliberately keeps the inner scatter is sd_pred_AVE /
+  # sd_predfull_AVE below, and panel E of the combined figure.
   # The K draws per job are the parameter sampling distribution from that job's
   # fit -- they ARE the uncertainty, so they must not be averaged away before a
   # spread is taken. Collapsing each job to its posterior mean first (as this
@@ -1181,8 +1215,11 @@ if (nrow(ve_unc_long) > 0) {
   #   D  VE, predictive      E  AVE, predictive      -
   #
   # Columns pair each effect measure with its predictive version, sharing an x
-  # range so the extra width is legible. A/B/C pool the raw (param_sample, sim)
-  # draws, so they already span parameter x allocation; D/E add the
+  # range so the extra width is legible. The rows answer different questions.
+  # A/B: uncertainty in the ESTIMAND, which is itself an average over
+  # allocations -- inner (fresh) allocations collapsed within each posterior
+  # draw, outer (per-job, fitted) allocations pooled. D/E: PREDICTIVE spread of
+  # a single realised VE/AVE -- inner scatter kept, plus the
   # stochastic-realisation term (eate_sd_rep / ave_sd_rep) in quadrature. D/E
   # are omitted, and the figure falls back to a single row, when no result
   # carries those columns -- otherwise they would duplicate A and B exactly.
@@ -1306,11 +1343,11 @@ if (nrow(ve_unc_long) > 0) {
       pB <- if (nrow(g4_cov))
         forest_panel(g4_cov,
                      "infections averted per 1000",
-                     glue("B. Effect of +{d_cov_lab}% coverage"), show_y = FALSE)
+                     glue("C. Effect of +{d_cov_lab}% coverage"), show_y = FALSE)
       else
-        forest_panel(g4_alpha, "alpha", "B. alpha", show_y = FALSE)
+        forest_panel(g4_alpha, "alpha", "C. alpha", show_y = FALSE)
       pC <- forest_panel(g4_ave,   glue("AVE  (t = {t_star_ve})"),
-                         "C. Absolute difference", show_y = FALSE)
+                         "B. Absolute difference", show_y = FALSE)
 
       # Bottom row: the same two effect measures with the FULL predictive
       # interval, i.e. with the stochastic-realisation term folded in. Only
