@@ -1448,9 +1448,17 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     # replicates. C_k is 0/1 per replicate; rowMeans gives P_factual_i.
     P_factual <- matrix(0, nrow = n_t, ncol = N)
     I_mat     <- array(0, dim = c(n_t, n_rep, N))
+    # Per-replicate factual case totals in each arm, accumulated as we go so we
+    # never hold a second [n_t, n_rep, N] array. These feed the per-replicate
+    # EATE below, whose SD is the stochastic-realisation spread.
+    C_vac_rep   <- matrix(0, nrow = n_t, ncol = n_rep)
+    C_unvac_rep <- matrix(0, nrow = n_t, ncol = n_rep)
+    is_vac      <- logical(N); is_vac[vac] <- TRUE
     for (k in seq_len(N)) {
       Ck <- .dt_col_to_t_rep_matrix(raw[[paste0("C", k)]], n_t, n_rep)
       P_factual[, k] <- rowMeans(Ck)
+      if (is_vac[k]) C_vac_rep <- C_vac_rep + Ck
+      else           C_unvac_rep <- C_unvac_rep + Ck
       I_mat[,, k]    <- .dt_col_to_t_rep_matrix(raw[[paste0("I", k)]], n_t, n_rep)
     }
 
@@ -1470,10 +1478,17 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     # per-person absolute scale.
     eate_t <- numeric(n_t); num_t <- numeric(n_t); denom_t <- numeric(n_t)
     ave_t  <- numeric(n_t); crr_t <- numeric(n_t); crr_ave_t <- numeric(n_t)
+    # Spread of the EATE across stochastic realisations, at this allocation and
+    # these parameters. Reported as an SD rather than stored per replicate:
+    # keeping the draws themselves would be n_rep values per (allocation, t) per
+    # posterior sample, which is far too much to carry out of the fit array.
+    eate_sd_rep <- rep(NA_real_, n_t); ave_sd_rep <- rep(NA_real_, n_t)
     for (it in seq_len(n_t)) {
       cfi        <- cum_foi_traj[it, , ]                       # [n_rep, N]
-      P_vac_cf   <- 1 - colMeans(exp(-alpha * cfi))            # length N
-      P_unvac_cf <- 1 - colMeans(exp(-cfi))                    # length N
+      E_a        <- exp(-alpha * cfi)                          # [n_rep, N]
+      E_1        <- exp(-cfi)
+      P_vac_cf   <- 1 - colMeans(E_a)                          # length N
+      P_unvac_cf <- 1 - colMeans(E_1)                          # length N
       P_fac      <- P_factual[it, ]                            # length N
       num   <- sum(P_fac[vac])     + sum(P_vac_cf[non_vac])
       denom <- sum(P_fac[non_vac]) + sum(P_unvac_cf[vac])
@@ -1481,6 +1496,23 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
       denom_t[it] <- denom
       eate_t[it]  <- num / denom
       ave_t[it]   <- (denom - num) / N
+      # Same contrast formed WITHIN each replicate instead of after averaging.
+      # Its mean is not eate_t (ratio of means vs mean of ratios); only the
+      # spread is used.
+      if (n_rep > 1L) {
+        num_r   <- C_vac_rep[it, ]   + rowSums(1 - E_a[, non_vac, drop = FALSE])
+        denom_r <- C_unvac_rep[it, ] + rowSums(1 - E_1[, vac,     drop = FALSE])
+        # denom_r = 0 (a replicate where the epidemic never took off) makes the
+        # RATIO undefined but leaves the DIFFERENCE perfectly well defined, so
+        # guard them separately. Dropping fizzles from ave_sd_rep would remove
+        # the bulk of the spread wherever fizzling is common.
+        ok_f <- is.finite(num_r) & is.finite(denom_r)
+        ok_r <- ok_f & denom_r > 0
+        if (sum(ok_r) > 1L)
+          eate_sd_rep[it] <- sd(num_r[ok_r] / denom_r[ok_r])
+        if (sum(ok_f) > 1L)
+          ave_sd_rep[it]  <- sd((denom_r[ok_f] - num_r[ok_f]) / N)
+      }
       ar_fac_vac   <- sum(P_fac[vac])     / length(vac)
       ar_fac_unvac <- sum(P_fac[non_vac]) / length(non_vac)
       crr_t[it]     <- ar_fac_vac / ar_fac_unvac
@@ -1490,9 +1522,11 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     rbindlist(list(
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
+                 eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
                  method = "full_stoch", sim = sim_id),
       data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
+                 eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
   }
@@ -1896,12 +1930,39 @@ get_stoch_eate_linear <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     crr_t     <- P_fac_vac / P_fac_unvac
     crr_ave_t <- P_fac_unvac - P_fac_vac
 
+    # Same contrast formed WITHIN each replicate rather than after averaging
+    # over them: the spread across stochastic realisations at this allocation.
+    # Only the SD is kept -- the draws themselves would be n_rep values per
+    # (allocation, t) per posterior sample, far too much to carry out of the
+    # fit array. The mean of the per-replicate ratios is not eate_t (ratio of
+    # means vs mean of ratios); only the spread is used. cum_foi is [n_t, n_rep]
+    # in the SIR model and a length-n_t vector in the linear one, which recycles
+    # down the columns of C1_mat/C2_mat correctly in both cases.
+    eate_sd_rep <- rep(NA_real_, n_t); ave_sd_rep <- rep(NA_real_, n_t)
+    if (n_rep > 1L) {
+      num_r   <- C2_mat + N_unvac * (1 - exp(-alpha * cum_foi))   # [n_t, n_rep]
+      denom_r <- C1_mat + N_vac   * (1 - exp(-1     * cum_foi))
+      for (it in seq_len(n_t)) {
+        nr <- num_r[it, ]; dr <- denom_r[it, ]
+        # dr = 0 (a replicate where the epidemic never took off) makes the RATIO
+        # undefined but leaves the DIFFERENCE well defined, so guard separately.
+        # Dropping fizzles from ave_sd_rep would remove most of the spread
+        # wherever fizzling is common.
+        ok_f <- is.finite(nr) & is.finite(dr)
+        ok_r <- ok_f & dr > 0
+        if (sum(ok_r) > 1L) eate_sd_rep[it] <- sd(nr[ok_r] / dr[ok_r])
+        if (sum(ok_f) > 1L) ave_sd_rep[it]  <- sd((dr[ok_f] - nr[ok_f]) / N)
+      }
+    }
+
     rbindlist(list(
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
+                 eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
                  method = "full_stoch", sim = sim_id),
       data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
+                 eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
   }
@@ -1971,12 +2032,39 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     crr_t     <- P_fac_vac / P_fac_unvac
     crr_ave_t <- P_fac_unvac - P_fac_vac
 
+    # Same contrast formed WITHIN each replicate rather than after averaging
+    # over them: the spread across stochastic realisations at this allocation.
+    # Only the SD is kept -- the draws themselves would be n_rep values per
+    # (allocation, t) per posterior sample, far too much to carry out of the
+    # fit array. The mean of the per-replicate ratios is not eate_t (ratio of
+    # means vs mean of ratios); only the spread is used. cum_foi is [n_t, n_rep]
+    # in the SIR model and a length-n_t vector in the linear one, which recycles
+    # down the columns of C1_mat/C2_mat correctly in both cases.
+    eate_sd_rep <- rep(NA_real_, n_t); ave_sd_rep <- rep(NA_real_, n_t)
+    if (n_rep > 1L) {
+      num_r   <- C2_mat + N_unvac * (1 - exp(-alpha * cum_foi))   # [n_t, n_rep]
+      denom_r <- C1_mat + N_vac   * (1 - exp(-1     * cum_foi))
+      for (it in seq_len(n_t)) {
+        nr <- num_r[it, ]; dr <- denom_r[it, ]
+        # dr = 0 (a replicate where the epidemic never took off) makes the RATIO
+        # undefined but leaves the DIFFERENCE well defined, so guard separately.
+        # Dropping fizzles from ave_sd_rep would remove most of the spread
+        # wherever fizzling is common.
+        ok_f <- is.finite(nr) & is.finite(dr)
+        ok_r <- ok_f & dr > 0
+        if (sum(ok_r) > 1L) eate_sd_rep[it] <- sd(nr[ok_r] / dr[ok_r])
+        if (sum(ok_f) > 1L) ave_sd_rep[it]  <- sd((dr[ok_f] - nr[ok_f]) / N)
+      }
+    }
+
     rbindlist(list(
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
+                 eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
                  method = "full_stoch", sim = sim_id),
       data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
+                 eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
                  method = "CRR", sim = sim_id)
     ), fill = TRUE)
   }

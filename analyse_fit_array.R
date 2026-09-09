@@ -765,14 +765,17 @@ if (!nrow(draws_dt)) {
   # you would see", not of "the mean VE" -- and for AVE the two differ a lot,
   # since the allocation does not cancel on the absolute scale.
   #
-  # LIMIT: `sim` indexes the ALLOCATION only. Every get_stoch_eate_* function
-  # already integrates the n_rep stochastic realisations out before forming the
-  # EATE (colMeans over replicates, e.g. stoch_model.R:1474), so no
-  # realisation-level draw survives into ve_uncertainty and this cannot restore
-  # it. Adding that dimension means emitting per-replicate values from the EATE
-  # functions and re-running the array; storing them all would be
-  # n_vac * n_rep * n_t rows per draw, so per-replicate SDs are the practical
-  # form.
+  # The third dimension, stochastic realisations, cannot be pooled the same way:
+  # the EATE functions integrate the n_rep replicates out before forming the
+  # contrast, so no realisation-level row exists. Those that can supply it
+  # (network, sir, linear) instead report the WITHIN-allocation spread across
+  # replicates as eate_sd_rep / ave_sd_rep per (sim, t) -- an SD rather than
+  # n_rep draws, which would be far too much to carry out of the fit array.
+  # Combining in quadrature then gives the full predictive spread:
+  #   sd_predfull^2 = sd_pred^2 (parameter x allocation) + sd_rep^2 (realisation)
+  # sd_rep_* / sd_predfull_* are NA for models that do not emit the columns and
+  # for results predating them.
+  has_rep <- function(v) all(c("eate_sd_rep", "ave_sd_rep") %in% names(v))
   pred_tbl <- rbindlist(lapply(ok, function(r) {
     if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
     v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
@@ -780,16 +783,31 @@ if (!nrow(draws_dt)) {
     data.table(model_type = as.character(r$model_type),
                pl_alpha   = r$pl_alpha %||% NA_real_,
                VE         = 1 - v$eate,
-               AVE        = if ("ave" %in% names(v)) v$ave else NA_real_)
-  }))
+               AVE        = if ("ave" %in% names(v)) v$ave else NA_real_,
+               # VE = 1 - eate, so the two have the same SD
+               v_rep      = if (has_rep(v)) v$eate_sd_rep else NA_real_,
+               a_rep      = if (has_rep(v)) v$ave_sd_rep  else NA_real_)
+  }), fill = TRUE)
   pred_tbl <- if (nrow(pred_tbl))
-    pred_tbl[, .(n_pred      = .N,
-                 sd_pred_VE  = sd(VE,  na.rm = TRUE),
-                 sd_pred_AVE = sd(AVE, na.rm = TRUE)),
-             by = .(model_type, pl_alpha)]
+    pred_tbl[, {
+      # root-mean-square, since variances average and SDs do not
+      rms <- function(x) { m <- mean(x^2, na.rm = TRUE)
+                           if (is.finite(m)) sqrt(m) else NA_real_ }
+      sp_VE  <- sd(VE,  na.rm = TRUE); sp_AVE <- sd(AVE, na.rm = TRUE)
+      sr_VE  <- rms(v_rep);            sr_AVE <- rms(a_rep)
+      .(n_pred          = .N,
+        sd_pred_VE      = sp_VE,
+        sd_pred_AVE     = sp_AVE,
+        sd_rep_VE       = sr_VE,
+        sd_rep_AVE      = sr_AVE,
+        sd_predfull_VE  = sqrt(sp_VE^2  + sr_VE^2),
+        sd_predfull_AVE = sqrt(sp_AVE^2 + sr_AVE^2))
+    }, by = .(model_type, pl_alpha)]
   else data.table(model_type = character(), pl_alpha = numeric(),
                   n_pred = integer(), sd_pred_VE = numeric(),
-                  sd_pred_AVE = numeric())
+                  sd_pred_AVE = numeric(), sd_rep_VE = numeric(),
+                  sd_rep_AVE = numeric(), sd_predfull_VE = numeric(),
+                  sd_predfull_AVE = numeric())
 
   between_tbl <- merge(between_tbl, pooled_tbl,
                        by = c("model_type", "pl_alpha"), all.x = TRUE)
@@ -805,6 +823,7 @@ if (!nrow(draws_dt)) {
       "sd_within_AVE",   "sd_between_AVE",   "sd_total_AVE",
       "sd_within_avert", "sd_between_avert", "sd_total_avert",
       "n_pred", "sd_pred_VE", "sd_pred_AVE",
+      "sd_rep_VE", "sd_rep_AVE", "sd_predfull_VE", "sd_predfull_AVE",
       "cv_VE", "cv_avert", "cor_alpha_VE", "dVE_dalpha"))
   between_tbl <- between_tbl[order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
@@ -825,6 +844,9 @@ if (!nrow(draws_dt)) {
                         t_AVE = round(sd_total_AVE,  4),
                         p_VE  = round(sd_pred_VE,  4),
                         p_AVE = round(sd_pred_AVE, 4),
+                        r_VE  = round(sd_rep_VE,   4),
+                        r_AVE = round(sd_rep_AVE,  4),
+                        f_AVE = round(sd_predfull_AVE, 4),
                         cv_VE = round(cv_VE, 4),
                         cv_av = round(cv_avert, 4))])
   message("  (full table, incl. beta/alpha and the averted-effect columns, in ",
