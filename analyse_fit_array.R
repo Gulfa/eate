@@ -757,7 +757,43 @@ if (!nrow(draws_dt)) {
                             else NA_real_)
   }, by = .(model_type, pl_alpha)]
 
+  # PREDICTIVE spread: keep every internal draw instead of averaging. draws_dt
+  # collapsed each param_sample to the mean over its ve_n_vac inner allocations
+  # (line ~571); this goes back to the raw ve_uncertainty rows and pools every
+  # (param_sample, sim) pair, so the result carries parameter uncertainty AND
+  # the allocation spread inside each draw. That is the distribution of "the VE
+  # you would see", not of "the mean VE" -- and for AVE the two differ a lot,
+  # since the allocation does not cancel on the absolute scale.
+  #
+  # LIMIT: `sim` indexes the ALLOCATION only. Every get_stoch_eate_* function
+  # already integrates the n_rep stochastic realisations out before forming the
+  # EATE (colMeans over replicates, e.g. stoch_model.R:1474), so no
+  # realisation-level draw survives into ve_uncertainty and this cannot restore
+  # it. Adding that dimension means emitting per-replicate values from the EATE
+  # functions and re-running the array; storing them all would be
+  # n_vac * n_rep * n_t rows per draw, so per-replicate SDs are the practical
+  # form.
+  pred_tbl <- rbindlist(lapply(ok, function(r) {
+    if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
+    v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
+    if (!nrow(v)) return(NULL)
+    data.table(model_type = as.character(r$model_type),
+               pl_alpha   = r$pl_alpha %||% NA_real_,
+               VE         = 1 - v$eate,
+               AVE        = if ("ave" %in% names(v)) v$ave else NA_real_)
+  }))
+  pred_tbl <- if (nrow(pred_tbl))
+    pred_tbl[, .(n_pred      = .N,
+                 sd_pred_VE  = sd(VE,  na.rm = TRUE),
+                 sd_pred_AVE = sd(AVE, na.rm = TRUE)),
+             by = .(model_type, pl_alpha)]
+  else data.table(model_type = character(), pl_alpha = numeric(),
+                  n_pred = integer(), sd_pred_VE = numeric(),
+                  sd_pred_AVE = numeric())
+
   between_tbl <- merge(between_tbl, pooled_tbl,
+                       by = c("model_type", "pl_alpha"), all.x = TRUE)
+  between_tbl <- merge(between_tbl, pred_tbl,
                        by = c("model_type", "pl_alpha"), all.x = TRUE)
   between_tbl[, `:=`(cv_VE    = sd_total_VE    / abs(mean_VE),
                      cv_avert = sd_total_avert / abs(mean_avert))]
@@ -768,12 +804,15 @@ if (!nrow(draws_dt)) {
       "sd_within_VE",    "sd_between_VE",    "sd_total_VE",
       "sd_within_AVE",   "sd_between_AVE",   "sd_total_AVE",
       "sd_within_avert", "sd_between_avert", "sd_total_avert",
+      "n_pred", "sd_pred_VE", "sd_pred_AVE",
       "cv_VE", "cv_avert", "cor_alpha_VE", "dVE_dalpha"))
   between_tbl <- between_tbl[order(sapply(model_type, order_key), pl_alpha)]
   fwrite(between_tbl, file.path(out_dir, "between_allocation_spread.csv"))
   message("\n=== Allocation vs parameter spread (within / between / total) ===")
   message("  within = parameter uncertainty from one fit (the K draws);")
-  message("  between = across allocations/networks; total = pooled draws.")
+  message("  between = across allocations/networks; total = pooled draws;")
+  message("  pred = predictive, every internal draw kept (parameter x allocation,")
+  message("  no averaging) -- the spread of the VE/AVE you would SEE, not of its mean.")
   message("  The allocation scales the whole epidemic by a common factor, which")
   message("  cancels in the RATIO (VE) but not in the DIFFERENCE (AVE); the")
   message("  coverage effect redraws the allocation, so it cancels in neither.")
@@ -784,6 +823,8 @@ if (!nrow(draws_dt)) {
                         w_AVE = round(sd_within_AVE, 4),
                         b_AVE = round(sd_between_AVE, 4),
                         t_AVE = round(sd_total_AVE,  4),
+                        p_VE  = round(sd_pred_VE,  4),
+                        p_AVE = round(sd_pred_AVE, 4),
                         cv_VE = round(cv_VE, 4),
                         cv_av = round(cv_avert, 4))])
   message("  (full table, incl. beta/alpha and the averted-effect columns, in ",
