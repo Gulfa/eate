@@ -248,6 +248,21 @@ cov_effect_K     <- 200L   # posterior draws propagated into the coverage effect
                            # (capped below K_post_samples: each draw costs two
                            # extra simulations)
 
+# VE at OTHER coverage levels. Exactly the estimand compute_ve already returns
+# at the design coverage, re-evaluated with the vaccinated fraction set to each
+# value here -- same fitted parameters, same K posterior draws, same inner
+# allocations and replicates. It answers "what would this fitted model say the
+# VE is if we had vaccinated x% instead", which is a transportability question,
+# not a refit.
+#
+# COST: each level repeats the whole uncertainty-propagated VE computation, so
+# the VE stage costs (1 + length(ve_coverages) * ve_coverage_K / K_post_samples)
+# times what it did. Set ve_coverages <- numeric(0) to switch it off, or lower
+# ve_coverage_K to buy it back.
+ve_coverages  <- c(0.25, 0.75)
+ve_coverage_K <- 30L       # posterior draws per coverage level, capped below
+                           # K_post_samples
+
 # Each spec becomes its own model. `mod` is the modulus of the residue class
 # the alpha depends on; `up` and `down` are the asserted susceptibilities in
 # the two counterfactual worlds (an unvaccinated person vaccinated, and a
@@ -290,6 +305,7 @@ base_common <- list(
   cov_effect_K = cov_effect_K,
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
+  ve_coverages = ve_coverages, ve_coverage_K = ve_coverage_K,
   network_engine = net_engine
 )
 
@@ -1175,9 +1191,14 @@ compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
 }
 
 
-compute_ve <- function(cfg, beta, alpha) {
+compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
   N_total  <- cfg$N_cont + cfg$N_vac
-  vac_frac <- cfg$N_vac / N_total
+  # vac_frac_override re-evaluates the SAME estimand at a different coverage.
+  # Every branch below takes the vaccinated fraction as `f`, and the EATE
+  # functions draw their inner allocations from it (round(f * N)), so this is
+  # the only thing that has to change. The fit is untouched: these are the
+  # fitted parameters transported to another coverage, not a refit.
+  vac_frac <- vac_frac_override %||% (cfg$N_vac / N_total)
   sus      <- c(1, alpha)
   tp       <- seq(1, cfg$t_star, 1)
 
@@ -1307,7 +1328,8 @@ sample_posterior <- function(beta_hat, alpha_hat, cov, K,
 # variance into "parameter" vs "allocation" components.
 compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
                                         K, n_rep_override, K_cores = 1L,
-                                        samples = NULL) {
+                                        samples = NULL,
+                                        vac_frac_override = NULL) {
   # `samples` (e.g. grid-posterior draws) takes precedence; otherwise fall
   # back to the Gaussian MVN(fit, posterior_cov) approximation.
   if (is.null(samples))
@@ -1320,12 +1342,36 @@ compute_ve_with_uncertainty <- function(cfg, fit, posterior_cov,
   # already using the full CPU budget.
   cfg_u$inner_cores  <- 1L
   rbindlist(parallel::mclapply(seq_len(nrow(samples)), function(k) {
-    ve_k <- compute_ve(cfg_u, samples[k, "beta"], samples[k, "alpha"])
+    ve_k <- compute_ve(cfg_u, samples[k, "beta"], samples[k, "alpha"],
+                       vac_frac_override = vac_frac_override)
     ve_k[, param_sample := k]
     ve_k[, beta_k       := samples[k, "beta"]]
     ve_k[, alpha_k      := samples[k, "alpha"]]
     ve_k
   }, mc.cores = K_cores, mc.preschedule = FALSE), fill = TRUE)
+}
+
+# The same VE, re-evaluated at each coverage in cfg$ve_coverages. Reuses the
+# posterior draws from the design-coverage run (truncated to ve_coverage_K) so
+# every level is read off the same parameter samples and the levels are directly
+# comparable to each other and to the design coverage. Returns one long table
+# tagged with `coverage`, or NULL when the list is empty.
+compute_ve_by_coverage <- function(cfg, fit, posterior_cov, samples,
+                                   K_cores = 1L) {
+  covs <- cfg$ve_coverages
+  covs <- covs[is.finite(covs) & covs > 0 & covs < 1]
+  if (!length(covs)) return(NULL)
+  K   <- min(cfg$K_post_samples, cfg$ve_coverage_K %||% cfg$K_post_samples)
+  smp <- if (is.null(samples)) NULL
+         else samples[seq_len(min(K, nrow(samples))), , drop = FALSE]
+  out <- rbindlist(lapply(covs, function(f) {
+    r <- compute_ve_with_uncertainty(cfg, fit, posterior_cov, K = K,
+           n_rep_override = cfg$ve_n_rep_uncert, K_cores = K_cores,
+           samples = smp, vac_frac_override = f)
+    if (is.null(r) || !nrow(r)) return(NULL)
+    r[, coverage := f][]
+  }), fill = TRUE)
+  if (!nrow(out)) NULL else out
 }
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +1489,15 @@ run_one_job <- function(cfg) {
                                         K_cores = cores_per_node,
                                         samples = post_draws)
 
+  ve_cov <- NULL
+  if (length(cfg$ve_coverages %||% numeric(0))) {
+    message(glue("[{cfg$name}] VE at other coverages: ",
+                 "{paste(cfg$ve_coverages, collapse = ', ')} ",
+                 "(K = {min(cfg$K_post_samples, cfg$ve_coverage_K %||% cfg$K_post_samples)})"))
+    ve_cov <- compute_ve_by_coverage(cfg, fit, pcov$cov, post_draws,
+                                     K_cores = cores_per_node)
+  }
+
   list(
     name            = cfg$name,
     experiment_id   = cfg$experiment_id   %||% NA_character_,
@@ -1491,7 +1546,13 @@ run_one_job <- function(cfg) {
     data_C2         = cfg$data_C2,
     ve              = ve,
     coverage_effect = cov_eff,
-    ve_uncertainty  = ve_unc
+    ve_uncertainty  = ve_unc,
+    # Same estimand as ve_uncertainty, re-evaluated at each cfg$ve_coverages
+    # level and tagged with `coverage`. NULL when the list is empty. The design
+    # coverage itself stays in ve_uncertainty and is not repeated here unless it
+    # was listed explicitly.
+    ve_by_coverage  = ve_cov,
+    design_coverage = cfg$N_vac / (cfg$N_cont + cfg$N_vac)
   )
 }
 
