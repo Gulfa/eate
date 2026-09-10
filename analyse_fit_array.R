@@ -743,8 +743,11 @@ if (!nrow(draws_dt)) {
   #     VE  = 1 - num/denom       c cancels
   #     AVE = c*(denom - num)/N   c does NOT cancel
   # Measured at pl_alpha = 1.4 with the parameters held fixed (diag_ave_refit.R):
-  # VE sd 0.004 across allocations, AVE cv 0.177 -- and that 0.177 matches the cv
-  # of the epidemic size itself (0.18, diag_alloc_spread.R), which is c.
+  # VE sd 0.0025 across allocations, AVE cv 0.170 -- and that 0.170 matches the cv
+  # of the epidemic size itself (0.18, diag_alloc_spread.R), which is c. (Numbers
+  # re-measured after 9069edc; the first run of that diagnostic passed a scalar
+  # `timepoints` and so reported 1 - CIR and half the arm attack-rate gap
+  # instead of the EATE. The conclusion was unchanged, the levels were not.)
   #
   # The coverage effect is a third case: a contrast between two coverage levels
   # with the allocation REDRAWN at each, so it cancels on neither scale --
