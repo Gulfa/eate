@@ -813,7 +813,14 @@ if (!nrow(draws_dt)) {
                              if (is.finite(w)) sqrt(w) else 0 }
     betw    <- function(m) if (has_var) sd(m, na.rm = TRUE) else 0
     list(n_alloc          = .N,
-         K_med            = median(n_draw),
+         # as.numeric is load-bearing: median() of an INTEGER vector returns an
+         # integer when the group has an odd number of jobs (it picks an
+         # element) but a double when it has an even number (it averages the two
+         # middle ones). n_draw comes from .N, so it is integer, and a mix of
+         # odd- and even-sized groups then makes this column change type between
+         # groups -- which data.table rejects with "Column 2 of result for group
+         # 2 is type 'double' but expecting type 'integer'".
+         K_med            = as.numeric(median(n_draw)),
          sd_between_beta  = betw(beta_m),
          sd_between_alpha = betw(alpha_m),
          sd_within_VE     = within(VE_v),
