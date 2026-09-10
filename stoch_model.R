@@ -1394,7 +1394,19 @@ fit_mod_norm <- function(mod, X_cont=NULL, X_vac=NULL, beta_ini=1, alpha_ini=0.5
 .cum_trapz <- function(FI, timepoints) {
   n_t <- nrow(FI)
   out <- matrix(0, nrow = n_t, ncol = ncol(FI))
-  if (n_t < 2L) return(out)
+  # Loud rather than silently zero. The first row of a cumulative integral is 0
+  # by construction, so a single timepoint returns an identically-zero
+  # cumulative FOI -- and every get_stoch_eate_* builds its counterfactual from
+  # this, so P_vac_cf and P_unvac_cf both go to 0 and the EATE collapses to the
+  # factual arm ratio (num = N_vac * P_fac_vac, denom = N_unvac * P_fac_unvac)
+  # without any error. That produced badly wrong numbers in three diagnostics
+  # before it was noticed. Callers must pass the full grid, e.g.
+  # seq(1, t_star, 1), and select the row at t_star afterwards.
+  if (n_t < 2L)
+    stop(".cum_trapz needs at least 2 timepoints (got ", n_t, "). A single ",
+         "timepoint gives an identically-zero cumulative FOI, which silently ",
+         "collapses the EATE to the factual arm ratio. Pass the full grid, ",
+         "e.g. timepoints = seq(1, t_star, 1).")
   dt_vec <- diff(timepoints)
   for (it in seq.int(2L, n_t)) {
     out[it, ] <- out[it - 1L, ] + (FI[it, ] + FI[it - 1L, ]) / 2 * dt_vec[it - 1L]

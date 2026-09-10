@@ -71,10 +71,12 @@ b_bar <- mean(fit$beta); a_bar <- mean(fit$alpha)
 eate_of <- function(b, a, vl, n_rep = 300) {
   r <- get_stoch_eate_network(beta = b, susceptibility = c(1, a), f = 0.5, N = N,
         t = t_star, c_ij = cm, adj = adj, k_mean = mean_k, gamma = gamma,
-        n_rep = n_rep, timepoints = t_star, init_I = init_I,
+        n_rep = n_rep, timepoints = seq(1, t_star, 1), init_I = init_I,
         vac_list = vl, mc.cores = 1, inner_cores = 1)
   setDT(r)
-  fs <- r[method == "full_stoch"]
+  # full grid, then select t_star: .cum_trapz's first row is 0, so a scalar
+  # timepoints would zero the counterfactual and collapse this to the arm ratio
+  fs <- r[method == "full_stoch" & t == t_star]
   c(VE = mean(1 - fs$eate), AVE = mean(fs$ave))
 }
 

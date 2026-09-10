@@ -67,15 +67,16 @@ arms_sir <- function(b, a, nsim = 400, seed = 3) {
 ave_net <- function(b, a) {
   r <- get_stoch_eate_network(beta = b, susceptibility = c(1, a), f = 0.5, N = N,
         t = t_star, c_ij = cm, adj = adj, k_mean = mean_k, gamma = gamma,
-        n_vac = n_ve_alloc, n_rep = n_rep_ve, timepoints = t_star,
+        n_vac = n_ve_alloc, n_rep = n_rep_ve, timepoints = seq(1, t_star, 1),
         init_I = init_I, mc.cores = cores, inner_cores = 1)
-  setDT(r); mean(r[method == "full_stoch", ave])
+  setDT(r); mean(r[method == "full_stoch" & t == t_star, ave])
 }
 ave_sir <- function(b, a) {
   r <- get_stoch_eate_sir(beta = b, susceptibility = c(1, a), f = 0.5, N = N,
         t = t_star, gamma = gamma, I_ini = I_ini_2g, n_vac = n_ve_alloc,
-        n_rep = n_rep_ve, dt = dt, timepoints = t_star, mc.cores = cores)
-  setDT(r); mean(r[method == "full_stoch", ave])
+        n_rep = n_rep_ve, dt = dt, timepoints = seq(1, t_star, 1),
+        mc.cores = cores)
+  setDT(r); mean(r[method == "full_stoch" & t == t_star, ave])
 }
 
 # ---- calibrate each model to the same data -------------------------------
