@@ -1434,6 +1434,97 @@ if (nrow(ve_unc_long) > 0) {
     message("Skipping the combined 4-panel figure: package 'cowplot' not installed.")
   }
 
+  # -------------------------------------------------------------------------
+  # VE as a function of coverage
+  # -------------------------------------------------------------------------
+  # run_fit_array re-evaluates the design-coverage estimand at each level in
+  # cfg$ve_coverages and stores it as ve_by_coverage, tagged with `coverage`.
+  # The design coverage itself lives in ve_uncertainty, so it is spliced back in
+  # here (tagged from r$design_coverage) -- otherwise the curve would have a
+  # hole exactly where the model was fitted.
+  #
+  # Same estimand convention as the forests: collapse the INNER (fresh)
+  # allocations within each posterior draw, then pool the OUTER (per-job) ones
+  # and the K draws. So the ribbon is parameter + between-job spread, not the
+  # Monte-Carlo noise of the inner allocation average.
+  #
+  # These are the FITTED parameters transported to another coverage, not refits,
+  # which is the whole point: it shows what each model implies about coverages
+  # the trial never observed, and models that agree at the design coverage can
+  # disagree elsewhere.
+  cov_ve <- rbindlist(lapply(ok, function(r) {
+    parts <- list()
+    if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) {
+      v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
+      if (nrow(v) && is.finite(r$design_coverage %||% NA_real_))
+        parts[[length(parts) + 1L]] <- copy(v)[, coverage := r$design_coverage]
+    }
+    if (!is.null(r$ve_by_coverage) && nrow(r$ve_by_coverage)) {
+      v <- r$ve_by_coverage[method == "full_stoch" & t == t_star_ve]
+      if (nrow(v)) parts[[length(parts) + 1L]] <- v
+    }
+    if (!length(parts)) return(NULL)
+    d <- rbindlist(parts, fill = TRUE)
+    if (!("param_sample" %in% names(d))) d[, param_sample := 1L]
+    a <- d[, .(VE  = mean(1 - eate, na.rm = TRUE),
+               AVE = if ("ave" %in% names(d)) mean(ave, na.rm = TRUE)
+                     else NA_real_),
+           by = .(coverage, param_sample)]
+    data.table(group = labels_L3_pool_nets(r), a)
+  }), fill = TRUE)
+
+  # Only worth drawing if some job actually carries other coverages: with just
+  # the design point every model collapses to a single dot.
+  if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
+    sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
+    cov_sum <- cov_ve[, .(n      = .N,
+                          VE     = mean(VE,  na.rm = TRUE),
+                          VE_lo  = mean(VE,  na.rm = TRUE) - z_ci * sd0(VE),
+                          VE_hi  = mean(VE,  na.rm = TRUE) + z_ci * sd0(VE),
+                          AVE    = mean(AVE, na.rm = TRUE),
+                          AVE_lo = mean(AVE, na.rm = TRUE) - z_ci * sd0(AVE),
+                          AVE_hi = mean(AVE, na.rm = TRUE) + z_ci * sd0(AVE)),
+                      by = .(group, coverage)][order(group, coverage)]
+    fwrite(cov_sum, file.path(out_dir, "ve_by_coverage.csv"))
+
+    cov_sum[, grp := factor(as.character(group),
+                            levels = unique(as.character(group)[
+                              order(sapply(group, order_key))]))]
+    # Dashed marker only when every job shares one design coverage; with a mix
+    # a single line would be wrong.
+    dc <- unique(unlist(lapply(ok, function(r) r$design_coverage %||% NA_real_)))
+    dc <- dc[is.finite(dc)]
+
+    p_cov <- ggplot(cov_sum, aes(coverage, VE, colour = grp, fill = grp)) +
+      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      geom_point(size = 1.9) +
+      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
+      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
+      scale_x_continuous(labels = scales::percent) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid.minor = element_blank(),
+            legend.position  = "bottom",
+            legend.text      = element_text(size = 9)) +
+      labs(x = "vaccine coverage", y = glue("VE = 1 - EATE  (t = {t_star_ve})"),
+           title = "VE implied by each fitted model at other coverage levels",
+           subtitle = glue("fitted parameters transported, not refitted; ",
+                           "{ci_pct}% interval over posterior draws and jobs"))
+    if (length(dc) == 1L)
+      p_cov <- p_cov +
+        geom_vline(xintercept = dc, linetype = "dashed", colour = "grey50") +
+        annotate("text", x = dc, y = Inf, label = "  design", hjust = 0,
+                 vjust = 1.4, size = 3, colour = "grey40")
+
+    ggsave(file.path(out_dir, "ve_by_coverage.png"), p_cov,
+           width = 9, height = 6, dpi = 140)
+    message(glue("Wrote ve_by_coverage.png ({uniqueN(cov_sum$coverage)} ",
+                 "coverage levels, {nlevels(cov_sum$grp)} model groups)"))
+  } else {
+    message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
+            "(set ve_coverages in run_fit_array.R and re-run the array).")
+  }
+
   # Final-time VE per model with the two CIs
   ve_unc_final <- bands[t == max(t)]
   fwrite(dcast(ve_unc_final, model_type ~ source,
