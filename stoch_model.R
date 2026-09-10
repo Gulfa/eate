@@ -1414,20 +1414,156 @@ fit_mod_norm <- function(mod, X_cont=NULL, X_vac=NULL, beta_ini=1, alpha_ini=0.5
   out
 }
 
+# Interference-aware network EATE: the counterfactual by RE-SIMULATION rather
+# than by freezing the force of infection.
+# ---------------------------------------------------------------------------
+# The frozen-field version below builds Y_i(1 - v_i) from a per-node cumulative
+# FOI held fixed at its factual value, i.e. it assumes flipping i does not move
+# the epidemic. On a network that assumption is doing real work, and
+# diag_frozen_field.R shows it is 5-10% off in both arms at pl_alpha 1.4. This
+# version flips i and re-runs, so the flipped individual's own outcome is read
+# from a world where the flip actually happened.
+#
+# COST: (1 + n_flip) simulations per allocation instead of 1. That is bought
+# back by the engine -- the frozen field needs per-node S/I/R paths and so is
+# locked to dust, while re-simulation needs only per-individual infection
+# probabilities, which the event engine returns directly and 50-250x faster.
+# Hence engine = "events" by default here.
+#
+# Only n_flip individuals are flipped, stratified across the two arms, and their
+# mean is scaled to the group size -- the same estimator
+# get_stoch_eate_network_vacfrac uses. CRN (a shared seed per allocation) pairs
+# the factual and flipped runs so the contrast is not swamped by simulation
+# noise.
+.eate_network_resim <- function(beta, alpha, f, N, t, c_ij, adj, csr, n_vac, n_rep,
+                                n_flip, k_mean, gamma, dt, timepoints, init_I,
+                                mc.cores, inner_cores, vac_list, crn_seed,
+                                engine) {
+  n_t <- length(timepoints)
+  I_ini_vec <- c(rep(1L, init_I), rep(0L, N - init_I))
+  if (!is.null(vac_list)) n_vac <- length(vac_list)
+
+  run_one_allocation <- function(a) {
+    vac     <- if (!is.null(vac_list)) vac_list[[a]]
+               else sample(seq_len(N), round(f * N))
+    non_vac <- setdiff(seq_len(N), vac)
+    sim_id  <- runif(1)
+    seed_a  <- as.integer(crn_seed) + a
+
+    # Returns list(P = [n_t, N] mean infection probability,
+    #              hit = [n_rep, N] logical at t_star, or NULL under dust).
+    sim_v <- if (engine == "events") function(v) {
+      sus <- rep(1, N); sus[v] <- alpha
+      inf <- run_stoch_network_events(
+        beta = beta, N = N, susceptibility = sus, t = t, vac = v, csr = csr,
+        gamma = gamma, timepoints = timepoints, I_ini = init_I, n_sim = n_rep,
+        seed = seed_a, k_mean = k_mean, cores = inner_cores,
+        return_times = TRUE)
+      list(P   = t(vapply(timepoints, function(tp) colMeans(inf <= tp), numeric(N))),
+           hit = inf <= timepoints[n_t])
+    } else function(v) {
+      sus <- rep(1, N); sus[v] <- alpha
+      r <- run_stoch_adj(c_ij, beta = N * beta / k_mean, t = t,
+                         I_ini = I_ini_vec, susceptibility = sus,
+                         gamma = gamma, dt = dt, timepoints = timepoints,
+                         n_sim = n_rep, cores = inner_cores, adj = adj)
+      setDT(r)
+      list(P = vapply(seq_len(N), function(k)
+             rowMeans(.dt_col_to_t_rep_matrix(r[[paste0("C", k)]], n_t, n_rep)),
+             numeric(n_t)),
+           hit = NULL)
+    }
+
+    fac   <- sim_v(vac)
+    P_fac <- fac$P
+
+    n_fv   <- max(1L, round(n_flip * length(vac) / N))
+    n_fu   <- max(1L, n_flip - n_fv)
+    flip_v <- if (length(vac))     sample(vac,     min(n_fv, length(vac)))     else integer(0)
+    flip_u <- if (length(non_vac)) sample(non_vac, min(n_fu, length(non_vac))) else integer(0)
+
+    cf <- function(i, vaccinate) {
+      v2 <- if (vaccinate) sort(c(vac, i)) else setdiff(vac, i)
+      s  <- sim_v(v2)
+      list(P = s$P[, i], hit = if (is.null(s$hit)) NULL else s$hit[, i])
+    }
+    cu <- lapply(flip_u, function(i) cf(i, TRUE))    # unvaccinated, if vaccinated
+    cv <- lapply(flip_v, function(i) cf(i, FALSE))   # vaccinated, if unvaccinated
+
+    mrow <- function(l) if (!length(l)) rep(NA_real_, n_t) else
+      rowMeans(vapply(l, function(x) x$P, numeric(n_t)))
+
+    num_t   <- rowSums(P_fac[, vac,     drop = FALSE]) + length(non_vac) * mrow(cu)
+    denom_t <- rowSums(P_fac[, non_vac, drop = FALSE]) + length(vac)     * mrow(cv)
+    eate_t  <- num_t / denom_t
+    ave_t   <- (denom_t - num_t) / N
+
+    # Per-replicate spread, formed within each replicate rather than after
+    # averaging. Available only from the event engine, which returns the raw
+    # per-realisation infection times; NA under dust.
+    eate_sd_rep <- rep(NA_real_, n_t); ave_sd_rep <- rep(NA_real_, n_t)
+    if (!is.null(fac$hit) && length(cu) && length(cv) && n_rep > 1L) {
+      mcol <- function(l) rowMeans(vapply(l, function(x) x$hit, logical(n_rep)))
+      nr <- rowSums(fac$hit[, vac,     drop = FALSE]) + length(non_vac) * mcol(cu)
+      dr <- rowSums(fac$hit[, non_vac, drop = FALSE]) + length(vac)     * mcol(cv)
+      ok_f <- is.finite(nr) & is.finite(dr); ok_r <- ok_f & dr > 0
+      if (sum(ok_r) > 1L) eate_sd_rep[n_t] <- sd(nr[ok_r] / dr[ok_r])
+      if (sum(ok_f) > 1L) ave_sd_rep[n_t]  <- sd((dr[ok_f] - nr[ok_f]) / N)
+    }
+
+    ar_fac_vac   <- rowSums(P_fac[, vac,     drop = FALSE]) / max(length(vac), 1)
+    ar_fac_unvac <- rowSums(P_fac[, non_vac, drop = FALSE]) / max(length(non_vac), 1)
+
+    rbindlist(list(
+      data.frame(t = timepoints, eate = eate_t, ave = ave_t,
+                 num = num_t, denom = denom_t,
+                 eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
+                 method = "full_stoch", sim = sim_id),
+      data.frame(t = timepoints, eate = ar_fac_vac / ar_fac_unvac,
+                 ave = ar_fac_unvac - ar_fac_vac,
+                 num = NA_real_, denom = NA_real_,
+                 eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                 method = "CRR", sim = sim_id)
+    ), fill = TRUE)
+  }
+
+  rbindlist(parallel::mclapply(seq_len(n_vac), run_one_allocation,
+                               mc.cores = mc.cores), fill = TRUE)
+}
+
 get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                                    N = 200, t = 15, pl_alpha = 3, c_ij = NULL,
                                    n_vac = 10, n_rep = 20,
                                    k_mean = 6, gamma = 1 / 3, dt = 0.1,
                                    timepoints = NULL, init_I = 2,
                                    mc.cores = 10, inner_cores = 1,
-                                   vac_list = NULL, adj = NULL) {
+                                   vac_list = NULL, adj = NULL,
+                                   cf_method = c("resim", "frozen"),
+                                   n_flip = 100, crn_seed = 1L,
+                                   engine = c("events", "dust"), csr = NULL) {
   alpha <- susceptibility[2]
+  cf_method <- match.arg(cf_method)
+  engine    <- match.arg(engine)
   if (is.null(c_ij) && is.null(adj))
     c_ij <- get_conact_matrix_pl(N, pl_alpha, mean_k = k_mean)
   # Build the adjacency ONCE, not once per allocation (see run_stoch_adj).
   if (is.null(adj)) adj <- contact_matrix_to_adj(c_ij)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
+
+  # Default path: counterfactual by re-simulation, no frozen field. `frozen`
+  # keeps the old estimator available for comparison (diag_frozen_field.R) and
+  # for anything that needs the dust-only per-node FOI.
+  if (cf_method == "resim") {
+    if (engine == "events" && is.null(csr))
+      csr <- adj_to_csr(contact_matrix = c_ij, adj = adj)
+    return(.eate_network_resim(
+      beta = beta, alpha = alpha, f = f, N = N, t = t, c_ij = c_ij, adj = adj, csr = csr,
+      n_vac = n_vac, n_rep = n_rep, n_flip = n_flip, k_mean = k_mean,
+      gamma = gamma, dt = dt, timepoints = timepoints, init_I = init_I,
+      mc.cores = mc.cores, inner_cores = inner_cores, vac_list = vac_list,
+      crn_seed = crn_seed, engine = engine))
+  }
 
   # If explicit allocations are supplied, use them in order and override
   # n_vac to match; otherwise sample a fresh vac set per iteration.

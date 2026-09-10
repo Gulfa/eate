@@ -209,6 +209,11 @@ ve_hetero_n_alpha <- 10L
 vacfrac_power     <- 1
 vacfrac_ref       <- 1     # local coverage at which the FULL effect is reached;
                            # was 0.5 before alpha_eff was made linear in f
+# Counterfactual for the plain `network` model: "resim" re-simulates with each
+# sampled individual's status flipped; "frozen" is the old force-of-infection
+# approximation, kept for comparison only. resim is both the correct estimator
+# and the faster one -- see the note in compute_ve.
+ve_cf_method      <- "resim"
 ve_n_flip         <- 100   # individuals re-simulated per allocation. n_flip=10
                            # is noise-dominated (VE swung 0.29 vs 0.48 at 100);
                            # the event engine makes 100 cheap.
@@ -299,7 +304,8 @@ base_common <- list(
   split_frac = split_frac, split_alpha_prod = split_alpha_prod,
   split_init_I = split_init_I,
   vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
-  ve_n_flip = ve_n_flip, parity_alpha_alt = parity_alpha_alt,
+  ve_n_flip = ve_n_flip, ve_cf_method = ve_cf_method,
+  parity_alpha_alt = parity_alpha_alt,
   cov_effect_d = cov_effect_d, cov_effect_n_sim = cov_effect_n_sim,
   cov_effect_n_alloc = cov_effect_n_alloc,
   cov_effect_K = cov_effect_K,
@@ -1247,12 +1253,21 @@ compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
       n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       timepoints = tp, mc.cores = cfg$inner_cores,
       frailty_amp = cfg$frailty_amp %||% 2.5),
+    # cf_method = "resim" is the default: the counterfactual comes from
+    # re-simulating with i flipped, not from a frozen force of infection. The
+    # frozen field pinned the network VE at ~0.51 regardless of coverage
+    # (span 0.008 vs 0.091 re-simulated, diag_frozen_field.R). Re-simulation is
+    # also FASTER here, ~13x, because it needs only per-individual infection
+    # probabilities and so can use the event engine instead of dust.
     network = get_stoch_eate_network(
       beta = beta, susceptibility = sus, f = vac_frac, N = N_total,
       t = cfg$t_star, c_ij = cfg$.c_ij, k_mean = cfg$mean_k, adj = cfg$.adj,
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
       timepoints = tp, init_I = cfg$init_I_nw,
-      mc.cores = cfg$inner_cores),
+      mc.cores = cfg$inner_cores,
+      cf_method = cfg$ve_cf_method %||% "resim",
+      n_flip = cfg$ve_n_flip %||% 100,
+      engine = cfg$network_engine %||% "events", csr = cfg$.csr),
     network_vacfrac = get_stoch_eate_network_vacfrac(
       beta = beta, alpha = alpha, f = vac_frac, N = N_total,
       t = cfg$t_star, c_ij = cfg$.c_ij, adj = cfg$.adj, k_mean = cfg$mean_k,
