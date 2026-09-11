@@ -2140,12 +2140,56 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
                                N = 200, t = 30, gamma = 1, I_ini = c(2, 2),
                                n_vac = 10, n_rep = 20,
                                dt = 0.1, timepoints = NULL,
-                               mc.cores = 10, inner_cores = 1, seed = NULL) {
+                               mc.cores = 10, inner_cores = 1, seed = NULL,
+                               cf_method = c("resim", "frozen"),
+                               crn_seed = 1L) {
   alpha <- susceptibility[2]
+  cf_method <- match.arg(cf_method)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t     <- length(timepoints)
   N_unvac <- round(N * (1 - f))
   N_vac   <- N - N_unvac
+
+  # Counterfactual by RE-SIMULATION rather than by freezing the force of
+  # infection. Individuals within a group are exchangeable here, so "flip person
+  # i" is just "re-run with one more (or one fewer) vaccinated" and read that
+  # run's group probability -- 3 simulations per allocation, not n_flip. Same
+  # estimator get_stoch_eate_sir_parity already used. CRN (one seed shared by
+  # the three runs) pairs them so the contrast is not swamped by noise.
+  if (cf_method == "resim") {
+    arms <- function(n_v, sd) {
+      n_u <- N - n_v
+      raw <- run_stoch_cd_dust(matrix(rep(1, 4), nrow = 2), beta = beta,
+                               N = c(n_u, n_v), t = t, I_ini = I_ini,
+                               susceptibility = c(1, alpha), gamma = gamma,
+                               dt = dt, timepoints = timepoints,
+                               n_sim = n_rep, cores = inner_cores, seed = sd)
+      setDT(raw)
+      list(unvac = rowMeans(.dt_col_to_t_rep_matrix(raw$C1, n_t, n_rep)) / n_u,
+           vac   = rowMeans(.dt_col_to_t_rep_matrix(raw$C2, n_t, n_rep)) / n_v)
+    }
+    run_one <- function(i) {
+      sim_id <- runif(1)
+      sd_i   <- as.integer(crn_seed) + i
+      fac <- arms(N_vac,     sd_i)
+      up  <- arms(N_vac + 1, sd_i)    # an unvaccinated person, vaccinated
+      dn  <- arms(N_vac - 1, sd_i)    # a vaccinated person, unvaccinated
+      num_t   <- N_vac   * fac$vac   + N_unvac * up$vac
+      denom_t <- N_unvac * fac$unvac + N_vac   * dn$unvac
+      rbindlist(list(
+        data.frame(t = timepoints, eate = num_t / denom_t,
+                   ave = (denom_t - num_t) / N, num = num_t, denom = denom_t,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "full_stoch", sim = sim_id),
+        data.frame(t = timepoints, eate = fac$vac / fac$unvac,
+                   ave = fac$unvac - fac$vac, num = NA_real_, denom = NA_real_,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "CRR", sim = sim_id)
+      ), fill = TRUE)
+    }
+    return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
+                                        mc.cores = mc.cores), fill = TRUE))
+  }
 
   run_one_allocation <- function() {
     sim_id <- runif(1)
