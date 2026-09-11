@@ -2358,7 +2358,10 @@ get_stoch_eate_sir_multisite <- function(beta = 1, susceptibility = c(1, 1),
                                          site_icc = 0, n_vac = 10, n_rep = 20,
                                          dt = 0.1, timepoints = NULL,
                                          mc.cores = 10, inner_cores = 1,
-                                         seed = NULL) {
+                                         seed = NULL,
+                                         cf_method = c("resim", "frozen"),
+                                         crn_seed = 1L) {
+  cf_method <- match.arg(cf_method)
   alpha <- susceptibility[2]
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t         <- length(timepoints)
@@ -2368,6 +2371,65 @@ get_stoch_eate_sir_multisite <- function(beta = 1, susceptibility = c(1, 1),
   N_site_vec  <- multisite_site_sizes(N_tot, L)
   mm          <- multisite_block_matrix(L, L)   # within-site weight = L
   I_total     <- sum(I_ini)
+
+  # Counterfactual by RE-SIMULATION. Sites are independent here (block mixing
+  # matrix, per-site FOI), so flipping one person in site l cannot touch site l'.
+  # That means a single "up" run can flip one person in EVERY site at once and
+  # each site still reads its own one-person counterfactual -- 3 runs per
+  # allocation, not 1 + 2L. Within a site individuals are exchangeable, so the
+  # flipped person's probability is that run's vaccinated-group probability.
+  if (cf_method == "resim") {
+    arms <- function(vv, sd) {
+      vv <- pmin(pmax(vv, 0L), N_site_vec)
+      uu <- N_site_vec - vv
+      N_grp   <- as.integer(rbind(uu, vv))
+      sus_grp <- as.numeric(rbind(rep(1, L), rep(alpha, L)))
+      raw <- run_stoch_cd_dust(mm, beta = beta, N = N_grp, t = t,
+                               I_ini = .spread_seeds(I_total, N_grp),
+                               susceptibility = sus_grp, gamma = gamma, dt = dt,
+                               timepoints = timepoints, n_sim = n_rep,
+                               cores = inner_cores, seed = sd)
+      setDT(raw)
+      per <- function(g, n) if (n <= 0) rep(NA_real_, n_t) else
+        rowMeans(.dt_col_to_t_rep_matrix(raw[[paste0("C", g)]], n_t, n_rep)) / n
+      list(pu = lapply(seq_len(L), function(l) per(2L * l - 1L, uu[l])),
+           pv = lapply(seq_len(L), function(l) per(2L * l,      vv[l])),
+           vv = vv, uu = uu)
+    }
+    run_one <- function(i) {
+      sim_id  <- runif(1)
+      vac_l   <- multisite_vac_counts(N_site_vec, N_vac_total, f, site_icc)
+      unvac_l <- N_site_vec - vac_l
+      sd_i    <- as.integer(crn_seed) + i
+      fac <- arms(vac_l,      sd_i)
+      up  <- arms(vac_l + 1L, sd_i)   # one more vaccinated in every site
+      dn  <- arms(vac_l - 1L, sd_i)   # one fewer vaccinated in every site
+      z <- function(x) ifelse(is.finite(x), x, 0)
+      num_t <- numeric(n_t); denom_t <- numeric(n_t)
+      tot_Cvac <- numeric(n_t); tot_Cunvac <- numeric(n_t)
+      for (l in seq_len(L)) {
+        num_t      <- num_t   + vac_l[l]   * z(fac$pv[[l]]) +
+                                unvac_l[l] * z(up$pv[[l]])
+        denom_t    <- denom_t + unvac_l[l] * z(fac$pu[[l]]) +
+                                vac_l[l]   * z(dn$pu[[l]])
+        tot_Cvac   <- tot_Cvac   + vac_l[l]   * z(fac$pv[[l]])
+        tot_Cunvac <- tot_Cunvac + unvac_l[l] * z(fac$pu[[l]])
+      }
+      ar_v <- tot_Cvac / max(sum(vac_l), 1); ar_u <- tot_Cunvac / max(sum(unvac_l), 1)
+      rbindlist(list(
+        data.frame(t = timepoints, eate = num_t / denom_t,
+                   ave = (denom_t - num_t) / N_tot, num = num_t, denom = denom_t,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "full_stoch", sim = sim_id),
+        data.frame(t = timepoints, eate = ar_v / ar_u, ave = ar_u - ar_v,
+                   num = NA_real_, denom = NA_real_,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "CRR", sim = sim_id)
+      ), fill = TRUE)
+    }
+    return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
+                                        mc.cores = mc.cores), fill = TRUE))
+  }
 
   run_one_allocation <- function() {
     sim_id  <- runif(1)
