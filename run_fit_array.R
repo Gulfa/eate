@@ -1525,6 +1525,16 @@ run_one_job <- function(cfg) {
     # every non-network model.
     network_engine  = if (identical(cfg$model_type, "network"))
                         (cfg$network_engine %||% "events") else NA_character_,
+    # Which counterfactual produced the network EATE: "resim" re-simulates with
+    # each sampled individual flipped, "frozen" is the old force-of-infection
+    # approximation. Recorded so a set of results says for itself which
+    # estimator made it -- the two disagree materially (the frozen field gives
+    # no VE response to coverage at all), and without this the only way to tell
+    # is to check which commit the run came from. NA for non-network models.
+    ve_cf_method    = if (identical(cfg$model_type, "network"))
+                        (cfg$ve_cf_method %||% "resim") else NA_character_,
+    ve_n_flip_used  = if (identical(cfg$model_type, "network"))
+                        (cfg$ve_n_flip %||% 100L) else NA_integer_,
     # Needed by the analysis to report the population-average alpha for
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
     parity_alpha_alt  = cfg$parity_alpha_alt  %||% NA_real_,
