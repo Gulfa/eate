@@ -2027,7 +2027,10 @@ get_stoch_eate_ve_hetero <- function(alpha, alpha_kappa = 0, n_alpha = 20L,
                                      n_vac = 10, n_rep = 20,
                                      gamma = 1, dt = 0.1, timepoints = NULL,
                                      I_ini_total = 1, mc.cores = 10,
-                                     inner_cores = 1) {
+                                     inner_cores = 1,
+                                     cf_method = c("resim", "frozen"),
+                                     crn_seed = 1L) {
+  cf_method <- match.arg(cf_method)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
 
@@ -2040,6 +2043,79 @@ get_stoch_eate_ve_hetero <- function(alpha, alpha_kappa = 0, n_alpha = 20L,
   sus_unvac_bin <- rep(1, K)      # baseline susceptibility, everyone
   sus_vac_bin   <- ab$x           # this bin's own vaccine effect
   trans_all     <- rep(1, n_groups)
+
+  # Counterfactual by RE-SIMULATION. Same reasoning as get_stoch_eate_frailty:
+  # mixing is uniform so the FOI is global, which means exactly ONE person may be
+  # flipped per run (one per bin would inflate the interference K-fold), and a
+  # single up-run still supplies every bin's counterfactual because a vaccinated
+  # person in bin k under N_vac + 1 is the right comparator for an unvaccinated
+  # person in bin k who gets vaccinated. 3 runs per allocation.
+  if (cf_method == "resim") {
+    sim_at <- function(vc, sd) {
+      Ng  <- c(n_total_k - vc, vc)
+      Nu  <- Ng[seq_len(K)]; Nv <- Ng[(K + 1L):n_groups]
+      raw <- run_stoch_cd_dust(matrix(1, n_groups, n_groups), beta = beta,
+                               N = Ng, t = t,
+                               I_ini = .spread_arm_seeds(I_ini_total, Nu, Nv),
+                               susceptibility = c(sus_unvac_bin, sus_vac_bin),
+                               transmissibility = trans_all, gamma = gamma,
+                               dt = dt, timepoints = timepoints, n_sim = n_rep,
+                               cores = inner_cores, seed = sd)
+      setDT(raw)
+      per <- function(g, n) if (n <= 0) rep(NA_real_, n_t) else
+        rowMeans(.dt_col_to_t_rep_matrix(raw[[paste0("C", g)]], n_t, n_rep)) / n
+      list(pu = vapply(seq_len(K), function(k) per(k, Ng[k]), numeric(n_t)),
+           pv = vapply(seq_len(K), function(k) per(K + k, Ng[K + k]), numeric(n_t)))
+    }
+    # Empty bin in a shifted run -> fill from the Lambda the non-empty bins
+    # imply, on the same scale. Never triggers at sensible bin sizes.
+    fill <- function(p, sus) {
+      bad <- !is.finite(p); if (!any(bad)) return(p)
+      ok <- is.finite(p) & p > 0 & p < 1 & sus > 0
+      if (!any(ok)) { p[bad] <- 0; return(p) }
+      lam <- mean(-log(1 - p[ok]) / sus[ok])
+      p[bad] <- 1 - exp(-sus[bad] * lam); p
+    }
+    run_one <- function(i) {
+      sim_id      <- runif(1)
+      n_vac_total <- round(f * N_total)
+      vac_counts  <- if (K == 1L) as.integer(n_vac_total) else
+        tabulate(sample(rep(seq_len(K), n_total_k), n_vac_total), nbins = K)
+      Nu <- n_total_k - vac_counts; Nv <- vac_counts
+      sd_i <- as.integer(crn_seed) + i
+      vc_up <- vac_counts; k_up <- which.max(Nu); vc_up[k_up] <- vc_up[k_up] + 1L
+      vc_dn <- vac_counts; k_dn <- which.max(Nv)
+      vc_dn[k_dn] <- max(vc_dn[k_dn] - 1L, 0L)
+
+      fac <- sim_at(vac_counts, sd_i)
+      up  <- sim_at(vc_up,      sd_i)
+      dn  <- sim_at(vc_dn,      sd_i)
+
+      Cv <- sweep(fac$pv, 2, Nv, `*`); Cu <- sweep(fac$pu, 2, Nu, `*`)
+      Cv[!is.finite(Cv)] <- 0; Cu[!is.finite(Cu)] <- 0
+      num_t <- numeric(n_t); denom_t <- numeric(n_t)
+      for (it in seq_len(n_t)) {
+        Pv <- fill(up$pv[it, ], sus_vac_bin)
+        Pu <- fill(dn$pu[it, ], sus_unvac_bin)
+        num_t[it]   <- sum(Cv[it, ]) + sum(Pv * Nu)
+        denom_t[it] <- sum(Cu[it, ]) + sum(Pu * Nv)
+      }
+      ar_v <- rowSums(Cv) / max(sum(Nv), 1); ar_u <- rowSums(Cu) / max(sum(Nu), 1)
+      rbindlist(list(
+        data.frame(t = timepoints, eate = num_t / denom_t,
+                   ave = (denom_t - num_t) / N_total,
+                   num = num_t, denom = denom_t,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "full_stoch", sim = sim_id),
+        data.frame(t = timepoints, eate = ar_v / ar_u, ave = ar_u - ar_v,
+                   num = NA_real_, denom = NA_real_,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "CRR", sim = sim_id)
+      ), fill = TRUE)
+    }
+    return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
+                                        mc.cores = mc.cores), fill = TRUE))
+  }
 
   run_one_allocation <- function() {
     n_vac_total <- round(f * N_total)
@@ -2619,7 +2695,10 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
                                             n_vac = 10, n_rep = 20,
                                             dt = 0.1, timepoints = NULL,
                                             mc.cores = 10, inner_cores = 1,
-                                            seed = NULL) {
+                                            seed = NULL,
+                                            cf_method = c("resim", "frozen"),
+                                            crn_seed = 1L) {
+  cf_method <- match.arg(cf_method)
   alpha <- susceptibility[2]
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
@@ -2631,6 +2710,66 @@ get_stoch_eate_sir_split_effect <- function(beta = 1, susceptibility = c(1, 1),
     m <- matrix(0, nrow = n_t, ncol = n_rep_full)
     if (length(col_range)) m[, col_range] <- vec_or_null
     m
+  }
+
+  # Counterfactual by RE-SIMULATION. The two blocks are independent (per-block
+  # FOI), so one up-run can flip a person in EACH block at once and each block
+  # still reads its own one-person counterfactual -- 3 runs per allocation. The
+  # batched seeding (split_frac of realisations seeded in A, the rest in B) is
+  # reproduced in every run, so the padded zero columns mean the same thing in
+  # the factual and shifted runs and the per-capita probabilities stay
+  # comparable.
+  if (cf_method == "resim") {
+    arms <- function(dv, sd) {
+      Ng <- as.integer(s$Ngrp)
+      Ng[1] <- Ng[1] - dv; Ng[2] <- Ng[2] + dv     # block A: unvac, vac
+      Ng[3] <- Ng[3] - dv; Ng[4] <- Ng[4] + dv     # block B: unvac, vac
+      Ng <- pmax(Ng, 0L)
+      nA <- max(1L, round(split_frac * n_rep)); nB <- n_rep - nA
+      rb <- function(gseed, nsim) {
+        if (nsim <= 0L) return(NULL)
+        Ii <- integer(4); Ii[gseed] <- I0
+        raw <- run_stoch_cd_dust(s$mm, beta = beta, N = Ng, t = t, I_ini = Ii,
+                                 susceptibility = s$sus, gamma = gamma, dt = dt,
+                                 timepoints = timepoints, n_sim = nsim,
+                                 cores = inner_cores, seed = sd)
+        setDT(raw); raw
+      }
+      rawA <- rb(1L, nA); rawB <- rb(3L, nB)
+      cA <- seq_len(nA); cB <- if (nA > 0) (nA + 1L):n_rep else seq_len(nB)
+      cm <- function(raw, nm, nc) if (is.null(raw)) NULL else
+        .dt_col_to_t_rep_matrix(raw[[nm]], n_t, nc)
+      per <- function(M, n) if (n <= 0) rep(NA_real_, n_t) else rowMeans(M) / n
+      list(puA = per(pad(if (nA > 0) cm(rawA, "C1", nA) else NULL, n_rep, cA), Ng[1]),
+           pvA = per(pad(if (nA > 0) cm(rawA, "C2", nA) else NULL, n_rep, cA), Ng[2]),
+           puB = per(pad(if (nB > 0) cm(rawB, "C3", nB) else NULL, n_rep, cB), Ng[3]),
+           pvB = per(pad(if (nB > 0) cm(rawB, "C4", nB) else NULL, n_rep, cB), Ng[4]))
+    }
+    run_one <- function(i) {
+      sim_id <- runif(1)
+      sd_i   <- as.integer(crn_seed) + i
+      fac <- arms(0L, sd_i); up <- arms(1L, sd_i); dn <- arms(-1L, sd_i)
+      z <- function(x) ifelse(is.finite(x), x, 0)
+      num_t   <- s$vacA   * z(fac$pvA) + s$unvacA * z(up$pvA) +
+                 s$vacB   * z(fac$pvB) + s$unvacB * z(up$pvB)
+      denom_t <- s$unvacA * z(fac$puA) + s$vacA   * z(dn$puA) +
+                 s$unvacB * z(fac$puB) + s$vacB   * z(dn$puB)
+      tot_v <- s$vacA + s$vacB; tot_u <- s$unvacA + s$unvacB
+      ar_v  <- (s$vacA * z(fac$pvA) + s$vacB * z(fac$pvB)) / max(tot_v, 1)
+      ar_u  <- (s$unvacA * z(fac$puA) + s$unvacB * z(fac$puB)) / max(tot_u, 1)
+      rbindlist(list(
+        data.frame(t = timepoints, eate = num_t / denom_t,
+                   ave = (denom_t - num_t) / N, num = num_t, denom = denom_t,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "full_stoch", sim = sim_id),
+        data.frame(t = timepoints, eate = ar_v / ar_u, ave = ar_u - ar_v,
+                   num = NA_real_, denom = NA_real_,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "CRR", sim = sim_id)
+      ), fill = TRUE)
+    }
+    return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
+                                        mc.cores = mc.cores), fill = TRUE))
   }
 
   run_one_allocation <- function() {
