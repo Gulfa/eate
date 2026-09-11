@@ -1466,13 +1466,17 @@ if (nrow(ve_unc_long) > 0) {
   cov_ve <- rbindlist(lapply(ok, function(r) {
     if (grepl(ve_cov_exclude, as.character(r$model_type))) return(NULL)
     parts <- list()
+    # Keep EVERY timepoint, not just t*. Collapsing to t* mixes the two effects
+    # that move VE in opposite directions -- less accumulated exposure early
+    # (VE nearer 1 - alpha) against a rising attack rate pushing the CIR to 1 --
+    # and the trajectory separates them.
     if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) {
-      v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
+      v <- r$ve_uncertainty[method == "full_stoch"]
       if (nrow(v) && is.finite(r$design_coverage %||% NA_real_))
         parts[[length(parts) + 1L]] <- copy(v)[, coverage := r$design_coverage]
     }
     if (!is.null(r$ve_by_coverage) && nrow(r$ve_by_coverage)) {
-      v <- r$ve_by_coverage[method == "full_stoch" & t == t_star_ve]
+      v <- r$ve_by_coverage[method == "full_stoch"]
       if (nrow(v)) parts[[length(parts) + 1L]] <- v
     }
     if (!length(parts)) return(NULL)
@@ -1481,7 +1485,7 @@ if (nrow(ve_unc_long) > 0) {
     a <- d[, .(VE  = mean(1 - eate, na.rm = TRUE),
                AVE = if ("ave" %in% names(d)) mean(ave, na.rm = TRUE)
                      else NA_real_),
-           by = .(coverage, param_sample)]
+           by = .(coverage, t, param_sample)]
     data.table(group = labels_L3_pool_nets(r), a)
   }), fill = TRUE)
 
@@ -1489,6 +1493,23 @@ if (nrow(ve_unc_long) > 0) {
   # the design point every model collapses to a single dot.
   if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
     sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
+    # The FIRST timepoint is dropped from the trajectory. Every frozen-field
+    # EATE builds its counterfactual from .cum_trapz(), whose first row is 0 by
+    # construction, so at t = min(t) the cumulative FOI is zero and the EATE
+    # degenerates to the factual arm ratio. That is an artefact of the
+    # integrator, not an early-time effect, and plotting it would put a spurious
+    # kink at the left edge of every panel. The network is exempt now that it
+    # re-simulates, but the frozen models are not, so drop it for all of them to
+    # keep the panels comparable.
+    t_first  <- min(cov_ve$t, na.rm = TRUE)
+    cov_ve_t <- cov_ve[t > t_first]
+    cov_sum_t <- cov_ve_t[, .(n     = .N,
+                              VE    = mean(VE, na.rm = TRUE),
+                              VE_lo = mean(VE, na.rm = TRUE) - z_ci * sd0(VE),
+                              VE_hi = mean(VE, na.rm = TRUE) + z_ci * sd0(VE)),
+                          by = .(group, coverage, t)][order(group, coverage, t)]
+
+    cov_ve <- cov_ve[t == t_star_ve]          # the at-t* view for the first plot
     cov_sum <- cov_ve[, .(n      = .N,
                           VE     = mean(VE,  na.rm = TRUE),
                           VE_lo  = mean(VE,  na.rm = TRUE) - z_ci * sd0(VE),
@@ -1532,6 +1553,39 @@ if (nrow(ve_unc_long) > 0) {
            width = 9, height = 6, dpi = 140)
     message(glue("Wrote ve_by_coverage.png ({uniqueN(cov_sum$coverage)} ",
                  "coverage levels, {nlevels(cov_sum$grp)} model groups)"))
+
+    # VE(t), one panel per coverage. At t* the level-of-exposure effect and the
+    # saturation effect are already netted against each other; over t they
+    # separate, so this is where a model's VE can be read as it accumulates
+    # exposure rather than at one arbitrary horizon.
+    cov_sum_t[, grp := factor(as.character(group), levels = levels(cov_sum$grp))]
+    cov_sum_t[, cov_lab := factor(sprintf("coverage = %.0f%%", 100 * coverage),
+                  levels = sprintf("coverage = %.0f%%",
+                                   100 * sort(unique(coverage))))]
+    p_cov_t <- ggplot(cov_sum_t, aes(t, VE, colour = grp, fill = grp)) +
+      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      facet_wrap(~ cov_lab) +
+      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
+      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid.minor = element_blank(),
+            legend.position  = "bottom",
+            legend.text      = element_text(size = 9),
+            strip.background = element_rect(fill = "grey95", colour = NA)) +
+      labs(x = "t", y = "VE = 1 - EATE",
+           title = "VE over time, by vaccine coverage",
+           subtitle = glue("fitted parameters transported to each coverage; ",
+                           "{ci_pct}% interval; t = {t_first} omitted ",
+                           "(degenerate for frozen-field models)"))
+    nf <- uniqueN(cov_sum_t$cov_lab)
+    ggsave(file.path(out_dir, "ve_t_by_coverage.png"), p_cov_t,
+           width = min(14, 4 + 2.6 * ceiling(sqrt(nf))),
+           height = min(12, 3 + 2.4 * ceiling(nf / ceiling(sqrt(nf)))),
+           dpi = 140, limitsize = FALSE)
+    fwrite(cov_sum_t, file.path(out_dir, "ve_t_by_coverage.csv"))
+    message(glue("Wrote ve_t_by_coverage.png ({nf} coverage panels, ",
+                 "t = {t_first + 1}..{max(cov_sum_t$t)})"))
   } else {
     message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
             "(set ve_coverages in run_fit_array.R and re-run the array).")
