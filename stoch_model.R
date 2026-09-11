@@ -1714,7 +1714,10 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
                                    n_vac = 10, n_rep = 20,
                                    gamma = 1, dt = 0.1, timepoints = NULL,
                                    I_ini_total = 1, mc.cores = 10,
-                                   inner_cores = 1, frailty_amp = 2.5) {
+                                   inner_cores = 1, frailty_amp = 2.5,
+                                   cf_method = c("resim", "frozen"),
+                                   crn_seed = 1L) {
+  cf_method <- match.arg(cf_method)
   if (is.null(timepoints)) timepoints <- seq(1, t, 1)
   n_t <- length(timepoints)
 
@@ -1778,6 +1781,102 @@ get_stoch_eate_frailty <- function(alpha, sd = 0, sd_trans = 0, beta = 1, R = NU
       }
     }
     as.integer(ini)
+  }
+
+  # Counterfactual by RE-SIMULATION. Mixing is uniform here, so the force of
+  # infection is GLOBAL and shared by every bin. That has one consequence worth
+  # stating: exactly ONE person may be flipped per run. Flipping one per bin (as
+  # the independent-site model can afford to) would put n_frailty extra
+  # vaccinated into the shared environment and inflate the interference by that
+  # factor.
+  #
+  # One up-run still yields every bin's counterfactual: a vaccinated person in
+  # bin k in a world with N_vac + 1 vaccinated is exactly the comparator for an
+  # unvaccinated person in bin k who gets vaccinated, whichever bin the extra
+  # vaccinated person happens to sit in (the environment differs at O(1/N)). So
+  # 3 runs per allocation. Bins that end up with an empty group in the shifted
+  # run fall back to the frozen value for that bin alone.
+  if (cf_method == "resim") {
+    sim_at <- function(vc, sd) {
+      Ng <- c(n_total_k - vc, vc)
+      tu <- sum(n_total_k - vc); tv <- sum(vc)
+      ut <- I_ini_total * tu / max(tu + tv, 1)
+      us <- min(floor(ut), tu); vs <- I_ini_total - us
+      if (vs > tv) { us <- us + (vs - tv); vs <- as.integer(tv) }
+      Ii <- c(spread(as.integer(us), Ng[seq_len(n_frailty)]),
+              spread(as.integer(vs), Ng[(n_frailty + 1L):n_groups]))
+      raw <- run_stoch_cd_dust(matrix(1, n_groups, n_groups), beta = beta,
+                               N = Ng, t = t, I_ini = Ii,
+                               susceptibility = c(frailty, alpha * frailty),
+                               transmissibility = c(trans_frailty, trans_frailty),
+                               gamma = gamma, dt = dt, timepoints = timepoints,
+                               n_sim = n_rep, cores = inner_cores, seed = sd)
+      setDT(raw)
+      per <- function(g, n) if (n <= 0) rep(NA_real_, n_t) else
+        rowMeans(.dt_col_to_t_rep_matrix(raw[[paste0("C", g)]], n_t, n_rep)) / n
+      list(pu = vapply(seq_len(n_frailty), function(k) per(k, Ng[k]), numeric(n_t)),
+           pv = vapply(seq_len(n_frailty),
+                       function(k) per(n_frailty + k, Ng[n_frailty + k]), numeric(n_t)),
+           Ng = Ng)
+    }
+    run_one <- function(i) {
+      sim_id      <- runif(1)
+      n_vac_total <- round(f * N_total)
+      vac_counts  <- if (n_frailty == 1L) as.integer(n_vac_total) else
+        tabulate(sample(rep(seq_len(n_frailty), n_total_k), n_vac_total),
+                 nbins = n_frailty)
+      N_unvac_grp <- n_total_k - vac_counts; N_vac_grp <- vac_counts
+      sd_i <- as.integer(crn_seed) + i
+
+      # put the single flip where it is least likely to empty a group
+      k_up <- which.max(N_unvac_grp); k_dn <- which.max(N_vac_grp)
+      vc_up <- vac_counts; vc_up[k_up] <- vc_up[k_up] + 1L
+      vc_dn <- vac_counts; vc_dn[k_dn] <- max(vc_dn[k_dn] - 1L, 0L)
+
+      fac <- sim_at(vac_counts, sd_i)
+      up  <- sim_at(vc_up,      sd_i)
+      dn  <- sim_at(vc_dn,      sd_i)
+
+      num_t <- numeric(n_t); denom_t <- numeric(n_t)
+      Cv <- sweep(fac$pv, 2, N_vac_grp,   `*`)      # [n_t, n_frailty] case counts
+      Cu <- sweep(fac$pu, 2, N_unvac_grp, `*`)
+      Cv[!is.finite(Cv)] <- 0; Cu[!is.finite(Cu)] <- 0
+      # A bin can come back empty in a shifted run (no vaccinated in bin k even
+      # after the +1, i.e. vac_counts[k] == 0 and k != k_up). Fill it from the
+      # Lambda the NON-empty bins imply, on the same scale -- P = 1 - exp(-sus_k
+      # * Lambda) -- rather than reaching for the frozen field. With random
+      # allocation and bins of reasonable size this never triggers.
+      fill <- function(p, sus) {
+        bad <- !is.finite(p)
+        if (!any(bad)) return(p)
+        ok <- is.finite(p) & p > 0 & p < 1 & sus > 0
+        if (!any(ok)) { p[bad] <- 0; return(p) }
+        lam <- mean(-log(1 - p[ok]) / sus[ok])
+        p[bad] <- 1 - exp(-sus[bad] * lam)
+        p
+      }
+      for (it in seq_len(n_t)) {
+        Pv <- fill(up$pv[it, ], sus_vac_bin)
+        Pu <- fill(dn$pu[it, ], sus_unvac_bin)
+        num_t[it]   <- sum(Cv[it, ]) + sum(Pv * N_unvac_grp)
+        denom_t[it] <- sum(Cu[it, ]) + sum(Pu * N_vac_grp)
+      }
+      ar_v <- rowSums(Cv) / max(sum(N_vac_grp), 1)
+      ar_u <- rowSums(Cu) / max(sum(N_unvac_grp), 1)
+      rbindlist(list(
+        data.frame(t = timepoints, eate = num_t / denom_t,
+                   ave = (denom_t - num_t) / N_total,
+                   num = num_t, denom = denom_t,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "full_stoch", sim = sim_id),
+        data.frame(t = timepoints, eate = ar_v / ar_u, ave = ar_u - ar_v,
+                   num = NA_real_, denom = NA_real_,
+                   eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
+                   method = "CRR", sim = sim_id)
+      ), fill = TRUE)
+    }
+    return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
+                                        mc.cores = mc.cores), fill = TRUE))
   }
 
   run_one_allocation <- function() {
