@@ -1455,7 +1455,16 @@ if (nrow(ve_unc_long) > 0) {
   # which is the whole point: it shows what each model implies about coverages
   # the trial never observed, and models that agree at the design coverage can
   # disagree elsewhere.
+  # Parity models are excluded: their alpha keys off the PARITY of the
+  # vaccinated count, so sweeping coverage walks the residue class and the
+  # resulting curve is an artefact of arithmetic rather than a dose-response.
+  # They exist to show the CIR-VE gap is unbounded (parity_ve_unbounded.R), and
+  # plotting them here would just add two saw-tooth lines. Prefix match because
+  # each spec becomes its own model_type, "sir_parity_<tag>".
+  ve_cov_exclude <- "^sir_parity"
+
   cov_ve <- rbindlist(lapply(ok, function(r) {
+    if (grepl(ve_cov_exclude, as.character(r$model_type))) return(NULL)
     parts <- list()
     if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) {
       v <- r$ve_uncertainty[method == "full_stoch" & t == t_star_ve]
