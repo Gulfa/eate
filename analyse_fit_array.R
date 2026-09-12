@@ -261,6 +261,33 @@ analyse_one_experiment <- function(ok, out_dir) {
 
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+# Fits that ran into the fitting box rather than converging inside it. Worth
+# surfacing first, because a pinned fit does not look wrong in the forest -- it
+# just looks like a small alpha -- but VE(t -> 0) = 1 - alpha exactly, so an
+# alpha on the 0.01 floor produces a VE trajectory starting at ~99%, which reads
+# as a bug in the estimator rather than a fit that failed. Requires fit_bounds,
+# stored on results from this commit on; silently skipped for older runs.
+pinned <- rbindlist(lapply(ok, function(r) {
+  b <- r$fit_bounds
+  if (is.null(b) || is.null(r$fit)) return(NULL)
+  at <- function(v, lim, tol = 1e-6)
+    is.finite(v) && (abs(v - lim[1]) <= tol * max(1, abs(lim[1])) ||
+                     abs(v - lim[2]) <= tol * max(1, abs(lim[2])))
+  if (!at(r$fit$alpha, b$alpha) && !at(r$fit$beta, b$beta)) return(NULL)
+  data.table(name = as.character(r$name), model_type = as.character(r$model_type),
+             beta = r$fit$beta, alpha = r$fit$alpha,
+             which = paste(c(if (at(r$fit$alpha, b$alpha)) "alpha",
+                             if (at(r$fit$beta,  b$beta))  "beta"), collapse = "+"))
+}), fill = TRUE)
+if (nrow(pinned)) {
+  message(glue("\n!! {nrow(pinned)} fit(s) pinned at a fitting bound -- their ",
+               "VE is the bound, not an estimate:"))
+  print(pinned[, .(name, model_type, beta = signif(beta, 4),
+                   alpha = signif(alpha, 4), at_bound = which)])
+  message("   alpha at its floor gives VE(t -> 0) = 1 - alpha ~ 99%; widen the ",
+          "bound or check the fit rather than reading these as results.")
+}
+
 fit_dt <- rbindlist(lapply(ok, function(r) {
   data.table(
     name            = as.character(r$name),
@@ -1511,19 +1538,29 @@ if (nrow(ve_unc_long) > 0) {
   # the design point every model collapses to a single dot.
   if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
     sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
-    # The first timepoint used to be dropped here: every frozen-field EATE built
-    # its counterfactual from .cum_trapz(), whose first row is 0 by construction,
-    # so at t = min(t) the cumulative FOI was zero and the EATE degenerated to
-    # the factual arm ratio. That no longer applies -- every get_stoch_eate_*
-    # re-simulates (8fc1883), and the one exception, linear, computes
-    # cum_foi <- beta * timepoints analytically rather than through .cum_trapz.
-    # So the early points are real and are kept; they are where VE sits nearest
-    # 1 - alpha, before the attack rate drags the CIR toward 1.
+    # Whether the earliest timepoint is usable depends on how the counterfactual
+    # was built, so ASK the results rather than assuming.
     #
-    # If anything is ever re-run with cf_method = "frozen", the earliest point
-    # becomes degenerate again and should be dropped.
+    # Under a frozen counterfactual .cum_trapz's first row is 0, so at
+    # t = min(t) the cumulative FOI is zero and the contrast collapses to
+    #     VE = 1 - (N_vac / N_unvac) * CIR
+    # -- not the arm ratio, because the group sizes do not cancel once coverage
+    # is swept. At 10% coverage with CIR = 0.4 that is 1 - (1/9)(0.4) = 0.956,
+    # i.e. a spurious ~96% VE; at 90% it is about -2.6 and vanishes under the
+    # [0, 1] crop. Re-simulated results have no such point and keep it, which is
+    # where VE sits nearest 1 - alpha.
+    #
+    # Results predating ve_cf_method carry no marker and are treated as frozen.
+    cf_methods <- unlist(lapply(ok, function(r) r$ve_cf_method %||% NA_character_))
+    all_resim  <- length(cf_methods) > 0 && all(!is.na(cf_methods) &
+                                                cf_methods == "resim")
     t_first  <- min(cov_ve$t, na.rm = TRUE)
-    cov_ve_t <- cov_ve
+    cov_ve_t <- if (all_resim) cov_ve else cov_ve[t > t_first]
+    if (!all_resim)
+      message(glue("  note: dropping t = {t_first} from the VE(t) panels -- ",
+                   "these results were made with a frozen counterfactual ",
+                   "(or predate the marker), whose first timepoint is ",
+                   "degenerate. Re-run the array to keep it."))
     cov_sum_t <- cov_ve_t[, .(n     = .N,
                               VE    = mean(VE, na.rm = TRUE),
                               VE_lo = mean(VE, na.rm = TRUE) - z_ci * sd0(VE),
@@ -1616,7 +1653,7 @@ if (nrow(ve_unc_long) > 0) {
            dpi = 140, limitsize = FALSE)
     fwrite(cov_sum_t, file.path(out_dir, "ve_t_by_coverage.csv"))
     message(glue("Wrote ve_t_by_coverage.png ({nf} coverage panels, ",
-                 "t = {t_first}..{max(cov_sum_t$t)})"))
+                 "t = {min(cov_sum_t$t)}..{max(cov_sum_t$t)})"))
   } else {
     message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
             "(set ve_coverages in run_fit_array.R and re-run the array).")

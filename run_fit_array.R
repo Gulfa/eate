@@ -1542,8 +1542,13 @@ run_one_job <- function(cfg) {
     # estimator made it -- the two disagree materially (the frozen field gives
     # no VE response to coverage at all), and without this the only way to tell
     # is to check which commit the run came from. NA for non-network models.
-    ve_cf_method    = if (identical(cfg$model_type, "network"))
-                        (cfg$ve_cf_method %||% "resim") else NA_character_,
+    # Stored for EVERY model, not just network: the analysis uses it to decide
+    # whether the earliest timepoint is usable. Under a frozen counterfactual
+    # .cum_trapz's first row is 0, so the first point collapses to
+    # VE = 1 - (N_vac/N_unvac) * CIR -- which at 10% coverage reads as ~96% VE
+    # and at 90% as about -2.6. Absent on results predating this, which the
+    # analysis treats as frozen.
+    ve_cf_method    = cfg$ve_cf_method %||% "resim",
     ve_n_flip_used  = if (identical(cfg$model_type, "network"))
                         (cfg$ve_n_flip %||% 100L) else NA_integer_,
     # Needed by the analysis to report the population-average alpha for
@@ -1559,6 +1564,13 @@ run_one_job <- function(cfg) {
     alpha_kappa      = cfg$alpha_kappa      %||% NA_real_,
     n_alpha          = cfg$n_alpha          %||% NA_integer_,
     fit             = fit,
+    # The fitting box, carried so the analysis can tell a genuine estimate from
+    # one that simply ran into a wall. A fit pinned at the alpha floor is not
+    # obviously wrong in the forest -- but VE(t -> 0) = 1 - alpha exactly, so it
+    # shows up as a trajectory starting at ~99% VE, which looks like a bug in
+    # the estimator rather than a fit that failed.
+    fit_bounds      = list(beta  = exp(c(log_beta_lo,  log_beta_hi)),
+                           alpha = exp(c(log_alpha_lo, log_alpha_hi))),
     posterior_cov   = list(cov = pcov$cov, J = pcov$J,
                            Sigma = pcov$Sigma, sd = pcov$sd),
     grid_post       = if (is.null(gpost)) NULL else
