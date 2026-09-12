@@ -213,6 +213,10 @@ vacfrac_ref       <- 1     # local coverage at which the FULL effect is reached;
 # sampled individual's status flipped; "frozen" is the old force-of-infection
 # approximation, kept for comparison only. resim is both the correct estimator
 # and the faster one -- see the note in compute_ve.
+# Extra (sub-unit) timepoints for the VE trajectory, on top of 1..t_star. Must
+# divide dt. Costs nothing extra to simulate -- these are additional readouts of
+# runs that happen anyway.
+ve_extra_timepoints <- c(0.5)
 ve_cf_method      <- "resim"
 ve_n_flip         <- 100   # individuals re-simulated per allocation. n_flip=10
                            # is noise-dominated (VE swung 0.29 vs 0.48 at 100);
@@ -305,6 +309,7 @@ base_common <- list(
   split_init_I = split_init_I,
   vac_frac_power = vacfrac_power, vac_frac_ref = vacfrac_ref,
   ve_n_flip = ve_n_flip, ve_cf_method = ve_cf_method,
+  ve_extra_timepoints = ve_extra_timepoints,
   parity_alpha_alt = parity_alpha_alt,
   cov_effect_d = cov_effect_d, cov_effect_n_sim = cov_effect_n_sim,
   cov_effect_n_alloc = cov_effect_n_alloc,
@@ -1206,7 +1211,13 @@ compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
   # fitted parameters transported to another coverage, not a refit.
   vac_frac <- vac_frac_override %||% (cfg$N_vac / N_total)
   sus      <- c(1, alpha)
-  tp       <- seq(1, cfg$t_star, 1)
+  # Integer grid plus any extra early points. VE moves fastest before much
+  # exposure has accumulated -- that is where it sits nearest 1 - alpha, before
+  # the rising attack rate drags the CIR toward 1 -- so the unit grid is too
+  # coarse at the left end to show it. Extras must be multiples of cfg$dt for
+  # the dust models to land on them.
+  tp       <- sort(unique(c(cfg$ve_extra_timepoints %||% numeric(0),
+                            seq(1, cfg$t_star, 1))))
 
   ve <- switch(cfg$sim_type %||% cfg$model_type,
     linear = get_stoch_eate_linear(

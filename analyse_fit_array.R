@@ -1493,16 +1493,19 @@ if (nrow(ve_unc_long) > 0) {
   # the design point every model collapses to a single dot.
   if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
     sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
-    # The FIRST timepoint is dropped from the trajectory. Every frozen-field
-    # EATE builds its counterfactual from .cum_trapz(), whose first row is 0 by
-    # construction, so at t = min(t) the cumulative FOI is zero and the EATE
-    # degenerates to the factual arm ratio. That is an artefact of the
-    # integrator, not an early-time effect, and plotting it would put a spurious
-    # kink at the left edge of every panel. The network is exempt now that it
-    # re-simulates, but the frozen models are not, so drop it for all of them to
-    # keep the panels comparable.
+    # The first timepoint used to be dropped here: every frozen-field EATE built
+    # its counterfactual from .cum_trapz(), whose first row is 0 by construction,
+    # so at t = min(t) the cumulative FOI was zero and the EATE degenerated to
+    # the factual arm ratio. That no longer applies -- every get_stoch_eate_*
+    # re-simulates (8fc1883), and the one exception, linear, computes
+    # cum_foi <- beta * timepoints analytically rather than through .cum_trapz.
+    # So the early points are real and are kept; they are where VE sits nearest
+    # 1 - alpha, before the attack rate drags the CIR toward 1.
+    #
+    # If anything is ever re-run with cf_method = "frozen", the earliest point
+    # becomes degenerate again and should be dropped.
     t_first  <- min(cov_ve$t, na.rm = TRUE)
-    cov_ve_t <- cov_ve[t > t_first]
+    cov_ve_t <- cov_ve
     cov_sum_t <- cov_ve_t[, .(n     = .N,
                               VE    = mean(VE, na.rm = TRUE),
                               VE_lo = mean(VE, na.rm = TRUE) - z_ci * sd0(VE),
@@ -1576,8 +1579,7 @@ if (nrow(ve_unc_long) > 0) {
       labs(x = "t", y = "VE = 1 - EATE",
            title = "VE over time, by vaccine coverage",
            subtitle = glue("fitted parameters transported to each coverage; ",
-                           "{ci_pct}% interval; t = {t_first} omitted ",
-                           "(degenerate for frozen-field models)"))
+                           "{ci_pct}% interval"))
     nf <- uniqueN(cov_sum_t$cov_lab)
     ggsave(file.path(out_dir, "ve_t_by_coverage.png"), p_cov_t,
            width = min(14, 4 + 2.6 * ceiling(sqrt(nf))),
@@ -1585,7 +1587,7 @@ if (nrow(ve_unc_long) > 0) {
            dpi = 140, limitsize = FALSE)
     fwrite(cov_sum_t, file.path(out_dir, "ve_t_by_coverage.csv"))
     message(glue("Wrote ve_t_by_coverage.png ({nf} coverage panels, ",
-                 "t = {t_first + 1}..{max(cov_sum_t$t)})"))
+                 "t = {t_first}..{max(cov_sum_t$t)})"))
   } else {
     message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
             "(set ve_coverages in run_fit_array.R and re-run the array).")
