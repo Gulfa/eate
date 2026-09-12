@@ -1462,6 +1462,12 @@ if (nrow(ve_unc_long) > 0) {
   # network (which is itself several lines, one per pl_alpha, since they share
   # model_type = "network" and are separated by labels_L3_pool_nets).
   #
+  # The sir_i[0-9]+ alternative is load-bearing: when sir_I_inis is set, each
+  # I_ini becomes its own model "sir_i<total>" (sir_i10, sir_i20, ...) rather
+  # than plain "sir", so an exact match on "sir" silently drops every one of
+  # them. The suffix is specific enough not to catch sir_multisite,
+  # sir_*_frailty, sir_ve_hetero, sir_split_effect or sir_parity_*.
+  #
   # Deliberately out, and what it would take to put them back:
   #   sir_parity_*      alpha keys off the PARITY of the vaccinated count, so a
   #                     coverage sweep walks the residue class and the curve is
@@ -1473,7 +1479,7 @@ if (nrow(ve_unc_long) > 0) {
   #                     "|network_vacfrac|network_vacdecay" to show them.
   #   sir_multisite, sir_*_frailty, sir_ve_hetero, sir_split_effect
   #                     omitted only to keep the panels readable.
-  ve_cov_include <- "^(linear|sir|network)$"
+  ve_cov_include <- "^(linear|sir|sir_i[0-9]+|network)$"
 
   cov_ve <- rbindlist(lapply(ok, function(r) {
     if (!grepl(ve_cov_include, as.character(r$model_type))) return(NULL)
