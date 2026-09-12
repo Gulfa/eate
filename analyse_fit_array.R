@@ -1455,16 +1455,28 @@ if (nrow(ve_unc_long) > 0) {
   # which is the whole point: it shows what each model implies about coverages
   # the trial never observed, and models that agree at the design coverage can
   # disagree elsewhere.
-  # Parity models are excluded: their alpha keys off the PARITY of the
-  # vaccinated count, so sweeping coverage walks the residue class and the
-  # resulting curve is an artefact of arithmetic rather than a dose-response.
-  # They exist to show the CIR-VE gap is unbounded (parity_ve_unbounded.R), and
-  # plotting them here would just add two saw-tooth lines. Prefix match because
-  # each spec becomes its own model_type, "sir_parity_<tag>".
-  ve_cov_exclude <- "^sir_parity"
+  # Which models appear in the two coverage figures. An INCLUDE list, so adding a
+  # model type to the grid does not silently add a line here.
+  #
+  # Currently the three base classes: linear, homogeneous SIR, and the plain
+  # network (which is itself several lines, one per pl_alpha, since they share
+  # model_type = "network" and are separated by labels_L3_pool_nets).
+  #
+  # Deliberately out, and what it would take to put them back:
+  #   sir_parity_*      alpha keys off the PARITY of the vaccinated count, so a
+  #                     coverage sweep walks the residue class and the curve is
+  #                     an artefact of arithmetic, not a dose-response. These
+  #                     exist for parity_ve_unbounded.R and would add saw-teeth.
+  #   network_vacfrac   the local-interference variants -- legitimate coverage
+  #   network_vacdecay  curves, and arguably the most interesting ones, since
+  #                     alpha itself moves with coverage there. Add
+  #                     "|network_vacfrac|network_vacdecay" to show them.
+  #   sir_multisite, sir_*_frailty, sir_ve_hetero, sir_split_effect
+  #                     omitted only to keep the panels readable.
+  ve_cov_include <- "^(linear|sir|network)$"
 
   cov_ve <- rbindlist(lapply(ok, function(r) {
-    if (grepl(ve_cov_exclude, as.character(r$model_type))) return(NULL)
+    if (!grepl(ve_cov_include, as.character(r$model_type))) return(NULL)
     parts <- list()
     # Keep EVERY timepoint, not just t*. Collapsing to t* mixes the two effects
     # that move VE in opposite directions -- less accumulated exposure early
