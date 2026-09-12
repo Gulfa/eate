@@ -1576,10 +1576,21 @@ if (nrow(ve_unc_long) > 0) {
             legend.position  = "bottom",
             legend.text      = element_text(size = 9),
             strip.background = element_rect(fill = "grey95", colour = NA)) +
+      # coord_cartesian, not scale_y_continuous(limits=): this zooms, so the
+      # ribbons stay drawn up to the edge instead of being dropped where a bound
+      # falls outside the window.
+      coord_cartesian(ylim = c(0, 1)) +
       labs(x = "t", y = "VE = 1 - EATE",
            title = "VE over time, by vaccine coverage",
            subtitle = glue("fitted parameters transported to each coverage; ",
-                           "{ci_pct}% interval"))
+                           "{ci_pct}% interval; y cropped to [0, 1]"))
+    # The crop hides anything outside [0, 1], so say so rather than letting a
+    # model silently vanish from a panel.
+    n_out <- cov_sum_t[VE < 0 | VE > 1, .N]
+    if (n_out > 0)
+      message(glue("  note: {n_out} VE point(s) fall outside [0, 1] and are ",
+                   "cropped from ve_t_by_coverage.png -- ",
+                   "{paste(sort(unique(cov_sum_t[VE < 0 | VE > 1, as.character(group)])), collapse = ', ')}"))
     nf <- uniqueN(cov_sum_t$cov_lab)
     ggsave(file.path(out_dir, "ve_t_by_coverage.png"), p_cov_t,
            width = min(14, 4 + 2.6 * ceiling(sqrt(nf))),
