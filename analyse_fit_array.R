@@ -1244,6 +1244,206 @@ if (nrow(ve_unc_long) > 0) {
          subtitle = "blue band = parameter uncertainty only; grey band = total (params + allocations)")
   ggsave(file.path(out_dir, "ve_trajectory_with_uncertainty.png"),
          p_unc, width = 11, height = 7, dpi = 130)
+  # -------------------------------------------------------------------------
+  # VE as a function of coverage
+  # -------------------------------------------------------------------------
+  # run_fit_array re-evaluates the design-coverage estimand at each level in
+  # cfg$ve_coverages and stores it as ve_by_coverage, tagged with `coverage`.
+  # The design coverage itself lives in ve_uncertainty, so it is spliced back in
+  # here (tagged from r$design_coverage) -- otherwise the curve would have a
+  # hole exactly where the model was fitted.
+  #
+  # Same estimand convention as the forests: collapse the INNER (fresh)
+  # allocations within each posterior draw, then pool the OUTER (per-job) ones
+  # and the K draws. So the ribbon is parameter + between-job spread, not the
+  # Monte-Carlo noise of the inner allocation average.
+  #
+  # These are the FITTED parameters transported to another coverage, not refits,
+  # which is the whole point: it shows what each model implies about coverages
+  # the trial never observed, and models that agree at the design coverage can
+  # disagree elsewhere.
+  # Which models appear in the two coverage figures. An INCLUDE list, so adding a
+  # model type to the grid does not silently add a line here.
+  #
+  # Currently the three base classes: linear, homogeneous SIR, and the plain
+  # network (which is itself several lines, one per pl_alpha, since they share
+  # model_type = "network" and are separated by labels_L3_pool_nets).
+  #
+  # The sir_i[0-9]+ alternative is load-bearing: when sir_I_inis is set, each
+  # I_ini becomes its own model "sir_i<total>" (sir_i10, sir_i20, ...) rather
+  # than plain "sir", so an exact match on "sir" silently drops every one of
+  # them. The suffix is specific enough not to catch sir_multisite,
+  # sir_*_frailty, sir_ve_hetero, sir_split_effect or sir_parity_*.
+  #
+  # Deliberately out, and what it would take to put them back:
+  #   sir_parity_*      alpha keys off the PARITY of the vaccinated count, so a
+  #                     coverage sweep walks the residue class and the curve is
+  #                     an artefact of arithmetic, not a dose-response. These
+  #                     exist for parity_ve_unbounded.R and would add saw-teeth.
+  #   network_vacfrac   the local-interference variants -- legitimate coverage
+  #   network_vacdecay  curves, and arguably the most interesting ones, since
+  #                     alpha itself moves with coverage there. Add
+  #                     "|network_vacfrac|network_vacdecay" to show them.
+  #   sir_multisite, sir_*_frailty, sir_ve_hetero, sir_split_effect
+  #                     omitted only to keep the panels readable.
+  ve_cov_include <- "^(linear|sir|sir_i[0-9]+|network)$"
+
+  cov_ve <- rbindlist(lapply(ok, function(r) {
+    if (!grepl(ve_cov_include, as.character(r$model_type))) return(NULL)
+    parts <- list()
+    # Keep EVERY timepoint, not just t*. Collapsing to t* mixes the two effects
+    # that move VE in opposite directions -- less accumulated exposure early
+    # (VE nearer 1 - alpha) against a rising attack rate pushing the CIR to 1 --
+    # and the trajectory separates them.
+    if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) {
+      v <- r$ve_uncertainty[method == "full_stoch"]
+      if (nrow(v) && is.finite(r$design_coverage %||% NA_real_))
+        parts[[length(parts) + 1L]] <- copy(v)[, coverage := r$design_coverage]
+    }
+    if (!is.null(r$ve_by_coverage) && nrow(r$ve_by_coverage)) {
+      v <- r$ve_by_coverage[method == "full_stoch"]
+      if (nrow(v)) parts[[length(parts) + 1L]] <- v
+    }
+    if (!length(parts)) return(NULL)
+    d <- rbindlist(parts, fill = TRUE)
+    if (!("param_sample" %in% names(d))) d[, param_sample := 1L]
+    a <- d[, .(VE  = mean(1 - eate, na.rm = TRUE),
+               AVE = if ("ave" %in% names(d)) mean(ave, na.rm = TRUE)
+                     else NA_real_),
+           by = .(coverage, t, param_sample)]
+    data.table(group = labels_L3_pool_nets(r), a)
+  }), fill = TRUE)
+
+  # Declared out here so the combined figure below can use them whether or not
+  # the standalone coverage figures were drawn.
+  cov_sum <- NULL; cov_sum_t <- NULL; design_cov <- NA_real_
+
+  # Only worth drawing if some job actually carries other coverages: with just
+  # the design point every model collapses to a single dot.
+  if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
+    sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
+    # Whether the earliest timepoint is usable depends on how the counterfactual
+    # was built, so ASK the results rather than assuming.
+    #
+    # Under a frozen counterfactual .cum_trapz's first row is 0, so at
+    # t = min(t) the cumulative FOI is zero and the contrast collapses to
+    #     VE = 1 - (N_vac / N_unvac) * CIR
+    # -- not the arm ratio, because the group sizes do not cancel once coverage
+    # is swept. At 10% coverage with CIR = 0.4 that is 1 - (1/9)(0.4) = 0.956,
+    # i.e. a spurious ~96% VE; at 90% it is about -2.6 and vanishes under the
+    # [0, 1] crop. Re-simulated results have no such point and keep it, which is
+    # where VE sits nearest 1 - alpha.
+    #
+    # Results predating ve_cf_method carry no marker and are treated as frozen.
+    cf_methods <- unlist(lapply(ok, function(r) r$ve_cf_method %||% NA_character_))
+    all_resim  <- length(cf_methods) > 0 && all(!is.na(cf_methods) &
+                                                cf_methods == "resim")
+    t_first  <- min(cov_ve$t, na.rm = TRUE)
+    cov_ve_t <- if (all_resim) cov_ve else cov_ve[t > t_first]
+    if (!all_resim)
+      message(glue("  note: dropping t = {t_first} from the VE(t) panels -- ",
+                   "these results were made with a frozen counterfactual ",
+                   "(or predate the marker), whose first timepoint is ",
+                   "degenerate. Re-run the array to keep it."))
+    cov_sum_t <- cov_ve_t[, .(n     = .N,
+                              VE    = mean(VE, na.rm = TRUE),
+                              VE_lo = mean(VE, na.rm = TRUE) - z_ci * sd0(VE),
+                              VE_hi = mean(VE, na.rm = TRUE) + z_ci * sd0(VE)),
+                          by = .(group, coverage, t)][order(group, coverage, t)]
+
+    cov_ve <- cov_ve[t == t_star_ve]          # the at-t* view for the first plot
+    cov_sum <- cov_ve[, .(n      = .N,
+                          VE     = mean(VE,  na.rm = TRUE),
+                          VE_lo  = mean(VE,  na.rm = TRUE) - z_ci * sd0(VE),
+                          VE_hi  = mean(VE,  na.rm = TRUE) + z_ci * sd0(VE),
+                          AVE    = mean(AVE, na.rm = TRUE),
+                          AVE_lo = mean(AVE, na.rm = TRUE) - z_ci * sd0(AVE),
+                          AVE_hi = mean(AVE, na.rm = TRUE) + z_ci * sd0(AVE)),
+                      by = .(group, coverage)][order(group, coverage)]
+    fwrite(cov_sum, file.path(out_dir, "ve_by_coverage.csv"))
+
+    cov_sum[, grp := factor(as.character(group),
+                            levels = unique(as.character(group)[
+                              order(sapply(group, order_key))]))]
+    # Dashed marker only when every job shares one design coverage; with a mix
+    # a single line would be wrong.
+    dc <- unique(unlist(lapply(ok, function(r) r$design_coverage %||% NA_real_)))
+    dc <- dc[is.finite(dc)]
+    if (length(dc) == 1L) design_cov <- dc
+
+    p_cov <- ggplot(cov_sum, aes(coverage, VE, colour = grp, fill = grp)) +
+      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      geom_point(size = 1.9) +
+      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
+      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
+      scale_x_continuous(labels = scales::percent) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid.minor = element_blank(),
+            legend.position  = "bottom",
+            legend.text      = element_text(size = 9)) +
+      labs(x = "vaccine coverage", y = glue("VE = 1 - EATE  (t = {t_star_ve})"),
+           title = "VE implied by each fitted model at other coverage levels",
+           subtitle = glue("fitted parameters transported, not refitted; ",
+                           "{ci_pct}% interval over posterior draws and jobs"))
+    if (length(dc) == 1L)
+      p_cov <- p_cov +
+        geom_vline(xintercept = dc, linetype = "dashed", colour = "grey50") +
+        annotate("text", x = dc, y = Inf, label = "  design", hjust = 0,
+                 vjust = 1.4, size = 3, colour = "grey40")
+
+    ggsave(file.path(out_dir, "ve_by_coverage.png"), p_cov,
+           width = 9, height = 6, dpi = 140)
+    message(glue("Wrote ve_by_coverage.png ({uniqueN(cov_sum$coverage)} ",
+                 "coverage levels, {nlevels(cov_sum$grp)} model groups)"))
+
+    # VE(t), one panel per coverage. At t* the level-of-exposure effect and the
+    # saturation effect are already netted against each other; over t they
+    # separate, so this is where a model's VE can be read as it accumulates
+    # exposure rather than at one arbitrary horizon.
+    cov_sum_t[, grp := factor(as.character(group), levels = levels(cov_sum$grp))]
+    cov_sum_t[, cov_lab := factor(sprintf("coverage = %.0f%%", 100 * coverage),
+                  levels = sprintf("coverage = %.0f%%",
+                                   100 * sort(unique(coverage))))]
+    p_cov_t <- ggplot(cov_sum_t, aes(t, VE, colour = grp, fill = grp)) +
+      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      facet_wrap(~ cov_lab) +
+      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
+      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
+      theme_bw(base_size = 12) +
+      theme(panel.grid.minor = element_blank(),
+            legend.position  = "bottom",
+            legend.text      = element_text(size = 9),
+            strip.background = element_rect(fill = "grey95", colour = NA)) +
+      # coord_cartesian, not scale_y_continuous(limits=): this zooms, so the
+      # ribbons stay drawn up to the edge instead of being dropped where a bound
+      # falls outside the window.
+      coord_cartesian(ylim = c(0, 1)) +
+      labs(x = "t", y = "VE = 1 - EATE",
+           title = "VE over time, by vaccine coverage",
+           subtitle = glue("fitted parameters transported to each coverage; ",
+                           "{ci_pct}% interval; y cropped to [0, 1]"))
+    # The crop hides anything outside [0, 1], so say so rather than letting a
+    # model silently vanish from a panel.
+    n_out <- cov_sum_t[VE < 0 | VE > 1, .N]
+    if (n_out > 0)
+      message(glue("  note: {n_out} VE point(s) fall outside [0, 1] and are ",
+                   "cropped from ve_t_by_coverage.png -- ",
+                   "{paste(sort(unique(cov_sum_t[VE < 0 | VE > 1, as.character(group)])), collapse = ', ')}"))
+    nf <- uniqueN(cov_sum_t$cov_lab)
+    ggsave(file.path(out_dir, "ve_t_by_coverage.png"), p_cov_t,
+           width = min(14, 4 + 2.6 * ceiling(sqrt(nf))),
+           height = min(12, 3 + 2.4 * ceiling(nf / ceiling(sqrt(nf)))),
+           dpi = 140, limitsize = FALSE)
+    fwrite(cov_sum_t, file.path(out_dir, "ve_t_by_coverage.csv"))
+    message(glue("Wrote ve_t_by_coverage.png ({nf} coverage panels, ",
+                 "t = {min(cov_sum_t$t)}..{max(cov_sum_t$t)})"))
+  } else {
+    message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
+            "(set ve_coverages in run_fit_array.R and re-run the array).")
+  }
+
 
   # -------------------------------------------------------------------------
   # Combined 2x2 summary figure (the L3 "everything pooled per model" level)
@@ -1373,85 +1573,119 @@ if (nrow(ve_unc_long) > 0) {
 
       # B drops its y labels: cowplot aligns the two top panels row-for-row,
       # so the labels in A serve both and alpha gets the width back.
-      pA <- forest_panel(g4_ve,    glue("VE = 1 - EATE  (t = {t_star_ve})"),
+      # ---- row 1: four forests, all on the shared model-group y axis -------
+      pA <- forest_panel(g4_ve,  glue("VE = 1 - EATE  (t = {t_star_ve})"),
                          "A. VE")
-      # B shows the coverage effect when available (the policy-relevant total
+      pB <- forest_panel(g4_ave, glue("AVE  (t = {t_star_ve})"),
+                         "B. Absolute difference", show_y = FALSE)
+      # C shows the coverage effect when available (the policy-relevant total
       # effect); falls back to alpha for results predating it.
-      pB <- if (nrow(g4_cov))
-        forest_panel(g4_cov,
-                     "infections averted per 1000",
+      pC <- if (nrow(g4_cov))
+        forest_panel(g4_cov, "infections averted per 1000",
                      glue("C. Effect of +{d_cov_lab}% coverage"), show_y = FALSE)
       else
         forest_panel(g4_alpha, "alpha", "C. alpha", show_y = FALSE)
-      pC <- forest_panel(g4_ave,   glue("AVE  (t = {t_star_ve})"),
-                         "B. Absolute difference", show_y = FALSE)
 
-      # Bottom row: the same two effect measures with the FULL predictive
-      # interval, i.e. with the stochastic-realisation term folded in. Only
-      # drawn when some result carries eate_sd_rep / ave_sd_rep; without it the
-      # panels would be pixel-identical to A and C and say nothing.
-      g4_ve_p  <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "VE")
-      g4_ave_p <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "AVE")
-      have_pred <- nrow(g4_ve_p) > 0 && nrow(g4_ave_p) > 0
-
-      # Share the x range down each column so the widening from adding the
-      # realisation term is legible as a change in bar length, not hidden by
-      # each panel rescaling to fit.
-      common_x <- function(p, ...) {
-        rs <- range(unlist(lapply(list(...), function(d)
-                c(d$lo, d$hi, d$estimate))), na.rm = TRUE)
-        pad <- 0.06 * diff(rs); if (!is.finite(pad) || pad == 0) pad <- 0.01
-        # coord_cartesian, not scale_x_continuous(limits=): forest_panel has
-        # already set an x scale, and adding a second one replaces it and warns
-        # once per panel. This zooms instead, and clips nothing.
-        p + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
-      }
-
+      # D: VE again, but with the stochastic-realisation term folded into the
+      # interval. Same point estimate as A -- only the bar length differs, which
+      # is the comparison being offered. Needs eate_sd_rep, so it falls back to
+      # A's interval with a note when the results predate that.
+      g4_ve_p   <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "VE")
+      have_pred <- nrow(g4_ve_p) > 0
+      if (!have_pred)
+        message("  combined figure: no eate_sd_rep in these results, so the ",
+                "predictive VE panel repeats A (re-run the array to populate it).")
+      pD <- forest_panel(if (have_pred) g4_ve_p else g4_ve,
+                         glue("VE = 1 - EATE  (t = {t_star_ve})"),
+                         if (have_pred) "D. VE, predictive" else
+                           "D. VE (predictive term unavailable)", show_y = FALSE)
+      # A and D share an x range so the extra width reads as a longer bar
+      # rather than being hidden by each panel rescaling to fit.
       if (have_pred) {
-        pD <- forest_panel(g4_ve_p,  glue("VE = 1 - EATE  (t = {t_star_ve})"),
-                           "D. VE, predictive")
-        pE <- forest_panel(g4_ave_p, glue("AVE  (t = {t_star_ve})"),
-                           "E. Absolute difference, predictive", show_y = FALSE)
-        pA <- common_x(pA, g4_ve,  g4_ve_p)
-        pD <- common_x(pD, g4_ve,  g4_ve_p)
-        pC <- common_x(pC, g4_ave, g4_ave_p)
-        pE <- common_x(pE, g4_ave, g4_ave_p)
-        # Columns pair a quantity with its predictive version (VE left, AVE
-        # middle); the coverage effect has no realisation decomposition stored,
-        # so its column has only the top cell. A and D carry the y labels for
-        # their row, hence the wider first column.
-        grid4 <- cowplot::plot_grid(pA, pC, pB, pD, pE, NULL,
-                                    nrow = 2, ncol = 3,
-                                    align = "hv", axis = "tblr",
-                                    rel_widths = c(1.45, 1, 1))
-        w4 <- 15
-      } else {
-        message("  combined figure: no eate_sd_rep / ave_sd_rep in these ",
-                "results, so the predictive panels are omitted (re-run the ",
-                "array to populate them).")
-        grid4 <- cowplot::plot_grid(pA, pC, pB, nrow = 1, ncol = 3,
-                                    align = "h", axis = "tb",
-                                    rel_widths = c(1.45, 1, 1))
-        w4 <- 15
+        rs  <- range(c(g4_ve$lo, g4_ve$hi, g4_ve_p$lo, g4_ve_p$hi), na.rm = TRUE)
+        pad <- 0.06 * diff(rs); if (!is.finite(pad) || pad == 0) pad <- 0.01
+        # coord_cartesian, not scale_x_continuous(limits=): forest_panel already
+        # set an x scale and a second one would replace it and warn per panel.
+        pA <- pA + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
+        pD <- pD + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
       }
 
-      # No separate legend strip: A and D already name every model on their
-      # shared y-axis, so a full-width key just repeated them.
-      # Row pitch generous enough that the y labels are not crowded vertically.
+      # ---- row 2: the two trajectories, POINT ESTIMATES only ---------------
+      # No ribbons here: these are for reading shape and ordering, and six
+      # overlapping bands made that harder rather than easier. The intervals are
+      # in row 1 and in the standalone ve_by_coverage / ve_t_by_coverage figures.
+      #
+      # Note these two use the coverage-figure include list (linear, SIR,
+      # network), so row 2 shows fewer models than row 1. Widen ve_cov_include
+      # to bring the rest in.
+      traj_theme <- theme_bw(base_size = 11) +
+        theme(panel.grid.minor = element_blank(),
+              legend.position  = "none",
+              plot.title = element_text(size = 11, face = "bold",
+                                        margin = margin(b = 6)),
+              axis.text  = element_text(size = 9),
+              axis.title = element_text(size = 9),
+              plot.margin = margin(6, 12, 6, 10))
+      have_traj <- !is.null(cov_sum_t) && nrow(cov_sum_t) > 0
+      if (have_traj) {
+        lv  <- levels(cov_sum_t$grp)
+        pal <- setNames(dark2_pal(length(lv)), lv)
+        # Same display names as the forests above, so a model reads the same in
+        # both rows; the factor keys stay the raw group strings.
+        lab <- setNames(short_name(display_name(lv)), lv)
+        # VE(t) at the design coverage: one curve per model, the same slice the
+        # forests in row 1 are taken from.
+        dE <- if (is.finite(design_cov)) cov_sum_t[coverage == design_cov] else
+                cov_sum_t[coverage == sort(unique(coverage))[
+                          ceiling(uniqueN(coverage) / 2)]]
+        cov_lab_E <- sprintf("%.0f%%", 100 * dE$coverage[1])
+        pE <- ggplot(dE, aes(t, VE, colour = grp)) +
+          geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
+          scale_colour_manual(name = NULL, values = pal, labels = lab) +
+          coord_cartesian(ylim = c(0, 1)) + traj_theme +
+          labs(x = "t", y = "VE", title = glue("E. VE(t) at {cov_lab_E} coverage"))
+        pF <- ggplot(cov_sum, aes(coverage, VE, colour = grp)) +
+          geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
+          scale_colour_manual(name = NULL, values = pal, labels = lab) +
+          scale_x_continuous(labels = scales::percent) +
+          coord_cartesian(ylim = c(0, 1)) + traj_theme +
+          labs(x = "vaccine coverage", y = "VE",
+               title = glue("F. VE by coverage (t = {t_star_ve})"))
+        # One shared key for row 2, harvested from a copy with the legend on.
+        leg <- cowplot::get_plot_component(
+          pE + theme(legend.position = "bottom",
+                     legend.text = element_text(size = 9)),
+          "guide-box-bottom", return_all = TRUE)
+      }
+
+      # ---- assemble --------------------------------------------------------
+      # Row 1 is four forests; only A carries the y labels, so its column is
+      # wider. Row 2 is two wide trajectory panels over the same width.
+      row1 <- cowplot::plot_grid(pA, pB, pC, pD, nrow = 1, ncol = 4,
+                                 align = "h", axis = "tb",
+                                 rel_widths = c(1.55, 1, 1, 1))
       h4   <- max(6.5, 0.42 * length(g4_groups) + 3)
-      if (have_pred) h4 <- h4 * 1.75
+      if (have_traj) {
+        row2 <- cowplot::plot_grid(pE, pF, nrow = 1, ncol = 2,
+                                   align = "h", axis = "tb")
+        grid4 <- cowplot::plot_grid(row1, row2, leg, ncol = 1,
+                                    rel_heights = c(1, 0.78, 0.10))
+        h4 <- h4 * 1.7
+      } else {
+        message("  combined figure: no ve_by_coverage in these results, so row ",
+                "2 (VE(t), VE by coverage) is omitted.")
+        grid4 <- row1
+      }
+      w4 <- 16
       fig4 <- grid4
 
       # Filename kept stable even though the panel count changed, so existing
       # references to it (paper pipeline, earlier runs) still resolve.
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
              fig4, width = w4, height = h4, dpi = 150, limitsize = FALSE)
-      if (have_pred) {
-        fwrite(g4_ve_p,  file.path(out_dir,
+      if (have_pred)
+        fwrite(g4_ve_p, file.path(out_dir,
                glue("forest_VE_pred_t{t_star_ve}_pool_nets.csv")))
-        fwrite(g4_ave_p, file.path(out_dir,
-               glue("forest_AVE_pred_t{t_star_ve}_pool_nets.csv")))
-      }
 
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
@@ -1464,200 +1698,6 @@ if (nrow(ve_unc_long) > 0) {
     message("Skipping the combined 4-panel figure: package 'cowplot' not installed.")
   }
 
-  # -------------------------------------------------------------------------
-  # VE as a function of coverage
-  # -------------------------------------------------------------------------
-  # run_fit_array re-evaluates the design-coverage estimand at each level in
-  # cfg$ve_coverages and stores it as ve_by_coverage, tagged with `coverage`.
-  # The design coverage itself lives in ve_uncertainty, so it is spliced back in
-  # here (tagged from r$design_coverage) -- otherwise the curve would have a
-  # hole exactly where the model was fitted.
-  #
-  # Same estimand convention as the forests: collapse the INNER (fresh)
-  # allocations within each posterior draw, then pool the OUTER (per-job) ones
-  # and the K draws. So the ribbon is parameter + between-job spread, not the
-  # Monte-Carlo noise of the inner allocation average.
-  #
-  # These are the FITTED parameters transported to another coverage, not refits,
-  # which is the whole point: it shows what each model implies about coverages
-  # the trial never observed, and models that agree at the design coverage can
-  # disagree elsewhere.
-  # Which models appear in the two coverage figures. An INCLUDE list, so adding a
-  # model type to the grid does not silently add a line here.
-  #
-  # Currently the three base classes: linear, homogeneous SIR, and the plain
-  # network (which is itself several lines, one per pl_alpha, since they share
-  # model_type = "network" and are separated by labels_L3_pool_nets).
-  #
-  # The sir_i[0-9]+ alternative is load-bearing: when sir_I_inis is set, each
-  # I_ini becomes its own model "sir_i<total>" (sir_i10, sir_i20, ...) rather
-  # than plain "sir", so an exact match on "sir" silently drops every one of
-  # them. The suffix is specific enough not to catch sir_multisite,
-  # sir_*_frailty, sir_ve_hetero, sir_split_effect or sir_parity_*.
-  #
-  # Deliberately out, and what it would take to put them back:
-  #   sir_parity_*      alpha keys off the PARITY of the vaccinated count, so a
-  #                     coverage sweep walks the residue class and the curve is
-  #                     an artefact of arithmetic, not a dose-response. These
-  #                     exist for parity_ve_unbounded.R and would add saw-teeth.
-  #   network_vacfrac   the local-interference variants -- legitimate coverage
-  #   network_vacdecay  curves, and arguably the most interesting ones, since
-  #                     alpha itself moves with coverage there. Add
-  #                     "|network_vacfrac|network_vacdecay" to show them.
-  #   sir_multisite, sir_*_frailty, sir_ve_hetero, sir_split_effect
-  #                     omitted only to keep the panels readable.
-  ve_cov_include <- "^(linear|sir|sir_i[0-9]+|network)$"
-
-  cov_ve <- rbindlist(lapply(ok, function(r) {
-    if (!grepl(ve_cov_include, as.character(r$model_type))) return(NULL)
-    parts <- list()
-    # Keep EVERY timepoint, not just t*. Collapsing to t* mixes the two effects
-    # that move VE in opposite directions -- less accumulated exposure early
-    # (VE nearer 1 - alpha) against a rising attack rate pushing the CIR to 1 --
-    # and the trajectory separates them.
-    if (!is.null(r$ve_uncertainty) && nrow(r$ve_uncertainty)) {
-      v <- r$ve_uncertainty[method == "full_stoch"]
-      if (nrow(v) && is.finite(r$design_coverage %||% NA_real_))
-        parts[[length(parts) + 1L]] <- copy(v)[, coverage := r$design_coverage]
-    }
-    if (!is.null(r$ve_by_coverage) && nrow(r$ve_by_coverage)) {
-      v <- r$ve_by_coverage[method == "full_stoch"]
-      if (nrow(v)) parts[[length(parts) + 1L]] <- v
-    }
-    if (!length(parts)) return(NULL)
-    d <- rbindlist(parts, fill = TRUE)
-    if (!("param_sample" %in% names(d))) d[, param_sample := 1L]
-    a <- d[, .(VE  = mean(1 - eate, na.rm = TRUE),
-               AVE = if ("ave" %in% names(d)) mean(ave, na.rm = TRUE)
-                     else NA_real_),
-           by = .(coverage, t, param_sample)]
-    data.table(group = labels_L3_pool_nets(r), a)
-  }), fill = TRUE)
-
-  # Only worth drawing if some job actually carries other coverages: with just
-  # the design point every model collapses to a single dot.
-  if (nrow(cov_ve) && uniqueN(cov_ve$coverage) > 1L) {
-    sd0 <- function(x) { s <- sd(x, na.rm = TRUE); if (is.finite(s)) s else 0 }
-    # Whether the earliest timepoint is usable depends on how the counterfactual
-    # was built, so ASK the results rather than assuming.
-    #
-    # Under a frozen counterfactual .cum_trapz's first row is 0, so at
-    # t = min(t) the cumulative FOI is zero and the contrast collapses to
-    #     VE = 1 - (N_vac / N_unvac) * CIR
-    # -- not the arm ratio, because the group sizes do not cancel once coverage
-    # is swept. At 10% coverage with CIR = 0.4 that is 1 - (1/9)(0.4) = 0.956,
-    # i.e. a spurious ~96% VE; at 90% it is about -2.6 and vanishes under the
-    # [0, 1] crop. Re-simulated results have no such point and keep it, which is
-    # where VE sits nearest 1 - alpha.
-    #
-    # Results predating ve_cf_method carry no marker and are treated as frozen.
-    cf_methods <- unlist(lapply(ok, function(r) r$ve_cf_method %||% NA_character_))
-    all_resim  <- length(cf_methods) > 0 && all(!is.na(cf_methods) &
-                                                cf_methods == "resim")
-    t_first  <- min(cov_ve$t, na.rm = TRUE)
-    cov_ve_t <- if (all_resim) cov_ve else cov_ve[t > t_first]
-    if (!all_resim)
-      message(glue("  note: dropping t = {t_first} from the VE(t) panels -- ",
-                   "these results were made with a frozen counterfactual ",
-                   "(or predate the marker), whose first timepoint is ",
-                   "degenerate. Re-run the array to keep it."))
-    cov_sum_t <- cov_ve_t[, .(n     = .N,
-                              VE    = mean(VE, na.rm = TRUE),
-                              VE_lo = mean(VE, na.rm = TRUE) - z_ci * sd0(VE),
-                              VE_hi = mean(VE, na.rm = TRUE) + z_ci * sd0(VE)),
-                          by = .(group, coverage, t)][order(group, coverage, t)]
-
-    cov_ve <- cov_ve[t == t_star_ve]          # the at-t* view for the first plot
-    cov_sum <- cov_ve[, .(n      = .N,
-                          VE     = mean(VE,  na.rm = TRUE),
-                          VE_lo  = mean(VE,  na.rm = TRUE) - z_ci * sd0(VE),
-                          VE_hi  = mean(VE,  na.rm = TRUE) + z_ci * sd0(VE),
-                          AVE    = mean(AVE, na.rm = TRUE),
-                          AVE_lo = mean(AVE, na.rm = TRUE) - z_ci * sd0(AVE),
-                          AVE_hi = mean(AVE, na.rm = TRUE) + z_ci * sd0(AVE)),
-                      by = .(group, coverage)][order(group, coverage)]
-    fwrite(cov_sum, file.path(out_dir, "ve_by_coverage.csv"))
-
-    cov_sum[, grp := factor(as.character(group),
-                            levels = unique(as.character(group)[
-                              order(sapply(group, order_key))]))]
-    # Dashed marker only when every job shares one design coverage; with a mix
-    # a single line would be wrong.
-    dc <- unique(unlist(lapply(ok, function(r) r$design_coverage %||% NA_real_)))
-    dc <- dc[is.finite(dc)]
-
-    p_cov <- ggplot(cov_sum, aes(coverage, VE, colour = grp, fill = grp)) +
-      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
-      geom_line(linewidth = 0.9) +
-      geom_point(size = 1.9) +
-      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
-      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum$grp))) +
-      scale_x_continuous(labels = scales::percent) +
-      theme_bw(base_size = 12) +
-      theme(panel.grid.minor = element_blank(),
-            legend.position  = "bottom",
-            legend.text      = element_text(size = 9)) +
-      labs(x = "vaccine coverage", y = glue("VE = 1 - EATE  (t = {t_star_ve})"),
-           title = "VE implied by each fitted model at other coverage levels",
-           subtitle = glue("fitted parameters transported, not refitted; ",
-                           "{ci_pct}% interval over posterior draws and jobs"))
-    if (length(dc) == 1L)
-      p_cov <- p_cov +
-        geom_vline(xintercept = dc, linetype = "dashed", colour = "grey50") +
-        annotate("text", x = dc, y = Inf, label = "  design", hjust = 0,
-                 vjust = 1.4, size = 3, colour = "grey40")
-
-    ggsave(file.path(out_dir, "ve_by_coverage.png"), p_cov,
-           width = 9, height = 6, dpi = 140)
-    message(glue("Wrote ve_by_coverage.png ({uniqueN(cov_sum$coverage)} ",
-                 "coverage levels, {nlevels(cov_sum$grp)} model groups)"))
-
-    # VE(t), one panel per coverage. At t* the level-of-exposure effect and the
-    # saturation effect are already netted against each other; over t they
-    # separate, so this is where a model's VE can be read as it accumulates
-    # exposure rather than at one arbitrary horizon.
-    cov_sum_t[, grp := factor(as.character(group), levels = levels(cov_sum$grp))]
-    cov_sum_t[, cov_lab := factor(sprintf("coverage = %.0f%%", 100 * coverage),
-                  levels = sprintf("coverage = %.0f%%",
-                                   100 * sort(unique(coverage))))]
-    p_cov_t <- ggplot(cov_sum_t, aes(t, VE, colour = grp, fill = grp)) +
-      geom_ribbon(aes(ymin = VE_lo, ymax = VE_hi), alpha = 0.15, colour = NA) +
-      geom_line(linewidth = 0.9) +
-      facet_wrap(~ cov_lab) +
-      scale_colour_manual(name = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
-      scale_fill_manual(name   = NULL, values = dark2_pal(nlevels(cov_sum_t$grp))) +
-      theme_bw(base_size = 12) +
-      theme(panel.grid.minor = element_blank(),
-            legend.position  = "bottom",
-            legend.text      = element_text(size = 9),
-            strip.background = element_rect(fill = "grey95", colour = NA)) +
-      # coord_cartesian, not scale_y_continuous(limits=): this zooms, so the
-      # ribbons stay drawn up to the edge instead of being dropped where a bound
-      # falls outside the window.
-      coord_cartesian(ylim = c(0, 1)) +
-      labs(x = "t", y = "VE = 1 - EATE",
-           title = "VE over time, by vaccine coverage",
-           subtitle = glue("fitted parameters transported to each coverage; ",
-                           "{ci_pct}% interval; y cropped to [0, 1]"))
-    # The crop hides anything outside [0, 1], so say so rather than letting a
-    # model silently vanish from a panel.
-    n_out <- cov_sum_t[VE < 0 | VE > 1, .N]
-    if (n_out > 0)
-      message(glue("  note: {n_out} VE point(s) fall outside [0, 1] and are ",
-                   "cropped from ve_t_by_coverage.png -- ",
-                   "{paste(sort(unique(cov_sum_t[VE < 0 | VE > 1, as.character(group)])), collapse = ', ')}"))
-    nf <- uniqueN(cov_sum_t$cov_lab)
-    ggsave(file.path(out_dir, "ve_t_by_coverage.png"), p_cov_t,
-           width = min(14, 4 + 2.6 * ceiling(sqrt(nf))),
-           height = min(12, 3 + 2.4 * ceiling(nf / ceiling(sqrt(nf)))),
-           dpi = 140, limitsize = FALSE)
-    fwrite(cov_sum_t, file.path(out_dir, "ve_t_by_coverage.csv"))
-    message(glue("Wrote ve_t_by_coverage.png ({nf} coverage panels, ",
-                 "t = {min(cov_sum_t$t)}..{max(cov_sum_t$t)})"))
-  } else {
-    message("Skipping ve_by_coverage: no results carry ve_by_coverage ",
-            "(set ve_coverages in run_fit_array.R and re-run the array).")
-  }
 
   # Final-time VE per model with the two CIs
   ve_unc_final <- bands[t == max(t)]
@@ -1683,7 +1723,16 @@ for (exp_id in experiments_present) {
   exp_out_dir <- file.path(out_dir, exp_id)
   tryCatch(
     analyse_one_experiment(ok_exp, exp_out_dir),
-    error = function(e) message("Error in experiment ", exp_id, ": ", conditionMessage(e))
+    # Report the failing CALL as well as the message. data.table errors in
+    # particular ("Check that is.data.table(DT) == TRUE ...") say nothing about
+    # which of the dozens of := sites raised them, and one experiment failing
+    # should not cost a bisect through the whole script.
+    error = function(e) {
+      message("Error in experiment ", exp_id, ": ", conditionMessage(e))
+      cl <- conditionCall(e)
+      if (!is.null(cl))
+        message("  call: ", paste(deparse(cl), collapse = " "))
+    }
   )
 }
 message("\nAll experiments done.")
