@@ -86,6 +86,17 @@ dark2_pal <- function(n) {
   else colorRampPalette(brewer.pal(8L, "Dark2"))(n)
 }
 
+# Padded data range, clamped to [0, 1]. The VE panels were being drawn on the
+# full unit interval with the lines occupying a third of it, which flattens every
+# difference worth seeing. This zooms to what is actually there while never
+# implying values outside [0, 1].
+ylim_snug <- function(..., pad = 0.08, lo = 0, hi = 1) {
+  v <- unlist(list(...)); v <- v[is.finite(v)]
+  if (!length(v)) return(c(lo, hi))
+  r <- range(v); d <- diff(r); if (d <= 0) d <- 0.05
+  c(max(lo, r[1] - pad * d), min(hi, r[2] + pad * d))
+}
+
 # For sir_split_effect the FITTED alpha is compartment A's vaccinated
 # susceptibility; B's is split_alpha_prod / alpha. Report a population average
 # over the two compartments, applied elementwise to the posterior DRAWS (not to
@@ -1262,34 +1273,19 @@ if (nrow(ve_unc_long) > 0) {
   # which is the whole point: it shows what each model implies about coverages
   # the trial never observed, and models that agree at the design coverage can
   # disagree elsewhere.
-  # Which models appear in the two coverage figures. An INCLUDE list, so adding a
-  # model type to the grid does not silently add a line here.
+  # Which models appear in the coverage figures (and so in row 2 of the
+  # combined one). Everything EXCEPT parity.
   #
-  # Currently the three base classes: linear, homogeneous SIR, and the plain
-  # network (which is itself several lines, one per pl_alpha, since they share
-  # model_type = "network" and are separated by labels_L3_pool_nets).
-  #
-  # The sir_i[0-9]+ alternative is load-bearing: when sir_I_inis is set, each
-  # I_ini becomes its own model "sir_i<total>" (sir_i10, sir_i20, ...) rather
-  # than plain "sir", so an exact match on "sir" silently drops every one of
-  # them. The suffix is specific enough not to catch sir_multisite,
-  # sir_*_frailty, sir_ve_hetero, sir_split_effect or sir_parity_*.
-  #
-  # Deliberately out, and what it would take to put them back:
-  #   sir_parity_*      alpha keys off the PARITY of the vaccinated count, so a
-  #                     coverage sweep walks the residue class and the curve is
-  #                     an artefact of arithmetic, not a dose-response. These
-  #                     exist for parity_ve_unbounded.R and would add saw-teeth.
-  #   network_vacfrac   the local-interference variants -- legitimate coverage
-  #   network_vacdecay  curves, and arguably the most interesting ones, since
-  #                     alpha itself moves with coverage there. Add
-  #                     "|network_vacfrac|network_vacdecay" to show them.
-  #   sir_multisite, sir_*_frailty, sir_ve_hetero, sir_split_effect
-  #                     omitted only to keep the panels readable.
-  ve_cov_include <- "^(linear|sir|sir_i[0-9]+|network)$"
+  # Parity is the one model a coverage sweep cannot say anything sensible about:
+  # its alpha keys off the PARITY of the vaccinated count, so moving coverage
+  # walks the residue class and the curve is an artefact of arithmetic rather
+  # than a dose-response. It exists to show the CIR-VE gap is unbounded
+  # (parity_ve_unbounded.R), which is a different figure. Prefix match, because
+  # each spec in parity_specs becomes its own model_type, "sir_parity_<tag>".
+  ve_cov_exclude <- "^sir_parity"
 
   cov_ve <- rbindlist(lapply(ok, function(r) {
-    if (!grepl(ve_cov_include, as.character(r$model_type))) return(NULL)
+    if (grepl(ve_cov_exclude, as.character(r$model_type))) return(NULL)
     parts <- list()
     # Keep EVERY timepoint, not just t*. Collapsing to t* mixes the two effects
     # that move VE in opposite directions -- less accumulated exposure early
@@ -1418,12 +1414,12 @@ if (nrow(ve_unc_long) > 0) {
             strip.background = element_rect(fill = "grey95", colour = NA)) +
       # coord_cartesian, not scale_y_continuous(limits=): this zooms, so the
       # ribbons stay drawn up to the edge instead of being dropped where a bound
-      # falls outside the window.
-      coord_cartesian(ylim = c(0, 1)) +
+      # falls outside the window. Limits follow the data (clamped to [0, 1]).
+      coord_cartesian(ylim = ylim_snug(cov_sum_t$VE_lo, cov_sum_t$VE_hi)) +
       labs(x = "t", y = "VE = 1 - EATE",
            title = "VE over time, by vaccine coverage",
            subtitle = glue("fitted parameters transported to each coverage; ",
-                           "{ci_pct}% interval; y cropped to [0, 1]"))
+                           "{ci_pct}% interval"))
     # The crop hides anything outside [0, 1], so say so rather than letting a
     # model silently vanish from a panel.
     n_out <- cov_sum_t[VE < 0 | VE > 1, .N]
@@ -1615,9 +1611,8 @@ if (nrow(ve_unc_long) > 0) {
       # overlapping bands made that harder rather than easier. The intervals are
       # in row 1 and in the standalone ve_by_coverage / ve_t_by_coverage figures.
       #
-      # Note these two use the coverage-figure include list (linear, SIR,
-      # network), so row 2 shows fewer models than row 1. Widen ve_cov_include
-      # to bring the rest in.
+      # Row 2 carries every model row 1 does except parity, which a coverage
+      # sweep cannot describe (see ve_cov_exclude above).
       traj_theme <- theme_bw(base_size = 11) +
         theme(panel.grid.minor = element_blank(),
               legend.position  = "none",
@@ -1639,16 +1634,19 @@ if (nrow(ve_unc_long) > 0) {
                 cov_sum_t[coverage == sort(unique(coverage))[
                           ceiling(uniqueN(coverage) / 2)]]
         cov_lab_E <- sprintf("%.0f%%", 100 * dE$coverage[1])
+        # One range across BOTH panels, so a difference in E is the same
+        # vertical distance as the same difference in F.
+        yl <- ylim_snug(dE$VE, cov_sum$VE)
         pE <- ggplot(dE, aes(t, VE, colour = grp)) +
           geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
-          coord_cartesian(ylim = c(0, 1)) + traj_theme +
+          coord_cartesian(ylim = yl) + traj_theme +
           labs(x = "t", y = "VE", title = glue("E. VE(t) at {cov_lab_E} coverage"))
         pF <- ggplot(cov_sum, aes(coverage, VE, colour = grp)) +
           geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
           scale_x_continuous(labels = scales::percent) +
-          coord_cartesian(ylim = c(0, 1)) + traj_theme +
+          coord_cartesian(ylim = yl) + traj_theme +
           labs(x = "vaccine coverage", y = "VE",
                title = glue("F. VE by coverage (t = {t_star_ve})"))
         # One shared key for row 2, harvested from a copy with the legend on.
