@@ -27,6 +27,15 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 # narrower, less jittery bands than 0.95: absolute wobble scales with z,
 # so 80% cuts it ~35% (z 1.28 vs 1.96), and the endpoints sit in the bulk
 # where the mean +/- z*SD Gaussian approximation holds best.
+# A fit whose reachable mean sits this far (Mahalanobis, ~chi-square_2) from the
+# observed data is treated as a genuine misfit: the configuration is excluded BY
+# the data, at very low likelihood, so carrying its "estimate" into the figures
+# reports a number the model cannot actually produce. 6 is roughly the 95th
+# percentile of chi-square_2 (5.99).
+misfit_chisq_cut <- 6
+# FALSE keeps misfits in the figures, flagged but not removed.
+drop_misfits     <- TRUE
+
 ci_level  <- 0.80
 z_ci      <- qnorm(0.5 + ci_level / 2)     # 1.2816 at 80%, 1.96 at 95%
 q_lo      <- (1 - ci_level) / 2            # 0.10 at 80%
@@ -337,7 +346,8 @@ fit_dt[, alpha_hi := alpha + z_ci * sd_alpha]
 fit_dt[, loss_ratio := loss / loss_floor]
 # NA (not FALSE) when chisq is unavailable (e.g. legacy results), so old
 # fits aren't miscounted as misfits.
-fit_dt[, acceptable := fifelse(is.finite(loss_chisq), loss_chisq <= 6, NA)]
+fit_dt[, acceptable := fifelse(is.finite(loss_chisq),
+                               loss_chisq <= misfit_chisq_cut, NA)]
 
 fwrite(fit_dt, file.path(out_dir, "fit_summary.csv"))
 message("\n=== Fit diagnostics ===")
@@ -351,10 +361,38 @@ print(fit_dt[, .(med_loss     = round(median(loss), 3),
              by = model_type])
 n_bad <- sum(!fit_dt$acceptable, na.rm = TRUE)
 if (n_bad > 0) {
-  message(glue("\n{n_bad} fit(s) with loss_chisq > 6 (genuine misfit):"))
+  message(glue("\n{n_bad} fit(s) with loss_chisq > {misfit_chisq_cut} ",
+               "(genuine misfit):"))
   print(fit_dt[!(acceptable), .(name, loss, loss_floor,
                                 loss_chisq = round(loss_chisq, 2))][
                                 order(-loss_chisq)][seq_len(min(.N, 20))])
+}
+
+# Drop the misfits from everything downstream. A configuration whose reachable
+# mean is that far from the data is ruled out by the data; its fitted parameters
+# are wherever the optimiser stopped, usually against a bound, and its "VE" is
+# that bound rather than an estimate. Reporting it alongside fits that do
+# describe the data invites reading it as a competing answer.
+#
+# Dropped AFTER the diagnostics above, so the run still says what was discarded
+# and why. loss_chisq = NA (legacy results) is kept: unjudgeable, not bad. If
+# every job in an experiment would go, none are -- that is a signal about the
+# data or the threshold, not something to silently turn into an empty report.
+if (drop_misfits) {
+  bad <- fit_dt[is.finite(loss_chisq) & loss_chisq > misfit_chisq_cut, name]
+  if (length(bad) && length(bad) < length(ok)) {
+    keep <- vapply(ok, function(r) !(as.character(r$name) %in% bad), logical(1))
+    message(glue("\nDropping {sum(!keep)} misfitting job(s) from the figures ",
+                 "and tables (loss_chisq > {misfit_chisq_cut}); ",
+                 "{sum(keep)} of {length(ok)} kept."))
+    gone <- fit_dt[name %in% bad, .N, by = model_type][order(-N)]
+    if (nrow(gone)) print(gone[, .(model_type, n_dropped = N)])
+    ok <- ok[keep]
+  } else if (length(bad)) {
+    message(glue("\nAll {length(bad)} job(s) here are misfits ",
+                 "(loss_chisq > {misfit_chisq_cut}) -- keeping them rather than ",
+                 "producing an empty report. Check the data or the threshold."))
+  }
 }
 
 # Network fit breakdown by Pareto exponent: tells apart the misfit causes.

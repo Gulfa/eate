@@ -38,7 +38,8 @@ mkrows <- function(base, covv = NULL) {
   d[]
 }
 
-mkjob <- function(nm, mt, pa = NULL, base = 0.5, net_seed = NULL, alloc = 1L) {
+mkjob <- function(nm, mt, pa = NULL, base = 0.5, net_seed = NULL, alloc = 1L,
+                  chisq = 1.2) {
   list(name = nm, experiment_id = "expT", model_type = mt, fit_method = "kernel",
        pl_alpha = pa, network_seed = net_seed, allocation_seed = alloc,
        network_engine = if (identical(mt, "network")) "events" else NA_character_,
@@ -53,7 +54,7 @@ mkjob <- function(nm, mt, pa = NULL, base = 0.5, net_seed = NULL, alloc = 1L) {
        posterior_cov = list(cov = diag(2), J = NULL, Sigma = NULL,
                             sd = c(beta = 0.1, alpha = 0.02)),
        grid_post = NULL, design_coverage = 0.5,
-       loss_floor = 0.4, loss_chisq = 1.2, resid_C1 = 2, resid_C2 = -1,
+       loss_floor = 0.4, loss_chisq = chisq, resid_C1 = 2, resid_C2 = -1,
        ve = { d <- mkrows(base); d[, model := mt]; d[] },
        ve_uncertainty = mkrows(base),
        ve_by_coverage = rbindlist(lapply(c(0.25, 0.75), function(f)
@@ -69,7 +70,10 @@ jobs <- list(
   mkjob("expT__net14_n1",  "network", pa = 1.4, base = 0.52, net_seed = 1L),
   mkjob("expT__net14_n2",  "network", pa = 1.4, base = 0.51, net_seed = 2L),
   mkjob("expT__net3_n1",   "network", pa = 3,   base = 0.47, net_seed = 1L),
+  mkjob("expT__net5_bad",  "network", pa = 5,   base = 0.60, net_seed = 1L,
+        chisq = 14.2),
   mkjob("expT__ms",        "sir_multisite", base = 0.45),
+  mkjob("expT__ms_bad",    "sir_multisite", base = 0.66, alloc = 2L, chisq = 9.1),
   mkjob("expT__par",       "sir_parity_m2", base = 0.30))
 
 dir.create("output/_fake_res", recursive = TRUE, showWarnings = FALSE)

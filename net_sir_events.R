@@ -98,7 +98,8 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
                                      n_sim = 100, seed = NULL, k_mean = 6,
                                      cores = 1L, adj = NULL, c_ij = NULL,
                                      count_seeds = FALSE,
-                                     return_times = FALSE) {
+                                     return_times = FALSE,
+                                     random_seeds = TRUE) {
   net_sir_compile()
   if (is.null(csr)) {
     if (is.null(adj) && is.null(c_ij))
@@ -114,7 +115,24 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
   sus <- if (length(susceptibility) == n) as.numeric(susceptibility) else {
     s0 <- rep(susceptibility[1], n); s0[vac] <- susceptibility[2]; s0 }
   tr  <- if (is.null(transmissibility)) rep(1, n) else transmissibility
-  seeds <- seq_len(min(I_ini, n)) - 1L        # matches run_stoch_network's I_ini
+  # Index cases. random_seeds = TRUE draws I_ini distinct nodes afresh in EVERY
+  # realisation (in C++, from that realisation's own stream). The alternative --
+  # and what this did originally -- is to seed the first I_ini nodes, the same
+  # ones every time, which makes the whole outbreak conditional on whether those
+  # particular nodes happen to be hubs. On a heavy-tailed graph that dominates:
+  # diag_seed_fizzle.R found P(no epidemic) running from 0.44 to 0.69 across
+  # four networks at I_ini = 3, and at I_ini = 1 two of four networks never took
+  # off at all. Randomising makes the fizzle probability a property of the
+  # structure rather than of node ordering.
+  #
+  # Reproducibility is unaffected: the draw uses the per-realisation stream
+  # keyed on the realisation index, so it is independent of thread count, and
+  # two calls sharing `seed` draw the same index cases -- which is what the
+  # re-simulated counterfactual needs, since it pairs a factual and a flipped
+  # run under CRN.
+  seeds <- if (isTRUE(random_seeds)) integer(0)
+           else seq_len(min(I_ini, n)) - 1L   # matches run_stoch_network's I_ini
+  n_seed_draw <- if (isTRUE(random_seeds)) as.integer(min(I_ini, n)) else 0L
   # An unset seed must still move with the ambient RNG, or every call in a
   # fit would reuse one stream; drawing it here also keeps set.seed() control.
   if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1L)
@@ -124,11 +142,16 @@ run_stoch_network_events <- function(beta, N, susceptibility = c(1, 1),
     susceptibility = as.numeric(sus), transmissibility = as.numeric(tr),
     beta = as.numeric(N * beta / k_mean), gamma = as.numeric(gamma),
     t_max = as.numeric(max(timepoints)),
-    seeds = as.integer(seeds), n_sim = as.integer(n_sim),
+    seeds = as.integer(seeds), n_seed = n_seed_draw, n_sim = as.integer(n_sim),
     seed = as.integer(seed), n_threads = as.integer(cores))
 
-  if (!count_seeds && length(seeds))
-    inf[, seeds + 1L] <- Inf
+  # Drop the index cases from the counts. With random seeding R does not know
+  # which nodes were chosen in each realisation, but it does not need to: a seed
+  # is infected at exactly t = 0, and every transmission time is continuous and
+  # strictly positive, so inf == 0 identifies the seeds and nothing else.
+  if (!count_seeds) {
+    if (length(seeds)) inf[, seeds + 1L] <- Inf else inf[inf == 0] <- Inf
+  }
 
   # Raw [n_sim, n] infection times: what a per-individual analysis (the EATE)
   # needs, since P_i(t) = mean(inf[, i] <= t). Aggregating to C1/C2 here would

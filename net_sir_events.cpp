@@ -53,7 +53,7 @@ void one_sim(const int n,
              const std::vector<int>& nbr, const std::vector<int>& ptr,
              const std::vector<double>& sus, const std::vector<double>& trans,
              const double beta, const double gamma, const double t_max,
-             const std::vector<int>& seeds,
+             const std::vector<int>& seeds, const int n_seed,
              std::mt19937_64& rng,
              std::vector<double>& inf, std::vector<char>& done) {
   const double INF = std::numeric_limits<double>::infinity();
@@ -64,7 +64,30 @@ void one_sim(const int n,
 
   const double base = beta / static_cast<double>(n);   // matches foi's 1/N_total
 
-  for (int s : seeds) if (s >= 0 && s < n) pq.push(Ev{0.0, s});
+  // Index cases. An explicit `seeds` vector is used as given -- the same nodes
+  // in every realisation. Otherwise n_seed distinct nodes are drawn uniformly
+  // for THIS realisation, from its own stream, so the draw is reproducible and
+  // independent of thread count, and two runs sharing a `seed` (CRN, as the
+  // re-simulated counterfactual relies on) get the same index cases.
+  if (!seeds.empty()) {
+    for (int s : seeds) if (s >= 0 && s < n) pq.push(Ev{0.0, s});
+  } else if (n_seed > 0) {
+    const int want = std::min(n_seed, n);
+    std::uniform_int_distribution<int> pick(0, n - 1);
+    std::vector<int> chosen;
+    chosen.reserve(want);
+    // Rejection sampling: want << n in every configuration here, so the
+    // expected number of retries is negligible. The guard only stops a
+    // pathological case from spinning.
+    long guard = 0, cap = 1000L * want + 1000L;
+    while (static_cast<int>(chosen.size()) < want && guard++ < cap) {
+      const int s = pick(rng);
+      if (std::find(chosen.begin(), chosen.end(), s) == chosen.end()) {
+        chosen.push_back(s);
+        pq.push(Ev{0.0, s});
+      }
+    }
+  }
 
   while (!pq.empty()) {
     const Ev e = pq.top(); pq.pop();
@@ -98,7 +121,8 @@ doubles_matrix<> net_sir_event_times(int n,
                                      doubles susceptibility,
                                      doubles transmissibility,
                                      double beta, double gamma, double t_max,
-                                     integers seeds, int n_sim, int seed,
+                                     integers seeds, int n_seed,
+                                     int n_sim, int seed,
                                      int n_threads) {
   const std::vector<int>    v_nbr(nbr.begin(), nbr.end());
   const std::vector<int>    v_ptr(ptr.begin(), ptr.end());
@@ -120,8 +144,8 @@ doubles_matrix<> net_sir_event_times(int n,
     std::vector<char>   done(n);
     std::mt19937_64 rng(static_cast<uint64_t>(seed) * 1000003ULL +
                         static_cast<uint64_t>(s) * 7919ULL + 1ULL);
-    one_sim(n, v_nbr, v_ptr, v_sus, v_tr, beta, gamma, t_max, v_seed, rng,
-            inf, done);
+    one_sim(n, v_nbr, v_ptr, v_sus, v_tr, beta, gamma, t_max, v_seed, n_seed,
+            rng, inf, done);
     std::copy(inf.begin(), inf.end(), buf.begin() + static_cast<size_t>(s) * n);
   }
 
