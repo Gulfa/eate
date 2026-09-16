@@ -525,7 +525,8 @@ summarise_ve_by <- function(ok, group_fn, t_target) {
     #
     # What survives: parameter uncertainty across the K draws, plus the
     # between-outer-allocation (and network) spread once jobs are pooled.
-    # summarise_pred_by keeps the inner scatter deliberately.
+    # The inner scatter is Monte-Carlo error in estimating that expectation, so
+    # it is averaged away here rather than reported as uncertainty.
     a <- if ("param_sample" %in% names(v))
            v[, .(VE = mean(1 - eate, na.rm = TRUE)), by = param_sample]
          else data.table(VE = mean(1 - v$eate, na.rm = TRUE))
@@ -579,46 +580,6 @@ summarise_ave_by <- function(ok, group_fn, t_target) {
   # came back empty and it contributes only a point estimate. Leaving the
   # interval NA makes geom_errorbarh drop the row silently, so the model
   # appears to have no estimate at all; show the point instead.
-  s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
-  s[order(sapply(group, order_key))]
-}
-
-# PREDICTIVE interval -- the deliberately un-collapsed counterpart to
-# summarise_ve_by / summarise_ave_by. Those estimate an expectation over
-# allocations, so they average the INNER (fresh) allocations away and keep only
-# the OUTER ones pooled. This one keeps the inner scatter too, because the
-# question is not "how well do we know E_alloc[VE]" but "how spread out is the
-# VE we would actually see". On top of that it adds the stochastic realisations,
-# which the EATE functions integrate out before forming the contrast. Those that can supply it report the
-# within-allocation spread across replicates as eate_sd_rep / ave_sd_rep, and
-# the two combine in quadrature:
-#   sd_predfull^2 = sd(pooled draws)^2 + mean(sd_rep^2)
-# Variances average, SDs do not, hence the root-mean-square on the rep term.
-# Returns an empty table when no result carries the columns, so the caller can
-# drop the panel rather than draw one identical to the posterior panel.
-summarise_pred_by <- function(ok, group_fn, t_target, what = c("VE", "AVE")) {
-  what  <- match.arg(what)
-  draws <- rbindlist(lapply(ok, function(r) {
-    if (is.null(r$ve_uncertainty) || !nrow(r$ve_uncertainty)) return(NULL)
-    v <- r$ve_uncertainty[method == "full_stoch" & t == t_target]
-    if (!nrow(v)) return(NULL)
-    hr <- all(c("eate_sd_rep", "ave_sd_rep") %in% names(v))
-    data.table(group = group_fn(r),
-               value = if (what == "VE") 1 - v$eate
-                       else if ("ave" %in% names(v)) v$ave else NA_real_,
-               rep   = if (!hr) NA_real_
-                       else if (what == "VE") v$eate_sd_rep else v$ave_sd_rep)
-  }), fill = TRUE)
-  if (!nrow(draws) || !any(is.finite(draws$rep))) return(data.table())
-  s <- draws[, {
-    sp <- sd(value, na.rm = TRUE)
-    mr <- mean(rep^2, na.rm = TRUE)
-    sr <- if (is.finite(mr)) sqrt(mr) else 0
-    sf <- sqrt(ifelse(is.finite(sp), sp, 0)^2 + sr^2)
-    m  <- mean(value, na.rm = TRUE)
-    .(n = .N, estimate = m, lo = m - z_ci * sf, hi = m + z_ci * sf,
-      sd_pred = sp, sd_rep = sr)
-  }, by = group]
   s[!is.finite(lo) | !is.finite(hi), `:=`(lo = estimate, hi = estimate)]
   s[order(sapply(group, order_key))]
 }
@@ -1483,7 +1444,7 @@ if (nrow(ve_unc_long) > 0) {
   # Combined 2x2 summary figure (the L3 "everything pooled per model" level)
   # -------------------------------------------------------------------------
   #   A  VE at t*            B  AVE at t*            C  +d% coverage effect
-  #   D  VE, predictive      E  AVE, predictive      -
+  #   D  VE(t)                E  VE by coverage
   #
   # Columns pair each effect measure with its predictive version, sharing an x
   # range so the extra width is legible. The rows answer different questions.
@@ -1620,29 +1581,6 @@ if (nrow(ve_unc_long) > 0) {
       else
         forest_panel(g4_alpha, "alpha", "C. alpha", show_y = FALSE)
 
-      # D: VE again, but with the stochastic-realisation term folded into the
-      # interval. Same point estimate as A -- only the bar length differs, which
-      # is the comparison being offered. Needs eate_sd_rep, so it falls back to
-      # A's interval with a note when the results predate that.
-      g4_ve_p   <- summarise_pred_by(ok, labels_L3_pool_nets, t_star_ve, "VE")
-      have_pred <- nrow(g4_ve_p) > 0
-      if (!have_pred)
-        message("  combined figure: no eate_sd_rep in these results, so the ",
-                "predictive VE panel repeats A (re-run the array to populate it).")
-      pD <- forest_panel(if (have_pred) g4_ve_p else g4_ve,
-                         glue("VE = 1 - EATE  (t = {t_star_ve})"),
-                         if (have_pred) "D. VE, predictive" else
-                           "D. VE (predictive term unavailable)", show_y = FALSE)
-      # A and D share an x range so the extra width reads as a longer bar
-      # rather than being hidden by each panel rescaling to fit.
-      if (have_pred) {
-        rs  <- range(c(g4_ve$lo, g4_ve$hi, g4_ve_p$lo, g4_ve_p$hi), na.rm = TRUE)
-        pad <- 0.06 * diff(rs); if (!is.finite(pad) || pad == 0) pad <- 0.01
-        # coord_cartesian, not scale_x_continuous(limits=): forest_panel already
-        # set an x scale and a second one would replace it and warn per panel.
-        pA <- pA + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
-        pD <- pD + coord_cartesian(xlim = c(rs[1] - pad, rs[2] + pad))
-      }
 
       # ---- row 2: the two trajectories, POINT ESTIMATES only ---------------
       # No ribbons here: these are for reading shape and ordering, and six
@@ -1679,14 +1617,14 @@ if (nrow(ve_unc_long) > 0) {
           geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
           coord_cartesian(ylim = yl) + traj_theme +
-          labs(x = "t", y = "VE", title = glue("E. VE(t) at {cov_lab_E} coverage"))
+          labs(x = "t", y = "VE", title = glue("D. VE(t) at {cov_lab_E} coverage"))
         pF <- ggplot(cov_sum, aes(coverage, VE, colour = grp)) +
           geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
           scale_x_continuous(labels = scales::percent) +
           coord_cartesian(ylim = yl) + traj_theme +
           labs(x = "vaccine coverage", y = "VE",
-               title = glue("F. VE by coverage (t = {t_star_ve})"))
+               title = glue("E. VE by coverage (t = {t_star_ve})"))
         # One shared key for row 2, harvested from a copy with the legend on.
         leg <- cowplot::get_plot_component(
           pE + theme(legend.position = "bottom",
@@ -1695,11 +1633,11 @@ if (nrow(ve_unc_long) > 0) {
       }
 
       # ---- assemble --------------------------------------------------------
-      # Row 1 is four forests; only A carries the y labels, so its column is
+      # Row 1 is three forests; only A carries the y labels, so its column is
       # wider. Row 2 is two wide trajectory panels over the same width.
-      row1 <- cowplot::plot_grid(pA, pB, pC, pD, nrow = 1, ncol = 4,
+      row1 <- cowplot::plot_grid(pA, pB, pC, nrow = 1, ncol = 3,
                                  align = "h", axis = "tb",
-                                 rel_widths = c(1.55, 1, 1, 1))
+                                 rel_widths = c(1.45, 1, 1))
       h4   <- max(6.5, 0.42 * length(g4_groups) + 3)
       if (have_traj) {
         row2 <- cowplot::plot_grid(pE, pF, nrow = 1, ncol = 2,
@@ -1719,10 +1657,6 @@ if (nrow(ve_unc_long) > 0) {
       # references to it (paper pipeline, earlier runs) still resolve.
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
              fig4, width = w4, height = h4, dpi = 150, limitsize = FALSE)
-      if (have_pred)
-        fwrite(g4_ve_p, file.path(out_dir,
-               glue("forest_VE_pred_t{t_star_ve}_pool_nets.csv")))
-
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
                    "({length(g4_groups)} model groups, t* = {t_star_ve})"))
@@ -1753,11 +1687,29 @@ message(glue("\nWrote plots and CSVs to {out_dir}/"))
 # Run per-experiment
 # ---------------------------------------------------------------------------
 
-for (exp_id in experiments_present) {
+# Experiments are independent -- each writes only into its own out_dir -- so
+# they run in parallel. Set EATE_ANALYSE_CORES to control it; 1 forces the
+# serial path, which is what you want when debugging, since a fork swallows
+# browser() and makes tracebacks useless.
+#
+# Two things the workers have to do. setDTthreads(1): data.table's own
+# threading inside a fork is a known deadlock risk, and the outer parallelism
+# already has the cores. And the per-experiment log is CAPTURED rather than
+# streamed, because the run log is read for the fit diagnostics and the misfit
+# list -- interleaving nine experiments' messages line by line would destroy
+# that. Captured logs are replayed in order once everything finishes.
+n_exp_cores <- suppressWarnings(as.integer(
+  Sys.getenv("EATE_ANALYSE_CORES", unset = NA)))
+if (!is.finite(n_exp_cores))
+  n_exp_cores <- max(1L, min(length(experiments_present),
+                             parallel::detectCores(logical = FALSE)))
+n_exp_cores <- max(1L, min(n_exp_cores, length(experiments_present)))
+
+run_one <- function(exp_id) {
   ok_exp <- ok_all[experiment_ids == exp_id]
-  message(glue("\n========== Experiment: {exp_id}  ({length(ok_exp)} jobs) =========="))
   exp_out_dir <- file.path(out_dir, exp_id)
-  tryCatch(
+  hdr <- glue("\n========== Experiment: {exp_id}  ({length(ok_exp)} jobs) ==========")
+  log <- utils::capture.output(type = "message", tryCatch(
     analyse_one_experiment(ok_exp, exp_out_dir),
     # Report the failing CALL as well as the message. data.table errors in
     # particular ("Check that is.data.table(DT) == TRUE ...") say nothing about
@@ -1768,8 +1720,34 @@ for (exp_id in experiments_present) {
       cl <- conditionCall(e)
       if (!is.null(cl))
         message("  call: ", paste(deparse(cl), collapse = " "))
+    }))
+  list(hdr = hdr, log = log)
+}
+
+if (n_exp_cores > 1L) {
+  message(glue("Analysing {length(experiments_present)} experiments on ",
+               "{n_exp_cores} cores (EATE_ANALYSE_CORES to change; ",
+               "logs are replayed in order below)"))
+  outs <- parallel::mclapply(experiments_present, function(exp_id) {
+    data.table::setDTthreads(1L)
+    run_one(exp_id)
+  }, mc.cores = n_exp_cores)
+  for (i in seq_along(outs)) {
+    o <- outs[[i]]
+    if (inherits(o, "try-error") || is.null(o$hdr)) {
+      message(glue("\n========== Experiment: {experiments_present[i]} =========="))
+      message("  worker failed: ", paste(as.character(o), collapse = " "))
+      next
     }
-  )
+    message(o$hdr)
+    if (length(o$log)) message(paste(o$log, collapse = "\n"))
+  }
+} else {
+  for (exp_id in experiments_present) {
+    o <- run_one(exp_id)
+    message(o$hdr)
+    if (length(o$log)) message(paste(o$log, collapse = "\n"))
+  }
 }
 message("\nAll experiments done.")
 
