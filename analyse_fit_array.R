@@ -1291,16 +1291,16 @@ if (nrow(ve_unc_long) > 0) {
   # (parity_ve_unbounded.R), which is a different figure. Prefix match, because
   # each spec in parity_specs becomes its own model_type, "sir_parity_<tag>".
   #
-  # SEGREGATED: the sweep does not mean what it looks like. The model is two
-  # non-mixing groups, one fully vaccinated and one not, implemented as
-  # multi-site with n_sites = 2 and site_icc = 1. Raising coverage there
-  # vaccinates people INSIDE the second (fixed-size) group, who then mix with
-  # the unvaccinated remainder -- so above 50% it is no longer segregated at
-  # all. Under the reading where the VACCINE rewires contacts, the blocks are
-  # defined by vaccination status and their SIZES should track coverage
-  # (320/480 at 60%), which is a different model. Rather than pick one, the
-  # sweep leaves it out; the design-coverage row and the +10% coverage effect
-  # are unaffected.
+  # SEGREGATED: it is a two-cluster CLUSTER RCT -- two non-mixing groups, and
+  # the randomisation picks which group gets vaccinated (multisite_vac_counts
+  # at icc >= 1 does exactly that, and the allocation loop averages over it).
+  # With only two clusters, coverage cannot be raised cluster-wise: the next
+  # cluster takes you straight to 100%. So any intermediate coverage has to
+  # vaccinate individuals INSIDE the control cluster, who then mix with the
+  # unvaccinated remainder -- and above 50% the design is no longer a cluster
+  # RCT at all. The sweep would therefore be plotting a different model at
+  # every point, so it is left out. The design-coverage row and the +10%
+  # coverage effect are unaffected and remain interpretable.
   ve_cov_exclude <- "^(sir_parity|sir_segregated)"
 
   cov_ve <- rbindlist(lapply(ok, function(r) {
