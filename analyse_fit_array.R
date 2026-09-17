@@ -1283,13 +1283,25 @@ if (nrow(ve_unc_long) > 0) {
   # Which models appear in the coverage figures (and so in row 2 of the
   # combined one). Everything EXCEPT parity.
   #
-  # Parity is the one model a coverage sweep cannot say anything sensible about:
-  # its alpha keys off the PARITY of the vaccinated count, so moving coverage
-  # walks the residue class and the curve is an artefact of arithmetic rather
-  # than a dose-response. It exists to show the CIR-VE gap is unbounded
+  # Two exclusions.
+  #
+  # PARITY: its alpha keys off the PARITY of the vaccinated count, so moving
+  # coverage walks the residue class and the curve is an artefact of arithmetic
+  # rather than a dose-response. It exists to show the CIR-VE gap is unbounded
   # (parity_ve_unbounded.R), which is a different figure. Prefix match, because
   # each spec in parity_specs becomes its own model_type, "sir_parity_<tag>".
-  ve_cov_exclude <- "^sir_parity"
+  #
+  # SEGREGATED: the sweep does not mean what it looks like. The model is two
+  # non-mixing groups, one fully vaccinated and one not, implemented as
+  # multi-site with n_sites = 2 and site_icc = 1. Raising coverage there
+  # vaccinates people INSIDE the second (fixed-size) group, who then mix with
+  # the unvaccinated remainder -- so above 50% it is no longer segregated at
+  # all. Under the reading where the VACCINE rewires contacts, the blocks are
+  # defined by vaccination status and their SIZES should track coverage
+  # (320/480 at 60%), which is a different model. Rather than pick one, the
+  # sweep leaves it out; the design-coverage row and the +10% coverage effect
+  # are unaffected.
+  ve_cov_exclude <- "^(sir_parity|sir_segregated)"
 
   cov_ve <- rbindlist(lapply(ok, function(r) {
     if (grepl(ve_cov_exclude, as.character(r$model_type))) return(NULL)
