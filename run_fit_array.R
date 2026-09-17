@@ -187,6 +187,25 @@ mean_k                  <- 6
 multisite_n_sites <- 4
 multisite_icc     <- 0
 
+# Fully segregated trial: two groups, random mixing WITHIN each and no contact
+# between them, one group entirely vaccinated and the other entirely not. This
+# is the extreme of the multi-site design, so it reuses that simulator --
+# n_sites = 2 with site_icc = 1 gives exactly it, since multisite_block_matrix
+# is block diagonal (zero between groups) and multisite_vac_counts at icc >= 1
+# fills round(f * L) sites completely.
+#
+# The coverage sweep then falls out for free with the semantics we want: the
+# count-nudge in multisite_vac_counts only tops up sites with vac < N_site, so
+# raising coverage from 50% to 60% puts the extra 80 people in the previously
+# UNVACCINATED group (verified: 0/400 at f = 0.5, 80/400 at f = 0.6,
+# 160/400 at f = 0.7) rather than spreading them over both.
+#
+# Its own model_type so it gets its own row; sim_type keeps it on the
+# multi-site simulator and EATE.
+segregated_n_alloc <- 4          # the allocation is just WHICH group is
+                                 # vaccinated, and the two are symmetric, so a
+                                 # few draws is plenty
+
 # Heterogeneous-vaccine-effect knobs. alpha_i ~ Beta(mean = alpha,
 # sd = kappa * sqrt(alpha(1-alpha))), so kappa in [0,1) is the spread as a
 # fraction of the maximum a Beta with that mean allows -- feasible at every
@@ -392,6 +411,16 @@ build_configs_for_experiment <- function(exp) {
       name            = glue("{exp$id}__sir_multisite_a{alloc_seed}"),
       model_type      = "sir_multisite",
       n_sites = multisite_n_sites, site_icc = multisite_icc,
+      allocation_seed = alloc_seed))
+  }
+
+  # Fully segregated arms: two non-mixing groups, one 100% vaccinated and one
+  # 0%. See the note by segregated_n_alloc.
+  for (alloc_seed in seq_len(segregated_n_alloc)) {
+    cs[[length(cs)+1]] <- modifyList(base, list(
+      name            = glue("{exp$id}__sir_segregated_a{alloc_seed}"),
+      model_type      = "sir_segregated", sim_type = "sir_multisite",
+      n_sites = 2L, site_icc = 1,
       allocation_seed = alloc_seed))
   }
 

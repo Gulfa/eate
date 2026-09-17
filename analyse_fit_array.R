@@ -144,6 +144,7 @@ labels_L1_all_splits <- function(r) {
          sir_sus_frailty   = sprintf("sus_frailty_a%02d",   r$allocation_seed),
          sir_trans_frailty = sprintf("trans_frailty_a%02d", r$allocation_seed),
          sir_multisite     = sprintf("sir_multisite_a%02d", r$allocation_seed),
+         sir_segregated    = sprintf("sir_segregated_a%02d", r$allocation_seed),
          r$model_type)
 }
 labels_L2_pool_allocs <- function(r) {
@@ -183,6 +184,9 @@ order_key <- function(label) {
                    sub("^sir_ve_hetero_k[0-9]+", "", label)))
   if (grepl("frailty", label))       return(paste0("1_", label))
   if (grepl("multisite", label))     return(paste0("1_", label))
+  # Fully segregated arms: the extreme of the multi-site design, so it sorts
+  # next to it rather than off in the default bucket.
+  if (grepl("^sir_segregated", label)) return(paste0("1_zz_", label))
   if (grepl("^network_pa.*_all$", label)) return(paste0("2_", label))
   if (grepl("^netvf_pa", label))         return(paste0("2z_", label))
   if (grepl("^netdec_pa", label))        return(paste0("2zz_", label))
@@ -228,6 +232,10 @@ display_name <- function(x) {
     }
     if (grepl("^sir_multisite(_a[0-9]+)?$", g)) {
       s <- sub("^sir_multisite", "SIR multi-site", g)
+      return(sub("_a([0-9]+)$", " (alloc \\1)", s))
+    }
+    if (grepl("^sir_segregated(_a[0-9]+)?$", g)) {
+      s <- sub("^sir_segregated", "SIR segregated arms", g)
       return(sub("_a([0-9]+)$", " (alloc \\1)", s))
     }
     # Heterogeneous vaccine effect, kappa tagged as integer percent.
