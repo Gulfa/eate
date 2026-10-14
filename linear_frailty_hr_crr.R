@@ -56,12 +56,13 @@ frailty_cv2 <- function(fr) {
 # Linear model with a given frailty
 # ---------------------------------------------------------------------------
 
-run_linear_frailty <- function(lambda, alpha, frailty, N = 1000, t = 5000) {
+run_linear_frailty <- function(lambda, alpha, frailty, N = 1000, t = 5000,
+                               times = 0:t) {
   n      <- length(frailty$z)
   params <- list(n = 2 * n,
                  S_ini = N * rep(frailty$p, 2),
                  susceptibility = lambda * c(frailty$z, alpha * frailty$z))
-  res <- det_model_ncd$new(user = params)$run(0:t)
+  res <- det_model_ncd$new(user = params)$run(times)
 
   i_u <- seq_len(n); i_v <- n + i_u
   col <- function(nm, i) res[, paste0(nm, "[", i, "]"), drop = FALSE]
@@ -164,12 +165,17 @@ ggsave("output/cumulative_incidence_hetero.png", width=10, height=6, bg="white")
 
 gamma_shapes <- c(Inf, 4, 2, 1, 0.5)
 gamma_lambdas <- c(0.05, 0.1)
-t_gamma <- 3000
+# Fine early grid (so panel C starts at the origin) and a log-spaced tail out
+# to t_gamma: at CV^2 = 2 the control arm reaches 99% only at
+# lambda t ~ 5e3, so the run has to be long.
+t_gamma <- 2e5
+times_gamma <- sort(unique(c(seq(0, 10, by = 0.05),
+                             exp(seq(log(10), log(t_gamma), length.out = 400)))))
 
 gam <- list(); gam_check <- list()
 for (lambda in gamma_lambdas) {
   for (k in gamma_shapes) {
-    r <- run_linear_frailty(lambda, alpha, frailty_gamma(k), N = N, t = t_gamma)
+    r <- run_linear_frailty(lambda, alpha, frailty_gamma(k), N = N, times = times_gamma)
     lab <- format(1 / k)
     gam[[length(gam) + 1]] <- r$sum %>% mutate(shape = k, label = lab, lambda = lambda)
     # Compare only while < 99% of the control arm is infected: beyond that the
@@ -190,7 +196,7 @@ gam$lambda <- factor(gam$lambda, levels = gamma_lambdas, labels = paste("beta ==
 message("Binned ODE vs closed form (gamma frailty):")
 print(rbindlist(gam_check), digits = 3)
 
-g3 <- ggplot(gam) + geom_line(aes(x=unvac/1e3, y=vac/1e3, group=paste(lambda, label), col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence vaccinated", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2")
+g3 <- ggplot(gam %>% filter(t > 0)) + geom_line(aes(x=unvac/1e3, y=CRR, group=paste(lambda, label), col=label), size=1.7) + theme_minimal() + labs(y="CIR", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2")
 g2 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=HRR, col=label), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
 g1 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=CRR, col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
 
