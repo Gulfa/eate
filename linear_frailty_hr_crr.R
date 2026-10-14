@@ -124,11 +124,11 @@ for (lambda in c(0.05, 0.1)) {
 }
 frailties <- rbindlist(frailties)
 
-frailties$lambda <- factor(frailties$lambda, levels=c(0.05, 0.1), labels=c("Lambda=0.05", "Lambda=0.1"))
+frailties$lambda <- factor(frailties$lambda, levels=c(0.05, 0.1), labels=c("beta == 0.05", "beta == 0.1"))
 
 q3 <- ggplot(frailties) + geom_line(aes(x=unvac/1e3, y=vac/1e3, group=paste(lambda, sd), col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Cumulative incidence vaccinated", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2")
-q2 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=HRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda)
-q1 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=CRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda)
+q2 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=HRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
+q1 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=CRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
 
 cowplot::plot_grid(q1, q2, q3, ncol=1, labels=c("A", "B", "C"), rel_heights=c(1,1,1))
 
@@ -170,7 +170,7 @@ gam <- list(); gam_check <- list()
 for (lambda in gamma_lambdas) {
   for (k in gamma_shapes) {
     r <- run_linear_frailty(lambda, alpha, frailty_gamma(k), N = N, t = t_gamma)
-    lab <- sprintf("%s (CV2 = %s)", if (is.finite(k)) format(k) else "Inf", format(1 / k))
+    lab <- format(1 / k)
     gam[[length(gam) + 1]] <- r$sum %>% mutate(shape = k, label = lab, lambda = lambda)
     # Compare only while < 99% of the control arm is infected: beyond that the
     # survivors are the lowest bin alone and the binned HR falls back towards
@@ -185,14 +185,14 @@ for (lambda in gamma_lambdas) {
 }
 gam <- rbindlist(gam)
 gam$label  <- factor(gam$label, levels = unique(gam$label))
-gam$lambda <- factor(gam$lambda, levels = gamma_lambdas, labels = paste0("Lambda=", gamma_lambdas))
+gam$lambda <- factor(gam$lambda, levels = gamma_lambdas, labels = paste("beta ==", gamma_lambdas))
 
 message("Binned ODE vs closed form (gamma frailty):")
 print(rbindlist(gam_check), digits = 3)
 
-g3 <- ggplot(gam) + geom_line(aes(x=unvac/1e3, y=vac/1e3, group=paste(lambda, label), col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence vaccinated", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer("Gamma shape", palette="Dark2")
-g2 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=HRR, col=label), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("Gamma shape", palette="Dark2") + facet_grid(.~lambda)
-g1 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=CRR, col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("Gamma shape", palette="Dark2") + facet_grid(.~lambda)
+g3 <- ggplot(gam) + geom_line(aes(x=unvac/1e3, y=vac/1e3, group=paste(lambda, label), col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence vaccinated", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2")
+g2 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=HRR, col=label), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
+g1 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=CRR, col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
 
 cowplot::plot_grid(g1, g2, g3, ncol=1, labels=c("A", "B", "C"), rel_heights=c(1,1,1))
 
