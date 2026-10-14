@@ -29,31 +29,10 @@ ggsave("article/figures/IRR.png", width=10, height=6, bg="white")
 
 
 # ---------------------------------------------------------------------------
-# FIG: Frailty / heterogeneity
+# FIG: Frailty / heterogeneity, Frailty strats, and the gamma-frailty variant
 # ---------------------------------------------------------------------------
 
-lambda <- 0.05
-alpha <- 0.5
-N <- 1000
-
-frailties <- list()
-for(lambda in c(0.05, 0.1)){
-  for(sd in c(0.01, 0.1, 1/sqrt(12), 0.35, 0.4)){
-    frailties[[length(frailties) + 1]] <- run_frailty(lambda, alpha, sd) %>% mutate(sd=round(sd,2), alpha=alpha, lambda=lambda)
-  }
-}
-frailties <- rbindlist(frailties)
-
-frailties$lambda <- factor(frailties$lambda, levels=c(0.05, 0.1), labels=c("Lambda=0.05", "Lambda=0.1"))
-
-q3 <- ggplot(frailties) + geom_line(aes(x=unvac/1e3, y=vac/1e3, group=paste(lambda, sd), col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Cumulative incidence vaccinated", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2")
-q2 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=HRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda)
-q1 <- ggplot(frailties %>% filter(t< 150)) + geom_line(aes(x=t, y=CRR, col=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + facet_grid(.~lambda)
-
-cowplot::plot_grid(q1, q2, q3, ncol=1, labels=c("A", "B", "C"), rel_heights=c(1,1,1))
-
-ggsave("output/attack_rate_hetero.png", width=12, height=16)
-
+source("linear_frailty_hr_crr.R")
 
 # ---------------------------------------------------------------------------
 # Marginal vs average VE — 4-group NCD model
@@ -65,27 +44,6 @@ plot_marg_vs_avg_4(0.05, 0.01, 10, 0.5, 20, 1000, t=300)
 ggsave("output/marginal_vs_average_4groups_2.png", width=12, height=6)
 
 
-# ---------------------------------------------------------------------------
-# Frailty strats
-# ---------------------------------------------------------------------------
-
-res <- run_frailty(0.01, 0.5, 0.4, N=1000, t=250, n_frailty=20)
-
-ggplot(res$strats) + geom_line(aes(x=unvac, y=vac, color=frailty_group))
-
-ggplot(res$strats) + geom_line(aes(x=unvac, y=vac/unvac, color=frailty_group)) + geom_line(aes(x=unvac/1000, y=vac/unvac), data=res$sum) + theme_minimal() + labs(y="Cumulative incidence ratio", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer("Frailty group", palette="Dark2") + theme(legend.position="bottom")
-
-ggplot(res$strats) + geom_line(aes(x=t, y=HRR, color=frailty_group)) + geom_line(aes(x=t, y=HRR), data=res$sum)
-
-
-res2 <- run_frailty(0.01, 0.5, 0.15, N=1000, t=250, n_frailty=20)
-res3 <- run_frailty(0.01, 0.5, 0.25, N=1000, t=250, n_frailty=20)
-res4 <- run_frailty(0.01, 0.5, 0.0001, N=1000, t=250, n_frailty=3)
-comb <- rbind(res$sum %>% mutate(sd=0.4), res2$sum %>% mutate(sd=0.15), res3$sum %>% mutate(sd=0.25), res4$sum %>% mutate(sd=0.00001))
-ggplot(comb) + geom_line(aes(x=t, y=HRR, color=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Marginal Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + theme(legend.position="bottom")
-ggsave("output/hazard_rate_hetero.png", width=10, height=6)
-ggplot(comb) + geom_line(aes(x=unvac/1000, y=CRR, color=as.factor(sd)), size=1.7) + theme_minimal() + labs(y="Marginal Cumulative incidence rate ratio", x="Fraction infected in control") + theme(text=element_text(size=20)) + scale_color_brewer("SD", palette="Dark2") + theme(legend.position="bottom")
-ggsave("output/cumulative_incidence_hetero.png", width=10, height=6)
 
 # 6 groups linear model:
 lambda1 <- 0.003

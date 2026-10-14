@@ -149,46 +149,7 @@ run_det_ncd <- function(N, t, susceptibility){
 # Frailty / heterogeneity model wrappers
 # ---------------------------------------------------------------------------
 
-run_frailty <- function(lambda, alpha, sd, N=1000, t=5000, n_frailty=200){
-  if(sd>0){
-    f <- get_frailty(sd=sd, n=n_frailty)
-    frailty <- exp(log(lambda) + 2.5*f$x)
-    params <- list(
-      n=2*n_frailty,
-      S_ini=N*rep(f$p, 2),
-      susceptibility=c(frailty, alpha*frailty))
-  }else{
-    params <- list(
-      n=2,
-      S_ini=c(N, N),
-      susceptibility=c(lambda, lambda*alpha))
-  }
-  model <- det_model_ncd$new(user=params)
-  res <- model$run(0:t)
-  exp <- res %>% as.data.frame() %>% select(starts_with("C"))
-  if(sd>0){
-    df <- data.frame(t=res[,1], vac=rowSums(exp[, (params$n/2+1):(params$n)]), unvac=rowSums(exp[, 1:(params$n/2)]))
-  }else{
-    df <- data.frame(t=res[,1], vac=exp[,2], unvac=exp[, 1])
-  }
-  df$inc_unvac <- rowSums(res[, paste("n_SR[", 1:(params$n/2), "]", sep="")])
-  df$inc_vac   <- rowSums(res[, paste("n_SR[", (params$n/2+1):(params$n), "]", sep="")])
-  df$HRR <- (df$inc_vac / (N - df$vac))/(df$inc_unvac / (N - df$unvac))
-
-  strats <- list()
-  for(i in 1:n_frailty){
-    df_strat <- data.frame(t=res[,1], frailty_group=as.character(i))
-    df_strat[,"vac"]      <- res[, paste("C[", n_frailty + i, "]", sep="")] / params$S_ini[n_frailty + i]
-    df_strat[,"unvac"]    <- res[, paste("C[", i, "]", sep="")] / params$S_ini[i]
-    df_strat$haz_unvac    <- res[, paste("hazzard_S[", i, "]", sep="")]
-    df_strat$haz_vac      <- res[, paste("hazzard_S[", n_frailty + i, "]", sep="")]
-    df_strat$HRR          <- (df_strat$haz_vac)/(df_strat$haz_unvac)
-    df_strat$CRR          <- (df_strat$vac/df_strat$unvac)
-    strats[[i]] <- df_strat
-  }
-  return(list(sum=df %>% mutate(CRR=vac/unvac, VE=1-CRR), strats=rbindlist(strats)))
-}
-
+# run_frailty() (linear model, beta-exp frailty) lives in linear_frailty_hr_crr.R.
 
 run_frailty_cd <- function(alpha, sd, sd_trans=0, beta=1, R=NULL, f=0.5, N=1000, t=100, n_frailty=100, k=NULL, gamma=1/2, vac_counts=NULL){
   # sd_pop picks the bin-weight distribution; with sd=0/sd_trans>0 we get
