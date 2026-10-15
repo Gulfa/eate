@@ -96,7 +96,7 @@ plot_dt <- results[method %in% c("full_stoch", "CRR")]
 plot_dt[, metric := factor(method,
                            levels = c("CRR", "full_stoch"),
                            labels = c("Observed VE (1 \u2212 CIR)",
-                                      "Allocation-specific VE (EATE)"))]
+                                      "Allocation-specific VE"))]
 # Row strips as plotmath: Network (alpha_pl = exponent), parsed via the labeller.
 pl_lbl <- function(pa) sprintf('"Network (\u03b1"[pl] * " = %s)"', format(pa))
 plot_dt[, pl_alpha_lbl := factor(pl_lbl(pl_alpha), levels = pl_lbl(pl_alphas))]
