@@ -39,6 +39,9 @@ timepoints   <- seq(1, t_horizon, 1)
 
 n_allocs     <- 10
 n_rep        <- 1000
+n_flip       <- N               # flip every individual: exact. The default 100
+                                # adds a between-allocation sampling sd of ~0.02,
+                                # as large as the 1 - CIR spread being shown.
 inner_cores  <- 4               # dust threads per EATE call
 outer_cores  <- 2               # mclapply across allocations inside EATE
 
@@ -64,7 +67,7 @@ for (pa in pl_alphas) {
   res <- get_stoch_eate_network(
     beta = beta, susceptibility = c(1, alpha), f = 0.5, N = N,
     t = t_horizon, c_ij = c_ij, vac_list = vac_list,
-    n_rep = n_rep, k_mean = mean_k, gamma = gamma,
+    n_rep = n_rep, n_flip = n_flip, k_mean = mean_k, gamma = gamma,
     dt = dt, timepoints = timepoints, init_I = init_I,
     mc.cores = outer_cores, inner_cores = inner_cores)
 
@@ -92,8 +95,9 @@ plot_dt[, metric := factor(method,
                            levels = c("CRR", "full_stoch"),
                            labels = c("1 - CIR",
                                       "allocation specific VE"))]
-plot_dt[, pl_alpha_lbl := factor(paste0("Pareto exp. = ", pl_alpha),
-                                 levels = paste0("Pareto exp. = ", pl_alphas))]
+# Row strips as plotmath: Network (alpha_pl = exponent), parsed via the labeller.
+pl_lbl <- function(pa) sprintf('"Network (\u03b1"[pl] * " = %s)"', format(pa))
+plot_dt[, pl_alpha_lbl := factor(pl_lbl(pl_alpha), levels = pl_lbl(pl_alphas))]
 
 # Mean across allocations at each (t, metric, pl_alpha) -- bold line overlay.
 avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE)),
@@ -105,7 +109,7 @@ p <- ggplot(plot_dt, aes(x = t, y = VE)) +
   geom_line(aes(group = alloc), colour = alloc_col,
             alpha = 0.45, linewidth = 0.7) +
   geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
-  facet_grid(pl_alpha_lbl ~ metric) +
+  facet_grid(pl_alpha_lbl ~ metric, labeller = labeller(pl_alpha_lbl = label_parsed)) +
   theme_minimal() +
   theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
   labs(x = "t", y = "VE")
