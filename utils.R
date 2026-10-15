@@ -362,3 +362,23 @@ estimate_posterior_cov <- function(simulator, beta, alpha,
        base  = base,
        sd    = sqrt(c(beta = cov_par[1, 1], alpha = cov_par[2, 2])))
 }
+
+
+# Mean-1 gamma frailty, frailty CV^2 = 1/shape, as list(z = bin values,
+# p = bin weights). Used by linear_frailty_hr_crr.R and network_vs_linear_cir.R.
+# Equal-probability bins at the conditional mean of each quantile slice, so
+# sum(p * z) == 1 exactly (E[Z 1{a<Z<b}] = P_{shape+1}(b) - P_{shape+1}(a)
+# for a mean-1 gamma). Within-bin variance is lost, so the realised CV^2 is a
+# little below 1/shape (frailty_cv2() gives the realised value; the closed-form
+# check prints it).  The legend shows the nominal 1/shape.
+frailty_gamma <- function(shape, n = 200) {
+  if (!is.finite(shape)) return(list(z = 1, p = 1))
+  q <- qgamma(seq(0, 1, length.out = n + 1), shape = shape, rate = shape)
+  z <- diff(pgamma(q, shape = shape + 1, rate = shape)) * n
+  list(z = z / mean(z), p = rep(1 / n, n))
+}
+
+frailty_cv2 <- function(fr) {
+  m <- sum(fr$p * fr$z)
+  sum(fr$p * fr$z^2) / m^2 - 1
+}

@@ -19,8 +19,8 @@
 #
 # Linear (per frailty sd):
 #   - N = 10000 in each of vaccinated / unvaccinated group
-#   - n_frailty = 100 equal-weight bins at Gamma(1/CV^2) quantiles,
-#     renormalised to mean 1
+#   - n_frailty = 100 equal-probability bins of a mean-1 Gamma(1/CV^2)
+#     frailty at each slice's conditional mean (frailty_gamma, utils.R)
 #   - Colour label = CV^2 of the induced frailty distribution.
 #
 # Usage: Rscript network_vs_linear_cir.R
@@ -79,11 +79,10 @@ init_seed    <- 4
 
 N_lin_per_group <- 10000
 n_frailty       <- 100
-# Target CV^2 of the frailty distribution. Uses Gamma(shape = 1/cv^2,
-# rate = 1/cv^2) quantiles renormalised to mean = 1 (see build_frailty).
-# The old sd-of-Beta parameterisation capped CV^2 at ~0.7 no matter how
-# large sd got; switching to Gamma lets us go arbitrarily extreme.
-frailty_cv2s    <- c(0, 0.1, 0.5, 1, 2, 4, 8)
+# Target CV^2 of the mean-1 gamma frailty (see build_frailty). The legend
+# shows these nominal values; the binned frailty's realised CV^2 is a little
+# lower and is printed while running.
+frailty_cv2s    <- c(0, 0.5, 1, 2, 4)
 beta_lin        <- 0.05               # gives control AR ~ 0.95 at t_horizon
 n_rep_lin       <- 200
 
@@ -100,21 +99,16 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Gamma-quantile frailty with target CV^2 (variance/mean^2 with mean = 1).
-# Returns (x, p) with equal-weight bins. cv2 = 0 -> homogeneous (all 1).
+# Mean-1 gamma frailty with target CV^2 (frailty_gamma() in utils.R:
+# equal-probability bins at the conditional mean of each slice, so the mean is
+# exactly 1). Returns (x, p); cv2 = 0 -> homogeneous (all 1).
 build_frailty <- function(cv2, n_bins) {
   if (cv2 <= 1e-8) return(list(x = rep(1, n_bins), p = rep(1 / n_bins, n_bins)))
-  shape <- 1 / cv2
-  probs <- (seq_len(n_bins) - 0.5) / n_bins
-  x     <- qgamma(probs, shape = shape, rate = shape)
-  x     <- x / mean(x)                 # renormalise so weighted mean is exactly 1
-  list(x = x, p = rep(1 / n_bins, n_bins))
+  fr <- frailty_gamma(shape = 1 / cv2, n = n_bins)
+  list(x = fr$z, p = fr$p)
 }
 
-realised_cv2 <- function(fr) {
-  m <- sum(fr$p * fr$x)
-  sum(fr$p * (fr$x - m)^2) / m^2
-}
+realised_cv2 <- function(fr) frailty_cv2(list(z = fr$x, p = fr$p))
 
 # Cache the Pareto contact matrix (expensive to rebuild at N = 10000).
 # Dense variant returns the full N x N matrix; sparse variant returns the
@@ -355,8 +349,8 @@ for (cv2_target in frailty_cv2s) {
     hr_med     = apply(hr_r, 1L, median,   na.rm = TRUE),
     hr_lo      = apply(hr_r, 1L, quantile, probs = 0.25, na.rm = TRUE),
     hr_hi      = apply(hr_r, 1L, quantile, probs = 0.75, na.rm = TRUE),
-    model      = sprintf("Linear (CV² = %.2f)", cv2v),
-    cv2        = cv2v)
+    model      = sprintf("Linear (CV² = %g)", cv2_target),
+    cv2        = cv2_target)
 }
 lin_dt <- rbindlist(lin_rows)
 

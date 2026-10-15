@@ -7,8 +7,8 @@
 #   method == "CRR":       cumulative-incidence ratio per allocation
 #     -> VE_CIR(t)  = 1 - eate  (i.e. 1 - (mean vac / mean unvac))
 #
-# Plot: columns = metric; row A against t, row B against the control-arm
-# attack rate. One line per allocation, black = mean over allocations.
+# Plot: columns = metric, VE against t. One line per allocation, black =
+# mean over allocations.
 # Settings match fig 3 (ve_by_alpha.R), and the graph is its first network
 # (same seed).
 
@@ -96,27 +96,21 @@ plot_dt[, pl_alpha_lbl := factor(paste0("Pareto exp. = ", pl_alpha),
                                  levels = paste0("Pareto exp. = ", pl_alphas))]
 
 # Mean across allocations at each (t, metric, pl_alpha) -- bold line overlay.
-avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE), ar_c = mean(ar_c, na.rm = TRUE)),
+avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE)),
                   by = .(t, metric, pl_alpha_lbl)]
 
 alloc_col <- brewer.pal(3L, "Dark2")[1]
 
-alloc_panel <- function(x, xlab) {
-  ggplot(plot_dt, aes(x = .data[[x]], y = VE)) +
-    geom_line(aes(group = alloc), colour = alloc_col,
-              alpha = 0.45, linewidth = 0.7) +
-    geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
-    facet_grid(pl_alpha_lbl ~ metric) +
-    theme_minimal() +
-    theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
-    labs(x = xlab, y = "VE")
-}
-p <- cowplot::plot_grid(alloc_panel("t", "t"),
-                        alloc_panel("ar_c", "Cumulative incidence control") +
-                          coord_cartesian(xlim = c(0, 1)),
-                        ncol = 1, labels = c("A", "B"))
+p <- ggplot(plot_dt, aes(x = t, y = VE)) +
+  geom_line(aes(group = alloc), colour = alloc_col,
+            alpha = 0.45, linewidth = 0.7) +
+  geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
+  facet_grid(pl_alpha_lbl ~ metric) +
+  theme_minimal() +
+  theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
+  labs(x = "t", y = "VE")
 
 ggsave(file.path(out_dir, "allocation_effect.png"), p, bg = "white",
-       width = 12, height = 8 * length(pl_alphas), dpi = 130)
+       width = 12, height = 4.5 * length(pl_alphas), dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
