@@ -562,9 +562,9 @@ plot_marg_vs_avg_4 <- function(lambda1, lambda2, alpha1, alpha2, N1, N2, t=150){
 }
 
 
-run_nl <- function(frac_vac=0.5, N=1000, beta=3, alpha=0.3){
-  cd <- run_det_cd(mixing_matrix=matrix(c(0.5, 0.5, 0.5, 0.5), nrow=2), beta_day=rep(beta, 50),
-                   t=50, N=c(N*(1-frac_vac), N*frac_vac), I_ini=c(1,1),
+run_nl <- function(frac_vac=0.5, N=1000, beta=3, alpha=0.3, t=50, delta_t=1){
+  cd <- run_det_cd(mixing_matrix=matrix(c(0.5, 0.5, 0.5, 0.5), nrow=2), beta_day=rep(beta, t),
+                   t=t, delta_t=delta_t, N=c(N*(1-frac_vac), N*frac_vac), I_ini=c(1,1),
                    susceptibility=c(1, alpha), gamma=1)$full_results
   out <- data.frame(t=rep(cd[, "t"], 2),
                     a=c(cd[, "C[1]"]/(N*(1-frac_vac)), cd[, "C[2]"]/(N*frac_vac)),

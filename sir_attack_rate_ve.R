@@ -1,6 +1,6 @@
 # Attack rate per arm and VE = 1 - CIR over time in the deterministic SIR
 # (det_mod_cd.R, random mixing) with a fixed leaky vaccine, alpha = 0.3,
-# beta = 3, gamma = 1, at 1%, 25% and 50% coverage.
+# beta = 6, gamma = 1, at 1%, 25% and 50% coverage.
 #
 #   A: cumulative incidence in the control and vaccinated groups
 #   B: VE = 1 - CIR from the same runs; starts at 1 - alpha and falls as the
@@ -14,9 +14,12 @@ library(ggplot2)
 
 if (!exists("run_nl")) source("det_model.R")
 
-df <- rbind(run_nl(0.25) %>% mutate(frac_vac=glue::glue("25% vaccinated")),
-            run_nl(0.01) %>% mutate(frac_vac=glue::glue("1% vaccinated")),
-            run_nl(0.5)  %>% mutate(frac_vac=glue::glue("50% vaccinated")))
+beta  <- 6
+t_max <- 20
+
+df <- rbind(run_nl(0.25, beta=beta, t=t_max, delta_t=0.1) %>% mutate(frac_vac=glue::glue("25% vaccinated")),
+            run_nl(0.01, beta=beta, t=t_max, delta_t=0.1) %>% mutate(frac_vac=glue::glue("1% vaccinated")),
+            run_nl(0.5,  beta=beta, t=t_max, delta_t=0.1) %>% mutate(frac_vac=glue::glue("50% vaccinated")))
 
 # VE = 1 - CIR, from the same runs as panel A
 df_ve <- df %>% tidyr::pivot_wider(names_from=group, values_from=a) %>%
