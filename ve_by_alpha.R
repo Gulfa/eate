@@ -167,6 +167,12 @@ legend_labels <- c(as.list(unname(model_labels[names(model_labels) != "network"]
                    bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha) * ")"))
 summary_dt[, alpha_f := factor(alpha, levels = alphas, labels = paste("\u03b1 =", alphas))]
 
+# Time is shown in units of the infectious period (gamma * t). Scaling every
+# rate and time by the same factor leaves each model unchanged, so the figure
+# is gamma = 1, beta = beta / gamma = 7.5 (R0 = 7.5) and a linear hazard of
+# beta_linear / gamma = 0.5, over t in [0, 10].
+summary_dt[, t := gamma * t]
+
 # A: VE against time. B: VE against the control-arm attack rate, which puts
 # models with different epidemic speeds on a common depletion scale.
 ve_panel <- function(x, xlab) {
