@@ -562,12 +562,18 @@ plot_marg_vs_avg_4 <- function(lambda1, lambda2, alpha1, alpha2, N1, N2, t=150){
 }
 
 
-run_nl <- function(frac_vac=0.5, N=1000, beta=3, alpha=0.3, t=50, delta_t=1){
-  cd <- run_det_cd(mixing_matrix=matrix(c(0.5, 0.5, 0.5, 0.5), nrow=2), beta_day=rep(beta, t),
-                   t=t, delta_t=delta_t, N=c(N*(1-frac_vac), N*frac_vac), I_ini=c(1,1),
+# Attack rate per group among those susceptible at the start: the seeds
+# (I_ini) are not counted in C, so they are left out of the denominator too
+# (otherwise one seed in a 10-person group lowers its AR by 10%). The odin
+# model's clock starts at 1, so time is shifted to start at 0 and run to t.
+run_nl <- function(frac_vac=0.5, N=1000, beta=3, alpha=0.3, t=50, delta_t=1, I_ini=c(1,1)){
+  N_g <- c(N*(1-frac_vac), N*frac_vac)
+  cd <- run_det_cd(mixing_matrix=matrix(c(0.5, 0.5, 0.5, 0.5), nrow=2), beta_day=rep(beta, t+1),
+                   t=t+1, delta_t=delta_t, N=N_g, I_ini=I_ini,
                    susceptibility=c(1, alpha), gamma=1)$full_results
-  out <- data.frame(t=rep(cd[, "t"], 2),
-                    a=c(cd[, "C[1]"]/(N*(1-frac_vac)), cd[, "C[2]"]/(N*frac_vac)),
+  at_risk <- N_g - I_ini
+  out <- data.frame(t=rep(cd[, "t"] - 1, 2),
+                    a=c(cd[, "C[1]"]/at_risk[1], cd[, "C[2]"]/at_risk[2]),
                     group=rep(c("Control", "Vaccinated"), each=length(cd[,"t"])))
   return(out)
 }
