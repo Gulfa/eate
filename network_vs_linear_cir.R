@@ -383,7 +383,9 @@ long_dt <- rbind(
   plot_dt[, .(ar_control, model, metric = "cumulative HR",
               y_med = hr_med,  y_lo = hr_lo,  y_hi = hr_hi)]
 )
-long_dt[, metric := factor(metric, levels = c("CIR", "cumulative HR"))]
+long_dt[, metric := factor(metric, levels = c("CIR", "cumulative HR"),
+                         labels = c("Cumulative incidence ratio (CIR)",
+                                    "Cumulative hazard ratio (HR)"))]
 
 p_combined <- ggplot(long_dt, aes(x = ar_control, y = y_med,
                                    colour = model, fill = model, group = model)) +
