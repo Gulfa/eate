@@ -30,3 +30,10 @@ paper_figure(3, "ve_by_alpha.R", "output/ve_by_alpha.png")
 # Fig 4: VE per vaccine allocation on a fixed Pareto network, 1 - CIR vs the
 # allocation-specific EATE
 paper_figure(4, "network_allocation_effect.R", "output/network_allocation_effect/allocation_effect.png")
+
+# Fig 5: fit-to-data figures, built on the server (run_fit_array.R /
+# analyse_fit_array.R), not here.
+
+# Fig 6: CIR and cumulative HR against control attack rate, Pareto network
+# vs linear models with increasing risk CV^2
+paper_figure(6, "network_vs_linear_cir.R", "output/network_vs_linear_cir/cir_hr_vs_ar_control.png")

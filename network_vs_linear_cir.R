@@ -1,5 +1,5 @@
-# CIR-vs-control-AR trajectories. Compare a stochastic Pareto network
-# (pa = 3) to a series of linear (exposure-only) models with increasing
+# CIR-vs-control-AR trajectories (paper fig 6). Compare a stochastic Pareto
+# network (pa = 3) to a series of linear (exposure-only) models with increasing
 # frailty (tagged by the CV^2 the frailty distribution induces).
 #
 # Both models produce a per-t trajectory in the plane
@@ -12,16 +12,15 @@
 # CIR climbs faster/slower depending on the heterogeneity mix.
 #
 # Network:
-#   - N = 10000, pa = 3, mean_k = 6
-#   - 10% vaccinated with alpha_vac = 0.5
-#   - Control = random 10% subset of the unvaccinated pool
+#   - N = 50000, pa = 3, mean_k = 6
+#   - 20% vaccinated with alpha_vac = 0.5
+#   - Control = random unvaccinated subset of the same size as the vaccinated
 #   - Seed = init_I randomly chosen nodes (independent of vac)
 #
 # Linear (per frailty sd):
-#   - N = 1000 in each of vaccinated / unvaccinated group
-#   - n_frailty = 100 bins with sd-controlled Beta weighting; frailty
-#     values normalised to population mean 1 (matches the codebase
-#     convention; see project_network_beta memory).
+#   - N = 10000 in each of vaccinated / unvaccinated group
+#   - n_frailty = 100 equal-weight bins at Gamma(1/CV^2) quantiles,
+#     renormalised to mean 1
 #   - Colour label = CV^2 of the induced frailty distribution.
 #
 # Usage: Rscript network_vs_linear_cir.R
@@ -396,20 +395,19 @@ p_combined <- ggplot(long_dt, aes(x = ar_control, y = y_med,
                                    colour = model, fill = model, group = model)) +
   geom_ribbon(aes(ymin = y_lo, ymax = y_hi),
               alpha = 0.18, colour = NA) +
-  geom_path(size = 1) +
+  geom_path(linewidth = 1) +
   geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
   facet_wrap(~ metric, scales = "free_y") +
   scale_colour_manual(name = NULL, values = pal) +
   scale_fill_manual(name   = NULL, values = pal) +
-  theme_bw(base_size = 14) +
-  theme(legend.position = "bottom",
-        panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA)) +
+  theme_minimal() +
+  theme(text = element_text(size = 20), legend.position = "bottom",
+        panel.grid.minor = element_blank()) +
   guides(colour = guide_legend(nrow = 2),
          fill   = guide_legend(nrow = 2)) +
   labs(x = "Attack rate in control group", y = NULL)
 
-ggsave(file.path(out_dir, "cir_hr_vs_ar_control.png"), p_combined,
+ggsave(file.path(out_dir, "cir_hr_vs_ar_control.png"), p_combined, bg = "white",
        width = 14, height = 7, dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))
