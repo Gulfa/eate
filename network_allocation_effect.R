@@ -95,8 +95,8 @@ fwrite(results, file.path(out_dir, "results.csv"))
 plot_dt <- results[method %in% c("full_stoch", "CRR")]
 plot_dt[, metric := factor(method,
                            levels = c("CRR", "full_stoch"),
-                           labels = c("1 - CIR",
-                                      "allocation specific VE"))]
+                           labels = c("Observed VE (1 \u2212 CIR)",
+                                      "Allocation-specific VE (EATE)"))]
 # Row strips as plotmath: Network (alpha_pl = exponent), parsed via the labeller.
 pl_lbl <- function(pa) sprintf('"Network (\u03b1"[pl] * " = %s)"', format(pa))
 plot_dt[, pl_alpha_lbl := factor(pl_lbl(pl_alpha), levels = pl_lbl(pl_alphas))]
@@ -111,7 +111,7 @@ p <- ggplot(plot_dt, aes(x = t, y = VE)) +
   geom_line(aes(group = alloc), colour = alloc_col,
             alpha = 0.45, linewidth = 0.7) +
   geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
-  facet_grid(pl_alpha_lbl ~ metric, labeller = labeller(pl_alpha_lbl = label_parsed)) +
+  facet_wrap(~ metric) +
   theme_minimal() +
   theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
   labs(x = "t", y = "VE")
