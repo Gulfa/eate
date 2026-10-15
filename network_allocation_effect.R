@@ -107,6 +107,12 @@ avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE)),
 
 alloc_col <- brewer.pal(3L, "Dark2")[1]
 
+# Time is shown in units of the infectious period (gamma * t). Scaling every
+# rate and time by the same factor leaves the process unchanged, so
+# (beta, gamma) = (0.3, 0.2) over t in [0, 50] is exactly (1.5, 1) over
+# [0, 10]: the figure is the beta = 1.5, gamma = 1 epidemic.
+plot_dt[, t := gamma * t]; avg_dt[, t := gamma * t]
+
 p <- ggplot(plot_dt, aes(x = t, y = VE)) +
   geom_line(aes(group = alloc), colour = alloc_col,
             alpha = 0.45, linewidth = 0.7) +
