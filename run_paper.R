@@ -100,23 +100,7 @@ ggsave("output/effect_sir.png", width=10, height=12)
 # Non-linear / network effects
 # ---------------------------------------------------------------------------
 
-df <- rbind(run_nl(0.25) %>% mutate(frac_vac=glue::glue("25% vaccinated")),
-            run_nl(0.01) %>% mutate(frac_vac=glue::glue("1% vaccinated")),
-            run_nl(0.5)  %>% mutate(frac_vac=glue::glue("50% vaccinated")))
-
-df_eate <- rbind(
-  get_EATE(0.01, 3) %>% mutate(frac_vac=glue::glue("1% vaccinated")),
-  get_EATE(0.25, 3) %>% mutate(frac_vac=glue::glue("25% vaccinated")),
-  get_EATE(0.5,  3) %>% mutate(frac_vac=glue::glue("50% vaccinated"))
-)
-
-p1 <- ggplot(df) + geom_line(aes(x=t, y=a, col=group), size=1.7) + theme_minimal() + labs(y="Attack rate", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("Group", palette="Dark2") + facet_wrap(~frac_vac)
-
-p2 <- ggplot(df_eate %>% filter(t<=50)) + geom_line(aes(x=t, y=IR, col=frac_vac), size=1.7) + theme_minimal() + labs(y="EATE", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer("Vaccination Coverage", palette="Set1")
-
-cowplot::plot_grid(p1, p2, ncol=1, labels=c("A", "B"), rel_heights=c(1,0.5))
-
-ggsave("output/attack_rate_nl.png", width=10, height=6)
+source("sir_attack_rate_ve.R")
 
 
 # ---------------------------------------------------------------------------
