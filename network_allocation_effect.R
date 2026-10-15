@@ -30,7 +30,9 @@ pl_alphas    <- c(1.5)
 N            <- 500
 mean_k       <- 6
 alpha        <- 0.5             # vaccine susceptibility
-beta         <- 1.5             # R0 = beta / gamma = 7.5 in homog limit
+beta         <- 0.4             # milder than fig 3 (1.5): near threshold the
+                                # allocation moves the epidemic size, so the
+                                # allocation-specific VE varies too
 gamma        <- 0.2
 init_I       <- 10
 t_horizon    <- 50
