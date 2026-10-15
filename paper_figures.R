@@ -22,6 +22,7 @@ paper_figure(1, "linear_frailty_hr_crr.R", "output/attack_rate_hetero_gamma.png"
 # Fig 2: attack rate and VE over time, SIR with a fixed leaky vaccine
 paper_figure(2, "sir_attack_rate_ve.R", "output/attack_rate_nl.png")
 
-# Fig 3: VE(t) by alpha across linear, SIR, frailty and network models
-# (slow: sized for the server)
+# Fig 3: VE(t) by alpha: linear (with and without risk heterogeneity), SIR
+# (random mixing, two separate halves) and a Pareto network
+# (~6 min on 8 cores)
 paper_figure(3, "ve_by_alpha.R", "output/ve_by_alpha.png")
