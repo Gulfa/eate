@@ -363,6 +363,10 @@ lin_levels <- lin_dt[, .SD[1], by = model][order(cv2)]$model
 model_levels <- c(as.character(lin_levels), unique(as.character(net_dt$model)))
 all_dt[, model := factor(as.character(model), levels = model_levels)]
 
+# Legend text; the network as plotmath, Network (alpha_pl = exponent).
+legend_labels <- c(as.list(as.character(lin_levels)),
+                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha) * ")"))
+
 # Linear curves in Dark2, the network in black so it stands out.
 n_lin <- length(lin_levels)
 pal   <- c(if (n_lin <= 8L) brewer.pal(max(n_lin, 3L), "Dark2")[seq_len(n_lin)]
@@ -394,8 +398,8 @@ p_combined <- ggplot(long_dt, aes(x = ar_control, y = y_med,
   geom_path(linewidth = 1) +
   geom_hline(yintercept = alpha_vac, linetype = "dashed", colour = "grey50") +
   facet_wrap(~ metric, scales = "free_y") +
-  scale_colour_manual(name = NULL, values = pal) +
-  scale_fill_manual(name   = NULL, values = pal) +
+  scale_colour_manual(name = NULL, values = pal, labels = legend_labels) +
+  scale_fill_manual(name   = NULL, values = pal, labels = legend_labels) +
   theme_minimal() +
   theme(text = element_text(size = 20), legend.position = "bottom",
         panel.grid.minor = element_blank()) +

@@ -162,6 +162,9 @@ model_labels <- c(
   sir          = "SIR, random mixing",
   network      = sprintf("Network (Pareto exp. = %g)", pl_alpha))
 summary_dt[, display := factor(model_labels[model], levels = model_labels)]
+# Legend text; the network as plotmath, Network (alpha_pl = exponent).
+legend_labels <- c(as.list(unname(model_labels[names(model_labels) != "network"])),
+                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha) * ")"))
 summary_dt[, alpha_f := factor(alpha, levels = alphas, labels = paste("\u03b1 =", alphas))]
 
 # A: VE against time. B: VE against the control-arm attack rate, which puts
@@ -170,7 +173,7 @@ ve_panel <- function(x, xlab) {
   ggplot(summary_dt, aes(x = .data[[x]], y = VE, colour = display, group = line_id)) +
     geom_line(linewidth = 0.9) +
     facet_wrap(~ alpha_f, scales = "free_y") +
-    scale_colour_brewer(NULL, palette = "Dark2") +
+    scale_colour_brewer(NULL, palette = "Dark2", labels = legend_labels) +
     theme_minimal() +
     theme(text = element_text(size = 20), legend.position = "bottom",
           panel.grid.minor = element_blank()) +
