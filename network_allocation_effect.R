@@ -100,15 +100,14 @@ alloc_col <- brewer.pal(3L, "Dark2")[1]
 
 p <- ggplot(plot_dt, aes(x = t, y = VE)) +
   geom_line(aes(group = alloc), colour = alloc_col,
-            alpha = 0.45, size = 0.7) +
-  geom_line(data = avg_dt, colour = "black", size = 1.3) +
+            alpha = 0.45, linewidth = 0.7) +
+  geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
   facet_grid(pl_alpha_lbl ~ metric) +
-  theme_bw(base_size = 15) +
-  theme(panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA)) +
-  labs(x = "t", y = NULL)
+  theme_minimal() +
+  theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
+  labs(x = "t", y = "VE")
 
-ggsave(file.path(out_dir, "allocation_effect.png"), p,
+ggsave(file.path(out_dir, "allocation_effect.png"), p, bg = "white",
        width = 12, height = 4 * length(pl_alphas), dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))

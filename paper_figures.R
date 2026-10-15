@@ -26,3 +26,7 @@ paper_figure(2, "sir_attack_rate_ve.R", "output/attack_rate_nl.png")
 # (random mixing, two separate halves) and a Pareto network
 # (~6 min on 8 cores)
 paper_figure(3, "ve_by_alpha.R", "output/ve_by_alpha.png")
+
+# Fig 4: VE per vaccine allocation on a fixed Pareto network, 1 - CIR vs the
+# allocation-specific EATE
+paper_figure(4, "network_allocation_effect.R", "output/network_allocation_effect/allocation_effect.png")
