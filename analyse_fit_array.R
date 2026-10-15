@@ -1557,28 +1557,39 @@ if (nrow(ve_unc_long) > 0) {
         x <- sub("^SIR \\+ ", "SIR + ", x)
         x
       }
+      # Axis / legend labels: as short_name(), but network rows as plotmath so
+      # the exponent reads "Network (alpha_pl = 3)" as in the other paper figures
+      # (plain-text alpha with a subscript; plotmath's own alpha overlaps).
+      label_expr <- function(x) {
+        x <- short_name(x)
+        lapply(x, function(s) {
+          m <- regmatches(s, regexec("^(Network.*)\\(pa=([0-9.]+)\\)$", s))[[1]]
+          if (!length(m)) return(s)
+          bquote(.(paste0(m[2], "(\u03b1"))[pl] * " = " * .(m[3]) * ")")
+        })
+      }
 
       forest_panel <- function(df, xlab, title, show_y = TRUE) {
         d <- copy(df)
-        d[, group := factor(as.character(group), levels = g4_lev,
-                            labels = short_name(g4_labs[g4_lev]))]
+        d[, group := factor(as.character(group), levels = g4_lev)]
         p <- ggplot(d, aes(y = group, x = estimate)) +
-          geom_point(size = 2.4) +
-          geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.2) +
+          geom_point(size = 4) +
+          geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.25, linewidth = 1) +
           # expand: a little space above the top row and below the bottom one,
           # so the outer error bars are not flush against the panel edge.
-          scale_y_discrete(drop = FALSE, expand = expansion(add = 0.6)) +
+          scale_y_discrete(drop = FALSE, expand = expansion(add = 0.6),
+                           labels = label_expr(g4_labs[g4_lev])) +
           scale_x_continuous(expand = expansion(mult = 0.06)) +
-          theme_bw(base_size = 11) +
+          theme_minimal(base_size = 20) +
           theme(panel.grid.minor = element_blank(),
                 # margin on the y text is the actual gap between a label and
                 # the axis line; the plot.margin only pads outside the labels.
-                axis.text.y = element_text(size = 9, margin = margin(r = 6)),
-                axis.text.x = element_text(size = 9),
-                axis.title.x = element_text(size = 9, margin = margin(t = 6)),
-                plot.title = element_text(size = 11, face = "bold",
+                axis.text.y = element_text(size = 18, margin = margin(r = 6)),
+                axis.text.x = element_text(size = 17),
+                axis.title.x = element_text(size = 18, margin = margin(t = 6)),
+                plot.title = element_text(size = 20, face = "bold",
                                           margin = margin(b = 6)),
-                plot.margin = margin(6, 12, 6, 10)) +
+                plot.margin = margin(6, 14, 6, 10)) +
           labs(x = xlab, y = NULL, title = title)
         if (!show_y)
           p <- p + theme(axis.text.y = element_blank(),
@@ -1609,21 +1620,21 @@ if (nrow(ve_unc_long) > 0) {
       #
       # Row 2 carries every model row 1 does except parity, which a coverage
       # sweep cannot describe (see ve_cov_exclude above).
-      traj_theme <- theme_bw(base_size = 11) +
+      traj_theme <- theme_minimal(base_size = 20) +
         theme(panel.grid.minor = element_blank(),
               legend.position  = "none",
-              plot.title = element_text(size = 11, face = "bold",
+              plot.title = element_text(size = 20, face = "bold",
                                         margin = margin(b = 6)),
-              axis.text  = element_text(size = 9),
-              axis.title = element_text(size = 9),
-              plot.margin = margin(6, 12, 6, 10))
+              axis.text  = element_text(size = 17),
+              axis.title = element_text(size = 18),
+              plot.margin = margin(6, 14, 6, 10))
       have_traj <- !is.null(cov_sum_t) && nrow(cov_sum_t) > 0
       if (have_traj) {
         lv  <- levels(cov_sum_t$grp)
         pal <- setNames(dark2_pal(length(lv)), lv)
         # Same display names as the forests above, so a model reads the same in
         # both rows; the factor keys stay the raw group strings.
-        lab <- setNames(short_name(display_name(lv)), lv)
+        lab <- setNames(label_expr(display_name(lv)), lv)
         # VE(t) at the design coverage: one curve per model, the same slice the
         # forests in row 1 are taken from.
         dE <- if (is.finite(design_cov)) cov_sum_t[coverage == design_cov] else
@@ -1634,12 +1645,12 @@ if (nrow(ve_unc_long) > 0) {
         # vertical distance as the same difference in F.
         yl <- ylim_snug(dE$VE, cov_sum$VE)
         pE <- ggplot(dE, aes(t, VE, colour = grp)) +
-          geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
+          geom_line(linewidth = 1.5) + geom_point(size = 3) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
           coord_cartesian(ylim = yl) + traj_theme +
           labs(x = "t", y = "VE", title = glue("D. VE(t) at {cov_lab_E} coverage"))
         pF <- ggplot(cov_sum, aes(coverage, VE, colour = grp)) +
-          geom_line(linewidth = 0.9) + geom_point(size = 1.7) +
+          geom_line(linewidth = 1.5) + geom_point(size = 3) +
           scale_colour_manual(name = NULL, values = pal, labels = lab) +
           scale_x_continuous(labels = scales::percent) +
           coord_cartesian(ylim = yl) + traj_theme +
@@ -1648,7 +1659,8 @@ if (nrow(ve_unc_long) > 0) {
         # One shared key for row 2, harvested from a copy with the legend on.
         leg <- cowplot::get_plot_component(
           pE + theme(legend.position = "bottom",
-                     legend.text = element_text(size = 9)),
+                     legend.text = element_text(size = 18),
+                     legend.key.width = unit(1.6, "cm")),
           "guide-box-bottom", return_all = TRUE)
       }
 
@@ -1657,7 +1669,7 @@ if (nrow(ve_unc_long) > 0) {
       # wider. Row 2 is two wide trajectory panels over the same width.
       row1 <- cowplot::plot_grid(pA, pB, pC, nrow = 1, ncol = 3,
                                  align = "h", axis = "tb",
-                                 rel_widths = c(1.45, 1, 1))
+                                 rel_widths = c(1.6, 1, 1))
       h4   <- max(6.5, 0.42 * length(g4_groups) + 3)
       if (have_traj) {
         row2 <- cowplot::plot_grid(pE, pF, nrow = 1, ncol = 2,
@@ -1676,7 +1688,8 @@ if (nrow(ve_unc_long) > 0) {
       # Filename kept stable even though the panel count changed, so existing
       # references to it (paper pipeline, earlier runs) still resolve.
       ggsave(file.path(out_dir, "combined_4panel_pool_nets.png"),
-             fig4, width = w4, height = h4, dpi = 150, limitsize = FALSE)
+             fig4, width = w4, height = h4, dpi = 150, limitsize = FALSE,
+             bg = "white")
       fwrite(g4_ave, file.path(out_dir, glue("forest_AVE_t{t_star_ve}_pool_nets.csv")))
       message(glue("Wrote combined_4panel_pool_nets.png ",
                    "({length(g4_groups)} model groups, t* = {t_star_ve})"))
