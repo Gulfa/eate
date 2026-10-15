@@ -1513,17 +1513,24 @@ fit_mod_norm <- function(mod, X_cont=NULL, X_vac=NULL, beta_ini=1, alpha_ini=0.5
 
     ar_fac_vac   <- rowSums(P_fac[, vac,     drop = FALSE]) / max(length(vac), 1)
     ar_fac_unvac <- rowSums(P_fac[, non_vac, drop = FALSE]) / max(length(non_vac), 1)
+    # Control attack rate among those susceptible at the start. Index cases
+    # are never counted as infected but sit in non_vac: the event engine draws
+    # them at random per realisation (expected share init_I / N), dust seeds
+    # nodes 1..init_I.
+    n_seed_u <- if (engine == "events") length(non_vac) * init_I / N
+                else sum(non_vac <= init_I)
+    ar_c <- rowSums(P_fac[, non_vac, drop = FALSE]) / max(length(non_vac) - n_seed_u, 1)
 
     rbindlist(list(
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
                  eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
-                 method = "full_stoch", sim = sim_id, ar_c = ar_fac_unvac),
+                 method = "full_stoch", sim = sim_id, ar_c = ar_c),
       data.frame(t = timepoints, eate = ar_fac_vac / ar_fac_unvac,
                  ave = ar_fac_unvac - ar_fac_vac,
                  num = NA_real_, denom = NA_real_,
                  eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                 method = "CRR", sim = sim_id, ar_c = ar_fac_unvac)
+                 method = "CRR", sim = sim_id, ar_c = ar_c)
     ), fill = TRUE)
   }
 
@@ -2353,15 +2360,18 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
       dn  <- arms(N_vac - 1, sd_i)    # a vaccinated person, unvaccinated
       num_t   <- N_vac   * fac$vac   + N_unvac * up$vac
       denom_t <- N_unvac * fac$unvac + N_vac   * dn$unvac
+      # Control attack rate among those susceptible at the start: the I_ini[1]
+      # index cases are in N_unvac but never counted in C1.
+      ar_c <- fac$unvac * N_unvac / (N_unvac - I_ini[1])
       rbindlist(list(
         data.frame(t = timepoints, eate = num_t / denom_t,
                    ave = (denom_t - num_t) / N, num = num_t, denom = denom_t,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "full_stoch", sim = sim_id, ar_c = fac$unvac),
+                   method = "full_stoch", sim = sim_id, ar_c = ar_c),
         data.frame(t = timepoints, eate = fac$vac / fac$unvac,
                    ave = fac$unvac - fac$vac, num = NA_real_, denom = NA_real_,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "CRR", sim = sim_id, ar_c = fac$unvac)
+                   method = "CRR", sim = sim_id, ar_c = ar_c)
       ), fill = TRUE)
     }
     return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,

@@ -59,7 +59,11 @@ inner_cores <- 1
 out_dir <- "output/ve_by_alpha"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-timepoints <- seq(1, t_horizon, 1)
+# Start close to 0 (VE is 0/0 at t = 0); dust needs times on its dt = 0.1 grid.
+timepoints <- c(0.2, 0.5, seq(1, t_horizon, 1))
+# The network (event engine, no time step) spreads fast through its hubs, so
+# it gets a fine grid early on to show its curve from a small attack rate.
+timepoints_nw <- c(seq(0.05, 0.95, by = 0.05), seq(1, t_horizon, 1))
 
 # ---------------------------------------------------------------------------
 # Networks and job list
@@ -99,7 +103,7 @@ run_job <- function(job) {
       t = t_horizon, c_ij = networks[[job$network_seed]], k_mean = mean_k,
       gamma = gamma,
       n_vac = n_vac_allocs, n_rep = n_rep,
-      timepoints = timepoints, init_I = init_I_nw,
+      timepoints = timepoints_nw, init_I = init_I_nw,
       mc.cores = inner_cores),
     stop("Unknown model: ", job$model))
   setDT(ve)
