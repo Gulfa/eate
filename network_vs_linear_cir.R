@@ -287,10 +287,7 @@ net_dt <- data.table(
   hr_med     = apply(hr_rep, 1L, median,   na.rm = TRUE),
   hr_lo      = apply(hr_rep, 1L, quantile, probs = 0.25, na.rm = TRUE),
   hr_hi      = apply(hr_rep, 1L, quantile, probs = 0.75, na.rm = TRUE),
-  model      = if (is.na(cv2_foi_net))
-                  sprintf("Network (pa = %s, degree CV² = %.2f)", pl_alpha, cv2_deg_net)
-                else sprintf("Network (pa = %s, FOI CV² = %.2f, degree CV² = %.2f)",
-                             pl_alpha, cv2_foi_net, cv2_deg_net),
+  model      = sprintf("Network (pa = %s)", pl_alpha),   # CV^2s are in the log
   cv2        = if (is.na(cv2_foi_net)) cv2_deg_net else cv2_foi_net)
 
 # Free the largest intermediate
@@ -366,8 +363,11 @@ lin_levels <- lin_dt[, .SD[1], by = model][order(cv2)]$model
 model_levels <- c(as.character(lin_levels), unique(as.character(net_dt$model)))
 all_dt[, model := factor(as.character(model), levels = model_levels)]
 
-n_col <- length(model_levels)
-pal   <- if (n_col <= 8L) brewer.pal(max(n_col, 3L), "Dark2")[seq_len(n_col)] else colorRampPalette(brewer.pal(8L, "Dark2"))(n_col)
+# Linear curves in Dark2, the network in black so it stands out.
+n_lin <- length(lin_levels)
+pal   <- c(if (n_lin <= 8L) brewer.pal(max(n_lin, 3L), "Dark2")[seq_len(n_lin)]
+           else colorRampPalette(brewer.pal(8L, "Dark2"))(n_lin),
+           "black")
 
 # Drop the very-early-epidemic region where AR_control < 0.5%. That part
 # is noise-dominated (both AR_vac and AR_control are single-digit case
