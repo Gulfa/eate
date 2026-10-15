@@ -1518,12 +1518,12 @@ fit_mod_norm <- function(mod, X_cont=NULL, X_vac=NULL, beta_ini=1, alpha_ini=0.5
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
                  eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
-                 method = "full_stoch", sim = sim_id),
+                 method = "full_stoch", sim = sim_id, ar_c = ar_fac_unvac),
       data.frame(t = timepoints, eate = ar_fac_vac / ar_fac_unvac,
                  ave = ar_fac_unvac - ar_fac_vac,
                  num = NA_real_, denom = NA_real_,
                  eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                 method = "CRR", sim = sim_id)
+                 method = "CRR", sim = sim_id, ar_c = ar_fac_unvac)
     ), fill = TRUE)
   }
 
@@ -1626,6 +1626,7 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
     # per-person absolute scale.
     eate_t <- numeric(n_t); num_t <- numeric(n_t); denom_t <- numeric(n_t)
     ave_t  <- numeric(n_t); crr_t <- numeric(n_t); crr_ave_t <- numeric(n_t)
+    ar_c_t <- numeric(n_t)
     # Spread of the EATE across stochastic realisations, at this allocation and
     # these parameters. Reported as an SD rather than stored per replicate:
     # keeping the draws themselves would be n_rep values per (allocation, t) per
@@ -1665,17 +1666,18 @@ get_stoch_eate_network <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
       ar_fac_unvac <- sum(P_fac[non_vac]) / length(non_vac)
       crr_t[it]     <- ar_fac_vac / ar_fac_unvac
       crr_ave_t[it] <- ar_fac_unvac - ar_fac_vac
+      ar_c_t[it]    <- ar_fac_unvac
     }
 
     rbindlist(list(
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
                  eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
-                 method = "full_stoch", sim = sim_id),
+                 method = "full_stoch", sim = sim_id, ar_c = ar_c_t),
       data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                 method = "CRR", sim = sim_id)
+                 method = "CRR", sim = sim_id, ar_c = ar_c_t)
     ), fill = TRUE)
   }
 
@@ -2282,11 +2284,11 @@ get_stoch_eate_linear <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
       data.frame(t = timepoints, eate = eate_t, ave = ave_t,
                  num = num_t, denom = denom_t,
                  eate_sd_rep = eate_sd_rep, ave_sd_rep = ave_sd_rep,
-                 method = "full_stoch", sim = sim_id),
+                 method = "full_stoch", sim = sim_id, ar_c = P_fac_unvac),
       data.frame(t = timepoints, eate = crr_t, ave = crr_ave_t,
                  num = NA_real_, denom = NA_real_,
                  eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                 method = "CRR", sim = sim_id)
+                 method = "CRR", sim = sim_id, ar_c = P_fac_unvac)
     ), fill = TRUE)
   }
 
@@ -2355,11 +2357,11 @@ get_stoch_eate_sir <- function(beta = 1, susceptibility = c(1, 1), f = 0.5,
         data.frame(t = timepoints, eate = num_t / denom_t,
                    ave = (denom_t - num_t) / N, num = num_t, denom = denom_t,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "full_stoch", sim = sim_id),
+                   method = "full_stoch", sim = sim_id, ar_c = fac$unvac),
         data.frame(t = timepoints, eate = fac$vac / fac$unvac,
                    ave = fac$unvac - fac$vac, num = NA_real_, denom = NA_real_,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "CRR", sim = sim_id)
+                   method = "CRR", sim = sim_id, ar_c = fac$unvac)
       ), fill = TRUE)
     }
     return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,
@@ -2595,11 +2597,11 @@ get_stoch_eate_sir_multisite <- function(beta = 1, susceptibility = c(1, 1),
         data.frame(t = timepoints, eate = num_t / denom_t,
                    ave = (denom_t - num_t) / N_tot, num = num_t, denom = denom_t,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "full_stoch", sim = sim_id),
+                   method = "full_stoch", sim = sim_id, ar_c = ar_u),
         data.frame(t = timepoints, eate = ar_v / ar_u, ave = ar_u - ar_v,
                    num = NA_real_, denom = NA_real_,
                    eate_sd_rep = NA_real_, ave_sd_rep = NA_real_,
-                   method = "CRR", sim = sim_id)
+                   method = "CRR", sim = sim_id, ar_c = ar_u)
       ), fill = TRUE)
     }
     return(rbindlist(parallel::mclapply(seq_len(n_vac), run_one,

@@ -1,5 +1,5 @@
-# Effect of vaccine allocation on measured VE for a fixed Pareto network.
-# For each pl_alpha (row) materialise one contact matrix, pre-sample
+# Effect of vaccine allocation on measured VE for a fixed Pareto network
+# (paper fig 4). For each pl_alpha materialise one contact matrix, pre-sample
 # `n_allocs` vaccine allocations, and hand them to get_stoch_eate_network
 # via its `vac_list` argument. The EATE function returns both:
 #   method == "full_stoch": frozen-field hybrid EATE per allocation
@@ -7,7 +7,10 @@
 #   method == "CRR":       cumulative-incidence ratio per allocation
 #     -> VE_CIR(t)  = 1 - eate  (i.e. 1 - (mean vac / mean unvac))
 #
-# Plot: rows = pl_alpha, columns = metric, lines coloured by allocation.
+# Plot: columns = metric; row A against t, row B against the control-arm
+# attack rate. One line per allocation, black = mean over allocations.
+# Settings match fig 3 (ve_by_alpha.R), and the graph is its first network
+# (same seed).
 
 library(dplyr)
 library(data.table)
@@ -23,15 +26,15 @@ source("utils.R")
 # Parameters
 # ---------------------------------------------------------------------------
 
-pl_alphas    <- c(1, 10)
+pl_alphas    <- c(1.5)
 N            <- 500
 mean_k       <- 6
 alpha        <- 0.5             # vaccine susceptibility
-beta         <- 1.5             # R0 = beta / gamma in homog limit
-gamma        <- 1
-init_I       <- 30
-t_horizon    <- 8
-dt           <- 0.01
+beta         <- 1.5             # R0 = beta / gamma = 7.5 in homog limit
+gamma        <- 0.2
+init_I       <- 10
+t_horizon    <- 50
+dt           <- 0.1
 timepoints   <- seq(1, t_horizon, 1)
 
 n_allocs     <- 10
@@ -49,7 +52,7 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 all_rows <- list()
 for (pa in pl_alphas) {
   message(glue("Building network pl_alpha = {pa}"))
-  set.seed(pa * 1000L)
+  set.seed(1000L * round(pa * 10) + 1L)   # = fig 3's first graph
   c_ij <- get_conact_matrix_pl(N, alpha = pa, mean_k = mean_k)
   set.seed(NULL)
 
@@ -92,22 +95,28 @@ plot_dt[, metric := factor(method,
 plot_dt[, pl_alpha_lbl := factor(paste0("Pareto exp. = ", pl_alpha),
                                  levels = paste0("Pareto exp. = ", pl_alphas))]
 
-# Mean across allocations at each (t, metric, pl_alpha) — bold line overlay.
-avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE)),
+# Mean across allocations at each (t, metric, pl_alpha) -- bold line overlay.
+avg_dt <- plot_dt[, .(VE = mean(VE, na.rm = TRUE), ar_c = mean(ar_c, na.rm = TRUE)),
                   by = .(t, metric, pl_alpha_lbl)]
 
 alloc_col <- brewer.pal(3L, "Dark2")[1]
 
-p <- ggplot(plot_dt, aes(x = t, y = VE)) +
-  geom_line(aes(group = alloc), colour = alloc_col,
-            alpha = 0.45, linewidth = 0.7) +
-  geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
-  facet_grid(pl_alpha_lbl ~ metric) +
-  theme_minimal() +
-  theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
-  labs(x = "t", y = "VE")
+alloc_panel <- function(x, xlab) {
+  ggplot(plot_dt, aes(x = .data[[x]], y = VE)) +
+    geom_line(aes(group = alloc), colour = alloc_col,
+              alpha = 0.45, linewidth = 0.7) +
+    geom_line(data = avg_dt, colour = "black", linewidth = 1.3) +
+    facet_grid(pl_alpha_lbl ~ metric) +
+    theme_minimal() +
+    theme(text = element_text(size = 20), panel.grid.minor = element_blank()) +
+    labs(x = xlab, y = "VE")
+}
+p <- cowplot::plot_grid(alloc_panel("t", "t"),
+                        alloc_panel("ar_c", "Cumulative incidence control") +
+                          coord_cartesian(xlim = c(0, 1)),
+                        ncol = 1, labels = c("A", "B"))
 
 ggsave(file.path(out_dir, "allocation_effect.png"), p, bg = "white",
-       width = 12, height = 4 * length(pl_alphas), dpi = 130)
+       width = 12, height = 8 * length(pl_alphas), dpi = 130)
 
 message(glue("Done. Outputs in {out_dir}/"))

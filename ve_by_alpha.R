@@ -5,18 +5,13 @@
 #                            (shape 1/CV^2), closed form. No transmission, so
 #                            no indirect effects: EATE = CIR.
 #   - SIR, random mixing     one homogeneously mixing population
-#   - SIR, two separate halves
-#                            two non-mixing halves of N/2, each randomly
-#                            mixing with the same R0 and alpha, seeds split
-#                            across them, cases pooled
-#                            (get_stoch_eate_sir_multisite, 2 sites, icc = 0)
 #   - Network                Pareto contact graph, exponent `pl_alpha`, one
 #                            line per graph (n_network_seeds graphs)
 #
 # The stochastic EATE functions average over vaccine allocations and n_rep
 # dust replicates per allocation.
 #
-# Extracted from network_alpha_sweep.R. ~16 jobs; the network ones take ~3 min
+# Extracted from network_alpha_sweep.R. 14 jobs; the network ones take ~3 min
 # each, so about 6 min on 8 cores. Respects SLURM_CPUS_PER_TASK.
 #
 #   Rscript ve_by_alpha.R
@@ -51,7 +46,7 @@ init_I_2g    <- c(10, 10)   # initial infected for the SIR models
 init_I_nw    <- 20
 
 n_network_seeds <- 5     # independent Pareto graphs
-n_vac_allocs    <- 10    # vaccine allocations per EATE (network, split SIR)
+n_vac_allocs    <- 10    # vaccine allocations per network EATE
 n_rep           <- 1000  # dust replicates per allocation
 
 outer_cores <- {
@@ -80,7 +75,6 @@ jobs <- list()
 for (a in alphas) {
   jobs[[length(jobs) + 1L]] <- list(model = "linear",       alpha = a)
   jobs[[length(jobs) + 1L]] <- list(model = "sir",          alpha = a)
-  jobs[[length(jobs) + 1L]] <- list(model = "sir_separate", alpha = a)
   for (ns in seq_len(n_network_seeds))
     jobs[[length(jobs) + 1L]] <- list(model = "network", alpha = a, network_seed = ns)
 }
@@ -99,12 +93,6 @@ run_job <- function(job) {
       beta = beta, susceptibility = susc, f = 0.5, N = N,
       t = t_horizon, gamma = gamma, I_ini = init_I_2g,
       n_vac = 1, n_rep = n_rep,
-      timepoints = timepoints, mc.cores = inner_cores),
-    sir_separate = get_stoch_eate_sir_multisite(
-      beta = beta, susceptibility = susc, f = 0.5, N = N,
-      t = t_horizon, gamma = gamma, I_ini = init_I_2g,
-      n_sites = 2, site_icc = 0,
-      n_vac = n_vac_allocs, n_rep = n_rep,
       timepoints = timepoints, mc.cores = inner_cores),
     network = get_stoch_eate_network(
       beta = beta, susceptibility = susc, f = 0.5, N = N,
@@ -149,7 +137,8 @@ fwrite(all_res, file.path(out_dir, "raw.csv"))
 ve_dt <- all_res[method == "full_stoch"]
 ve_dt[, VE := 1 - eate]
 ve_dt[, line_id := ifelse(model == "network", sprintf("network_n%02d", network_seed), model)]
-summary_dt <- ve_dt[, .(VE = mean(VE, na.rm = TRUE), n = .N),
+summary_dt <- ve_dt[, .(VE = mean(VE, na.rm = TRUE), ar_c = mean(ar_c, na.rm = TRUE),
+                        n = .N),
                     by = .(t, model, line_id, alpha)]
 
 # Mean-1 gamma frailty with shape k = 1/CV^2: S(t) = (1 + lambda t / k)^(-k),
@@ -158,6 +147,7 @@ k_lin <- 1 / cv2_linear
 lin_het <- CJ(t = timepoints, alpha = alphas)
 lin_het[, VE := 1 - (1 - (1 + alpha * beta_linear * t / k_lin)^(-k_lin)) /
                     (1 - (1 + beta_linear * t / k_lin)^(-k_lin))]
+lin_het[, ar_c := 1 - (1 + beta_linear * t / k_lin)^(-k_lin)]
 lin_het[, `:=`(model = "linear_het", line_id = "linear_het", n = NA_integer_)]
 summary_dt <- rbind(summary_dt, lin_het, use.names = TRUE)
 fwrite(summary_dt, file.path(out_dir, "summary.csv"))
@@ -166,21 +156,28 @@ model_labels <- c(
   linear       = "Linear",
   linear_het   = sprintf("Linear, risk CV² = %g", cv2_linear),
   sir          = "SIR, random mixing",
-  sir_separate = "SIR, two separate halves",
   network      = sprintf("Network (Pareto exp. = %g)", pl_alpha))
 summary_dt[, display := factor(model_labels[model], levels = model_labels)]
 summary_dt[, alpha_f := factor(alpha, levels = alphas, labels = paste("\u03b1 =", alphas))]
 
-p_by_alpha <- ggplot(summary_dt, aes(x = t, y = VE, colour = display, group = line_id)) +
-  geom_line(linewidth = 0.9) +
-  facet_wrap(~ alpha_f, scales = "free_y") +
-  scale_colour_brewer(NULL, palette = "Dark2") +
-  theme_minimal() +
-  theme(text = element_text(size = 20), legend.position = "bottom",
-        panel.grid.minor = element_blank()) +
-  guides(colour = guide_legend(nrow = 2, byrow = TRUE)) +
-  labs(x = "t", y = "VE")
+# A: VE against time. B: VE against the control-arm attack rate, which puts
+# models with different epidemic speeds on a common depletion scale.
+ve_panel <- function(x, xlab) {
+  ggplot(summary_dt, aes(x = .data[[x]], y = VE, colour = display, group = line_id)) +
+    geom_line(linewidth = 0.9) +
+    facet_wrap(~ alpha_f, scales = "free_y") +
+    scale_colour_brewer(NULL, palette = "Dark2") +
+    theme_minimal() +
+    theme(text = element_text(size = 20), legend.position = "bottom",
+          panel.grid.minor = element_blank()) +
+    guides(colour = guide_legend(nrow = 2, byrow = TRUE)) +
+    labs(x = xlab, y = "VE")
+}
+p_t  <- ve_panel("t", "t") + theme(legend.position = "none")
+p_ar <- ve_panel("ar_c", "Cumulative incidence control") + coord_cartesian(xlim = c(0, 1))
+p_by_alpha <- cowplot::plot_grid(p_t, p_ar, ncol = 1, labels = c("A", "B"),
+                                 rel_heights = c(1, 1.25))
 ggsave("output/ve_by_alpha.png", p_by_alpha, bg = "white",
-       width = 13, height = 8, dpi = 130)
+       width = 13, height = 13, dpi = 130)
 
 message(glue("Done. output/ve_by_alpha.png, data in {out_dir}/"))
