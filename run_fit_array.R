@@ -293,6 +293,10 @@ cov_effect_K     <- 200L   # posterior draws propagated into the coverage effect
 ve_coverages  <- c(0.25, 0.75)
 ve_coverage_K <- 30L       # posterior draws per coverage level, capped below
                            # K_post_samples
+ve_coverage_n_flip <- 100L # network flips per allocation in the sweep. Exact
+                           # (Inf, as ve_n_flip) is N/100 times slower; the
+                           # ~0.02 per-allocation flip noise averages out over
+                           # the K draws x n_vac allocations of each level.
 
 # Each spec becomes its own model. `mod` is the modulus of the residue class
 # the alpha depends on; `up` and `down` are the asserted susceptibilities in
@@ -339,6 +343,7 @@ base_common <- list(
   ve_n_vac = ve_n_vac, ve_n_rep = ve_n_rep,
   K_post_samples = K_post_samples, ve_n_rep_uncert = ve_n_rep_uncert,
   ve_coverages = ve_coverages, ve_coverage_K = ve_coverage_K,
+  ve_coverage_n_flip = ve_coverage_n_flip,
   network_engine = net_engine
 )
 
@@ -1426,6 +1431,7 @@ compute_ve_by_coverage <- function(cfg, fit, posterior_cov, samples,
   covs <- covs[is.finite(covs) & covs > 0 & covs < 1]
   if (!length(covs)) return(NULL)
   K   <- min(cfg$K_post_samples, cfg$ve_coverage_K %||% cfg$K_post_samples)
+  cfg$ve_n_flip <- cfg$ve_coverage_n_flip %||% cfg$ve_n_flip
   smp <- if (is.null(samples)) NULL
          else samples[seq_len(min(K, nrow(samples))), , drop = FALSE]
   out <- rbindlist(lapply(covs, function(f) {
