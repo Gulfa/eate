@@ -222,7 +222,7 @@ ve_hetero_n_alpha <- 10L
 # it agree with the plain network model at 50% coverage.
 #
 # COST WARNING: its EATE re-simulates the counterfactual arm (the frozen field
-# is invalid here), costing 1 + ve_n_flip runs per allocation instead of 1. It
+# is invalid here), costing 1 + ve_n_flip (= N by default) runs per allocation instead of 1. It
 # is roughly ve_n_flip times more expensive than the plain network model, so
 # keep n_networks_vf / n_allocations_vf / K_post_samples modest.
 vacfrac_power     <- 1
@@ -237,9 +237,12 @@ vacfrac_ref       <- 1     # local coverage at which the FULL effect is reached;
 # runs that happen anyway.
 ve_extra_timepoints <- c(0.5)
 ve_cf_method      <- "resim"
-ve_n_flip         <- 100   # individuals re-simulated per allocation. n_flip=10
-                           # is noise-dominated (VE swung 0.29 vs 0.48 at 100);
-                           # the event engine makes 100 cheap.
+ve_n_flip         <- Inf   # individuals re-simulated per allocation; capped at
+                           # N_cont + N_vac per config (.ve_n_flip), so Inf =
+                           # flip everyone, the exact allocation-specific EATE
+                           # (as fig 4). n_flip = 100 left a between-allocation
+                           # sampling sd of ~0.02, as large as the 1 - CIR
+                           # spread; n_flip = 10 was noise-dominated.
 n_networks_vf     <- 3     # network seeds for the vacfrac model
 n_allocations_vf  <- 3     # allocations per network seed
 pl_alphas_vf      <- c(3)  # Pareto exponents for the vacfrac model
@@ -1231,6 +1234,12 @@ compute_coverage_effect <- function(cfg, beta, alpha, d_cov = 0.10,
 }
 
 
+# Individuals flipped per allocation in the network EATEs: cfg$ve_n_flip, capped
+# at the population size (Inf means everyone -- passing Inf through would give
+# n_flip - n_fv = NaN in the samplers).
+.ve_n_flip <- function(cfg)
+  as.integer(min(cfg$ve_n_flip %||% 100, cfg$N_cont + cfg$N_vac))
+
 compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
   N_total  <- cfg$N_cont + cfg$N_vac
   # vac_frac_override re-evaluates the SAME estimand at a different coverage.
@@ -1306,7 +1315,7 @@ compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
       timepoints = tp, init_I = cfg$init_I_nw,
       mc.cores = cfg$inner_cores,
       cf_method = cfg$ve_cf_method %||% "resim",
-      n_flip = cfg$ve_n_flip %||% 100,
+      n_flip = .ve_n_flip(cfg),
       engine = cfg$network_engine %||% "events", csr = cfg$.csr),
     network_vacfrac = get_stoch_eate_network_vacfrac(
       beta = beta, alpha = alpha, f = vac_frac, N = N_total,
@@ -1314,7 +1323,7 @@ compute_ve <- function(cfg, beta, alpha, vac_frac_override = NULL) {
       vac_frac_power = cfg$vac_frac_power, vac_frac_ref = cfg$vac_frac_ref,
       vac_frac_decay = isTRUE(cfg$vac_frac_decay),
       gamma = cfg$gamma, n_vac = cfg$ve_n_vac, n_rep = cfg$ve_n_rep,
-      n_flip = cfg$ve_n_flip, timepoints = tp, init_I = cfg$init_I_nw,
+      n_flip = .ve_n_flip(cfg), timepoints = tp, init_I = cfg$init_I_nw,
       mc.cores = cfg$inner_cores,
       engine = cfg$network_engine %||% "events", csr = cfg$.csr),
     stop("Unknown model_type: ", cfg$model_type))
@@ -1579,7 +1588,7 @@ run_one_job <- function(cfg) {
     # analysis treats as frozen.
     ve_cf_method    = cfg$ve_cf_method %||% "resim",
     ve_n_flip_used  = if (identical(cfg$model_type, "network"))
-                        (cfg$ve_n_flip %||% 100L) else NA_integer_,
+                        .ve_n_flip(cfg) else NA_integer_,
     # Needed by the analysis to report the population-average alpha for
     # sir_split_effect (alpha_A = alpha, alpha_B = split_alpha_prod / alpha).
     parity_alpha_alt  = cfg$parity_alpha_alt  %||% NA_real_,
