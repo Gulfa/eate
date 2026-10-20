@@ -169,7 +169,25 @@ labels_L3_pool_nets <- function(r) {
          r$model_type)
 }
 
-order_key <- function(label) {
+# Models come in four blocks, in this order, so the ones that change what alpha
+# means are kept apart from those that do not:
+#   1. "normal": alpha is the one per-contact vaccine effect (linear, SIR and
+#      its variants, multi-site, frailty, ve_hetero, network);
+#   2. split: two-block effect modification and segregated arms;
+#   3. parity: the counterfactual arm runs at a different alpha;
+#   4. local: the effect depends on neighbourhood coverage (contact-dependent
+#      increase, then decaying).
+# The combined figure draws a light line between blocks.
+model_block <- function(label) {
+  if (label == "sir_split_effect" || grepl("^sir_segregated", label)) return(2L)
+  if (grepl("^sir_parity_", label))          return(3L)
+  if (grepl("^(netvf|netdec)_pa", label))    return(4L)
+  1L
+}
+
+order_key <- function(label) paste0(model_block(label), "|", .order_key_within(label))
+
+.order_key_within <- function(label) {
   if (label %in% c("linear", "sir", "sir_multisite", "sir_split_effect")) return(paste0("0_", label))
   if (grepl("^sir_parity_", label)) return(paste0("0_zz_", label))
   # SIR I_ini sweep: sort NUMERICALLY by the seed total, not lexically, so
@@ -1539,6 +1557,7 @@ if (nrow(ve_unc_long) > 0) {
       g4_groups <- g4_groups[order(sapply(g4_groups, order_key))]
       g4_lev    <- rev(g4_groups)
       g4_labs   <- setNames(display_name(g4_lev), g4_lev)
+      g4_breaks <- which(diff(vapply(g4_lev, model_block, integer(1))) != 0) + 0.5
 
       # Compact display names for THIS figure only: the full names
       # ("Network contact-dep. VE (Pareto exp. = 3)") are wider than the panel
@@ -1573,6 +1592,9 @@ if (nrow(ve_unc_long) > 0) {
         d <- copy(df)
         d[, group := factor(as.character(group), levels = g4_lev)]
         p <- ggplot(d, aes(y = group, x = estimate)) +
+          # Light rule between model blocks (model_block); rows sit at 1..n
+          # bottom-up, so a change between rows k and k+1 is drawn at k + 0.5.
+          geom_hline(yintercept = g4_breaks, colour = "grey70", linewidth = 0.6) +
           geom_point(size = 4) +
           geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.25, linewidth = 1) +
           # expand: a little space above the top row and below the bottom one,
