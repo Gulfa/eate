@@ -12,7 +12,7 @@
 # CIR climbs faster/slower depending on the heterogeneity mix.
 #
 # Network:
-#   - N = 50000, pa = 3, mean_k = 6
+#   - N = 200000, pa = 3, mean_k = 6
 #   - 20% vaccinated with alpha_vac = 0.5
 #   - Control = random unvaccinated subset of the same size as the vaccinated
 #   - Seed = init_I randomly chosen nodes (independent of vac)
@@ -52,7 +52,7 @@ n_t <- length(timepoints)
 # Network parameters
 # ---------------------------------------------------------------------------
 
-N_net        <- 50000
+N_net        <- 200000
 pl_alpha     <- 3
 mean_k       <- 6
 vac_frac     <- 0.20
