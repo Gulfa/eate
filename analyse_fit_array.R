@@ -1594,6 +1594,11 @@ if (nrow(ve_unc_long) > 0) {
         if (!show_y)
           p <- p + theme(axis.text.y = element_blank(),
                          axis.ticks.y = element_blank())
+        else
+          # Extra left margin: ggplot sizes the label column from the plotmath
+          # width, which can come out a little short of what is drawn (the
+          # longest label, "Network dec-VE (alpha_pl = 3)", poked past the edge).
+          p <- p + theme(plot.margin = margin(6, 14, 6, 30))
         p
       }
 
