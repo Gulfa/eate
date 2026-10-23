@@ -164,7 +164,8 @@ model_labels <- c(
 summary_dt[, display := factor(model_labels[model], levels = model_labels)]
 # Legend text; the network as plotmath, Network (alpha_pl = exponent).
 legend_labels <- c(as.list(unname(model_labels[names(model_labels) != "network"])),
-                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha) * ")"))
+                   # shown as the degree density exponent, pl_alpha + 1
+                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha + 1) * ")"))
 summary_dt[, alpha_f := factor(alpha, levels = alphas, labels = paste("\u03b1 =", alphas))]
 
 # Time is shown in units of the infectious period (gamma * t). Scaling every

@@ -1584,7 +1584,8 @@ if (nrow(ve_unc_long) > 0) {
         lapply(x, function(s) {
           m <- regmatches(s, regexec("^(Network.*)\\(pa=([0-9.]+)\\)$", s))[[1]]
           if (!length(m)) return(s)
-          bquote(.(paste0(m[2], "(\u03b1"))[pl] * " = " * .(m[3]) * ")")
+          # Shown as the degree DENSITY exponent pl_alpha + 1, as in figs 3, 4, 6.
+          bquote(.(paste0(m[2], "(\u03b1"))[pl] * " = " * .(format(as.numeric(m[3]) + 1)) * ")")
         })
       }
 
