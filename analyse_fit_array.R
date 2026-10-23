@@ -1572,7 +1572,7 @@ if (nrow(ve_unc_long) > 0) {
         x <- sub("^Network decaying VE \\(Pareto exp\\. = ([0-9.]+)\\)$",
                  "Decreasing local", x)
         x <- sub("^Network \\(Pareto exp\\. = ([0-9.]+)\\)$", "Network (pa=\\1)", x)
-        x <- sub("^SIR \\(two-block effect mod\\.\\)$", "SIR (two-block)", x)
+        x <- sub("^SIR \\(two-block effect mod\\.\\)$", "Two-block EM", x)
         x <- sub("^SIR parity \\(alt alpha = ([0-9.]+)\\)$", "SIR parity (a2=\\1)", x)
         x <- sub("^SIR parity \\(m2_hi\\)$", "Global High", x)
         x <- sub("^SIR parity \\(m2_lo\\)$", "Global Low", x)
