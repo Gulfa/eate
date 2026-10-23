@@ -1574,9 +1574,12 @@ if (nrow(ve_unc_long) > 0) {
         x <- sub("^Network \\(Pareto exp\\. = ([0-9.]+)\\)$", "Network (pa=\\1)", x)
         x <- sub("^SIR \\(two-block effect mod\\.\\)$", "Two-block EM", x)
         x <- sub("^SIR parity \\(alt alpha = ([0-9.]+)\\)$", "SIR parity (a2=\\1)", x)
-        x <- sub("^SIR parity \\(m2_hi\\)$", "Global High", x)
-        x <- sub("^SIR parity \\(m2_lo\\)$", "Global Low", x)
+        # Parity tags differ between runs (m2_hi / m2_lo here, high / low on
+        # the server), so match either spelling.
+        x <- sub("^SIR parity \\((m2_)?hi(gh)?\\)$", "Global High", x, ignore.case = TRUE)
+        x <- sub("^SIR parity \\((m2_)?lo(w)?\\)$",  "Global Low",  x, ignore.case = TRUE)
         x <- sub("^SIR parity \\(([^)]+)\\)$", "SIR parity \\1", x)
+        x <- sub("^SIR segregated arms$", "Segregated SIR", x)
         x <- sub("^SIR \\(homogeneous\\)$", "SIR", x)
         x <- sub("^SIR \\+ ", "SIR + ", x)
         x
