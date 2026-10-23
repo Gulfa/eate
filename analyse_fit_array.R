@@ -1627,7 +1627,7 @@ if (nrow(ve_unc_long) > 0) {
       # B drops its y labels: cowplot aligns the two top panels row-for-row,
       # so the labels in A serve both and alpha gets the width back.
       # ---- row 1: four forests, all on the shared model-group y axis -------
-      pA <- forest_panel(g4_ve,  glue("VE = 1 - EATE  (t = {t_star_ve})"),
+      pA <- forest_panel(g4_ve,  glue("VE(t = {t_star_ve})"),
                          "A. VE")
       pB <- forest_panel(g4_ave, glue("AVE  (t = {t_star_ve})"),
                          "B. Absolute difference", show_y = FALSE)
