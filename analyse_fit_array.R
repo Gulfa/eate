@@ -1564,13 +1564,18 @@ if (nrow(ve_unc_long) > 0) {
       # can give them and were being clipped at the left edge.
       short_name <- function(x) {
         x <- as.character(x)
+        # The local-effect network models are named by the direction of the
+        # effect (contact-dependent VE increases with local coverage, decaying
+        # VE decreases), without the exponent -- they run at one pl_alpha.
         x <- sub("^Network contact-dep\\. VE \\(Pareto exp\\. = ([0-9.]+)\\)$",
-                 "Network cd-VE (pa=\\1)", x)
+                 "Increasing local", x)
         x <- sub("^Network decaying VE \\(Pareto exp\\. = ([0-9.]+)\\)$",
-                 "Network dec-VE (pa=\\1)", x)
+                 "Decreasing local", x)
         x <- sub("^Network \\(Pareto exp\\. = ([0-9.]+)\\)$", "Network (pa=\\1)", x)
         x <- sub("^SIR \\(two-block effect mod\\.\\)$", "SIR (two-block)", x)
         x <- sub("^SIR parity \\(alt alpha = ([0-9.]+)\\)$", "SIR parity (a2=\\1)", x)
+        x <- sub("^SIR parity \\(m2_hi\\)$", "Global High", x)
+        x <- sub("^SIR parity \\(m2_lo\\)$", "Global Low", x)
         x <- sub("^SIR parity \\(([^)]+)\\)$", "SIR parity \\1", x)
         x <- sub("^SIR \\(homogeneous\\)$", "SIR", x)
         x <- sub("^SIR \\+ ", "SIR + ", x)
