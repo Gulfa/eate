@@ -115,7 +115,7 @@ realised_cv2 <- function(fr) frailty_cv2(list(z = fr$x, p = fr$p))
 # adjacency-list object from sample_pareto_adj (used with
 # run_stoch_adj_sparse and unblocks N ~ 10^5).
 get_or_build_c_ij <- function(N, pl_alpha, mean_k, seed) {
-  key  <- sprintf("c_ij_N%d_pa%s_k%d_seed%d.rds",
+  key  <- sprintf("c_ij2_N%d_pa%s_k%d_seed%d.rds",  # 2: symmetric, calibrated mean_k
                   N, format(pl_alpha, trim = TRUE), mean_k, seed)
   path <- file.path(cache_dir, key)
   if (file.exists(path)) {
@@ -132,7 +132,7 @@ get_or_build_c_ij <- function(N, pl_alpha, mean_k, seed) {
 }
 
 get_or_build_adj <- function(N, pl_alpha, mean_k, seed) {
-  key  <- sprintf("adj_N%d_pa%s_k%d_seed%d.rds",
+  key  <- sprintf("adj2_N%d_pa%s_k%d_seed%d.rds",   # 2: symmetric, calibrated mean_k
                   N, format(pl_alpha, trim = TRUE), mean_k, seed)
   path <- file.path(cache_dir, key)
   if (file.exists(path)) {

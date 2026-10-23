@@ -103,22 +103,12 @@ run_frailty <- function(lambda, alpha, sd, N=1000, t=5000, n_frailty=200){
 }
 
 
-get_conact_matrix_pl <- function(N, alpha, mean_k=6){
-
-
-  
-  propensities <- Pareto::rPareto(N, alpha=alpha, t=1)
-  propensities <- propensities / mean(propensities)
-  contacts <- matrix(0, nrow=N, ncol=N)
-  for(i in 1:N){
-      for(j in 1:N){
-        
-          contacts[i,j] <- rbinom(1, 1, min(mean_k*propensities[i]*propensities[j]/N, 1))
-      }
-  } 
-
-  return(contacts)
-}
+# The network construction lives in utils.R (symmetric, mean degree calibrated
+# to mean_k); taken from there so the two copies cannot drift apart again.
+.u <- new.env()
+sys.source("utils.R", envir = .u)
+get_conact_matrix_pl <- .u$get_conact_matrix_pl
+rm(.u)
 
 
 run_mean_field <- function(beta=1, N=100, pl_alpha=3, alpha=1, t=100,vac_frac=0.5,vac=NULL, gamma=1/3, c_ij=NULL, k_mean=6){

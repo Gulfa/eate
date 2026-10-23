@@ -58,7 +58,7 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # ---------------------------------------------------------------------------
 
 get_or_build_adj <- function(N, pl_alpha, mean_k, seed) {
-  key  <- sprintf("adj_N%d_pa%s_k%d_seed%d.rds",
+  key  <- sprintf("adj2_N%d_pa%s_k%d_seed%d.rds",   # 2: symmetric, calibrated mean_k
                   N, format(pl_alpha, trim = TRUE), mean_k, seed)
   path <- file.path(cache_dir, key)
   if (file.exists(path)) {

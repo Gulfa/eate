@@ -101,7 +101,10 @@ test_that("event engine agrees with dust on the mean at small dt", {
                vac=vac, k_mean=5, gamma=1, timepoints=tp, I_ini=2,
                n_sim=600, cores=1, seed=21)
   d <- do.call(run_stoch_network, c(args, list(engine="dust", dt=0.005)))
-  e <- do.call(run_stoch_network, c(args, list(engine="events")))
+  # dust always seeds nodes 1..I_ini; the event engine draws random index
+  # cases unless told not to. Compare like with like -- otherwise the test is
+  # about the degree of nodes 1 and 2, not about the engines.
+  e <- do.call(run_stoch_network_events, c(args, list(random_seeds=FALSE)))
   fd <- d[time == 6]; fe <- e[time == 6]
   z <- function(x, y) abs(mean(x) - mean(y)) /
     sqrt(var(x)/length(x) + var(y)/length(y))
@@ -164,7 +167,7 @@ test_that("event engine can build its own graph from adj or c_ij", {
 })
 
 test_that("adj_to_csr transposes into the transmit direction", {
-  # get_conact_matrix_pl is directed: row i lists who infects i. The event
+  # A directed contact matrix: row i lists who infects i. The event
   # simulator walks outward from an infectious node, so it needs column k.
   cm <- matrix(0L, 3, 3)
   cm[2, 1] <- 1L        # node 1 infects node 2

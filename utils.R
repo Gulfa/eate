@@ -84,15 +84,54 @@ cij_NGM <- function(c_ij, N, susceptibility, transmisibility, gamma=1/3, norm_co
 # Pareto (power-law) contact network
 # ---------------------------------------------------------------------------
 
-get_conact_matrix_pl <- function(N, alpha, mean_k=6){
-  propensities <- Pareto::rPareto(N, alpha=alpha, t=1)
-  propensities <- propensities / mean(propensities)
-  contacts <- matrix(0, nrow=N, ncol=N)
-  for(i in 1:N){
-    for(j in 1:N){
-      contacts[i,j] <- rbinom(1, 1, min(mean_k*propensities[i]*propensities[j]/N, 1))
-    }
+# Network construction, shared by get_conact_matrix_pl (dense) and
+# sample_pareto_adj (sparse):
+#   1. s_i ~ Pareto(alpha, x_min = 1), rescaled to sample mean 1;
+#   2. each UNORDERED pair {i, j}, i != j, is an edge independently with
+#      probability min(c * s_i * s_j / N, 1), mirrored -- symmetric, no
+#      self-loops;
+#   3. c is solved per draw so that the EXPECTED mean degree is exactly mean_k.
+# Without the cap c = mean_k would do; with a heavy tail (alpha = 1.5, N = 500)
+# the cap binds for the top pairs and costs ~5% of the edges (mean degree 5.7,
+# 5.1 for some draws), so c is raised to put them back. Degrees then have
+# P(D > d) ~ d^-alpha: alpha is the CCDF exponent (pdf exponent alpha + 1).
+
+# Expected mean degree sum_{i != j} min(c s_i s_j / N, 1) / N for a given c,
+# in O(N log N): for each i the partners with s_j >= N / (c s_i) are capped
+# at 1, the rest contribute c s_i s_j / N (prefix sums over sorted s).
+.pl_mean_degree <- function(c, s) {
+  N  <- length(s)
+  ss <- sort(s)
+  cs <- c(0, cumsum(ss))
+  m  <- findInterval(N / (c * s), ss, left.open = TRUE)   # # of s_j below the cap
+  tot  <- sum(c * s / N * cs[m + 1L] + (N - m))
+  self <- sum(pmin(c * s^2 / N, 1))
+  (tot - self) / N
+}
+
+# The c that gives expected mean degree mean_k for propensities s.
+.pl_edge_const <- function(s, mean_k) {
+  f  <- function(c) .pl_mean_degree(c, s) - mean_k
+  hi <- mean_k
+  while (f(hi) < 0) {
+    hi <- 2 * hi
+    if (hi > 1e6 * mean_k) stop("mean_k = ", mean_k, " is unreachable for N = ", length(s))
   }
+  if (f(hi) == 0) return(hi)
+  uniroot(f, c(mean_k / 2, hi), tol = 1e-10 * mean_k)$root
+}
+
+# Dense N x N 0/1 contact matrix (see the construction above). Symmetric, so
+# row i -- who can infect i -- is also column i, who i can infect.
+get_conact_matrix_pl <- function(N, alpha, mean_k=6){
+  s <- Pareto::rPareto(N, alpha=alpha, t=1)
+  s <- s / mean(s)
+  c <- .pl_edge_const(s, mean_k)
+  P <- pmin(c * outer(s, s) / N, 1)
+  up <- upper.tri(P)
+  contacts <- matrix(0, nrow=N, ncol=N)
+  contacts[up] <- rbinom(sum(up), 1, P[up])
+  contacts <- contacts + t(contacts)
   return(contacts)
 }
 
@@ -147,7 +186,10 @@ sample_pareto_adj <- function(N, alpha, mean_k = 6, seed = NULL,
   }
   s   <- Pareto::rPareto(N, alpha = alpha, t = 1)
   s   <- s / mean(s)
-  c_const <- mean_k / N
+  # Calibrated so the expected mean degree is mean_k under the min(., 1) cap
+  # (.pl_edge_const). That count excludes self-pairs, so it is exact for the
+  # symmetric graph; the directed variant keeps the old uncalibrated mean_k.
+  c_const <- (if (symmetric) .pl_edge_const(s, mean_k) else mean_k) / N
 
   # Sort target propensities descending so envelope is non-increasing.
   ord    <- order(s, decreasing = TRUE)
