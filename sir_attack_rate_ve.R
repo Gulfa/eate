@@ -14,7 +14,7 @@ library(ggplot2)
 
 if (!exists("run_nl")) source("det_model.R")
 
-beta  <- 5
+beta  <- 2.5   # R0 = 2.5 with gamma = 1 (was 5 on a 0.5 mixing matrix: same epidemic)
 t_max <- 20
 
 df <- rbind(run_nl(0.25, beta=beta, t=t_max, delta_t=0.1) %>% mutate(frac_vac=glue::glue("25% vaccinated")),

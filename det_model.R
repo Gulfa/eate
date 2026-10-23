@@ -568,7 +568,10 @@ plot_marg_vs_avg_4 <- function(lambda1, lambda2, alpha1, alpha2, N1, N2, t=150){
 # model's clock starts at 1, so time is shifted to start at 0 and run to t.
 run_nl <- function(frac_vac=0.5, N=1000, beta=3, alpha=0.3, t=50, delta_t=1, I_ini=c(1,1)){
   N_g <- c(N*(1-frac_vac), N*frac_vac)
-  cd <- run_det_cd(mixing_matrix=matrix(c(0.5, 0.5, 0.5, 0.5), nrow=2), beta_day=rep(beta, t+1),
+  # Random mixing with every entry 1: det_mod_cd uses lambda_i = beta *
+  # sum_j m_ij I_j / N unnormalised, so beta is the transmission rate itself
+  # (R0 = beta / gamma). The old 0.5 entries silently halved it.
+  cd <- run_det_cd(mixing_matrix=matrix(1, nrow=2, ncol=2), beta_day=rep(beta, t+1),
                    t=t+1, delta_t=delta_t, N=N_g, I_ini=I_ini,
                    susceptibility=c(1, alpha), gamma=1)$full_results
   at_risk <- N_g - I_ini
