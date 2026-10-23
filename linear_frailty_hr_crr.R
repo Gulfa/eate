@@ -184,7 +184,7 @@ print(rbindlist(gam_check), digits = 3)
 
 g3 <- ggplot(gam %>% filter(t > 0)) + geom_line(aes(x=unvac/1e3, y=CRR, group=paste(lambda, label), col=label), size=1.7) + theme_minimal() + labs(y="CIR", x="Cumulative incidence control") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2")
 g2 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=HRR, col=label), size=1.7) + theme_minimal() + labs(y="Hazard rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
-g1 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=CRR, col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence rate ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
+g1 <- ggplot(gam %>% filter(t < 150)) + geom_line(aes(x=t, y=CRR, col=label), size=1.7) + theme_minimal() + labs(y="Cumulative incidence ratio", x="Time") + theme(text=element_text(size=20)) + scale_color_brewer(expression(CV^2), palette="Dark2") + facet_grid(.~lambda, labeller=label_parsed)
 
 cowplot::plot_grid(g1, g2, g3, ncol=1, labels=c("A", "B", "C"), rel_heights=c(1,1,1))
 
