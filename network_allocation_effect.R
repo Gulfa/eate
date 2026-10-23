@@ -97,10 +97,10 @@ plot_dt[, metric := factor(method,
                            levels = c("CRR", "full_stoch"),
                            labels = c("VE = (1 \u2212 CIR)",
                                       "Allocation-specific VE"))]
-# Row strips as plotmath: Network (alpha_pl = exponent), parsed via the labeller.
+# Row strips as plotmath: Network (gamma_pl = exponent), parsed via the labeller.
 # The label shows the degree DENSITY exponent alpha + 1 (P(D = d) ~ d^-(alpha+1));
 # pl_alpha itself is the Pareto/CCDF exponent the network is sampled with.
-pl_lbl <- function(pa) sprintf('"Network (\u03b1"[pl] * " = %s)"', format(pa + 1))
+pl_lbl <- function(pa) sprintf('"Network (\u03b3"[pl] * " = %s)"', format(pa + 1))
 plot_dt[, pl_alpha_lbl := factor(pl_lbl(pl_alpha), levels = pl_lbl(pl_alphas))]
 
 # Mean across allocations at each (t, metric, pl_alpha) -- bold line overlay.

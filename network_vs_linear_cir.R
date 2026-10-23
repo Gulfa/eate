@@ -363,10 +363,10 @@ lin_levels <- lin_dt[, .SD[1], by = model][order(cv2)]$model
 model_levels <- c(as.character(lin_levels), unique(as.character(net_dt$model)))
 all_dt[, model := factor(as.character(model), levels = model_levels)]
 
-# Legend text; the network as plotmath, Network (alpha_pl = exponent).
+# Legend text; the network as plotmath, Network (gamma_pl = exponent).
 legend_labels <- c(as.list(as.character(lin_levels)),
                    # shown as the degree density exponent, pl_alpha + 1
-                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha + 1) * ")"))
+                   bquote("Network (\u03b3"[pl] * " = " * .(pl_alpha + 1) * ")"))
 
 # Linear curves in Dark2, the network in black so it stands out.
 n_lin <- length(lin_levels)

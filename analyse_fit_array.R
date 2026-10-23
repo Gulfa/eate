@@ -1582,7 +1582,7 @@ if (nrow(ve_unc_long) > 0) {
         x
       }
       # Axis / legend labels: as short_name(), but network rows as plotmath so
-      # the exponent reads "Network (alpha_pl = 3)" as in the other paper figures
+      # the exponent reads "Network (gamma_pl = 4)" as in the other paper figures
       # (plain-text alpha with a subscript; plotmath's own alpha overlaps).
       label_expr <- function(x) {
         x <- short_name(x)
@@ -1590,7 +1590,7 @@ if (nrow(ve_unc_long) > 0) {
           m <- regmatches(s, regexec("^(Network.*)\\(pa=([0-9.]+)\\)$", s))[[1]]
           if (!length(m)) return(s)
           # Shown as the degree DENSITY exponent pl_alpha + 1, as in figs 3, 4, 6.
-          bquote(.(paste0(m[2], "(\u03b1"))[pl] * " = " * .(format(as.numeric(m[3]) + 1)) * ")")
+          bquote(.(paste0(m[2], "(\u03b3"))[pl] * " = " * .(format(as.numeric(m[3]) + 1)) * ")")
         })
       }
 

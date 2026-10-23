@@ -162,10 +162,10 @@ model_labels <- c(
   sir          = "SIR, random mixing",
   network      = sprintf("Network (Pareto exp. = %g)", pl_alpha))
 summary_dt[, display := factor(model_labels[model], levels = model_labels)]
-# Legend text; the network as plotmath, Network (alpha_pl = exponent).
+# Legend text; the network as plotmath, Network (gamma_pl = exponent).
 legend_labels <- c(as.list(unname(model_labels[names(model_labels) != "network"])),
                    # shown as the degree density exponent, pl_alpha + 1
-                   bquote("Network (\u03b1"[pl] * " = " * .(pl_alpha + 1) * ")"))
+                   bquote("Network (\u03b3"[pl] * " = " * .(pl_alpha + 1) * ")"))
 summary_dt[, alpha_f := factor(alpha, levels = alphas, labels = paste("\u03b1 =", alphas))]
 
 # Time is shown in units of the infectious period (gamma * t). Scaling every
